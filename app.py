@@ -272,7 +272,12 @@ with st.spinner("Fetching live data and computing xPts..."):
     ceiling = data_pipeline.solve_ceiling(cfg, proj)
     squad_total = squad_df["xpts_horizon_sum"].sum() if not squad_df.empty else 0.0
     ceiling_total = ceiling["total_xpts"] if ceiling else 0.0
-    rating = eng.team_rating_pct(squad_total, ceiling_total, "MODEL_POISSON / heuristic-xM")
+    rating = eng.team_rating_pct(squad_total, ceiling_total,
+                                  "MECHANICAL-TIER — MODEL_POISSON CS%, xM Floor Rule only. "
+                                  "Steps 4 (full Role Multiplier table), 4a (Manager Tenure Split), "
+                                  "5 (Pre-Season Evidence) and 6 (Manager System Fit) are NOT automated here "
+                                  "(they need web research/judgment) — a chat-run review that applies those "
+                                  "by hand will read differently. Standing Rules #16/#18 disclosure.")
 
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []
@@ -299,9 +304,19 @@ with st.spinner("Fetching live data and computing xPts..."):
         cap_alt_row = alt_pool.sort_values("eo", ascending=True).iloc[0] if not alt_pool.empty else None
         cap_pick_row = cap_pick
 
-    # transfer suggestions
-    rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
-                                       ft["free_transfers"], bank, current_gw, gw_list, forced_count)
+    # transfer suggestions — isolated so a bad row here can't take down the
+    # rest of the page (pitch view, chip rack, captaincy, ledger all still
+    # render even if this section fails).
+    transfer_error = None
+    try:
+        rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
+                                           ft["free_transfers"], bank, current_gw, gw_list, forced_count)
+    except Exception as e:
+        transfer_error = str(e)
+        rec = {"moves": [], "plan": [], "profile_used": style_name,
+               "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
+               "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
+               "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
 
     # chip status + timing
     boot_chips = fpl_data.fetch_bootstrap_chips(snap.raw_boot) if snap.raw_boot else []
@@ -337,6 +352,11 @@ with col2:
 st.markdown(f'<div class="side-note">Source: {snap.source} · GW{current_gw} · '
             f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
+if rating["rating_pct"] is not None:
+    with st.expander("Team Rating % — data-source tier disclosure (Standing Rules #16/#18)"):
+        st.markdown(rating["tier"])
+        st.caption(f"Squad horizon xPts: {squad_total:.1f} · Ceiling horizon xPts: {ceiling_total:.1f} "
+                   f"(unconstrained £{cfg['squad_rules']['budget']}m, {horizon}-GW horizon)")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
 
@@ -390,6 +410,9 @@ else:
 # Transfer recommendations
 # ---------------------------------------------------------------------------
 st.markdown('<div class="section-h">Transfer Recommendations</div>', unsafe_allow_html=True)
+if transfer_error:
+    st.error(f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
+             f"is unaffected — try Run Model again, and if it repeats, this is worth reporting with that message.")
 st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
            f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
            f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")

@@ -38,17 +38,38 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
     this_gw_col = f"xpts_gw{current_gw}"
 
+    # Defensive numeric coercion — a None (rather than NaN) price/xPts value
+    # anywhere in these columns turns a pandas comparison into a TypeError
+    # ("'<=' not supported between instances of 'NoneType' and 'float'").
+    # Coercing explicitly makes any such row a clean, comparison-safe NaN
+    # instead of crashing the whole page over one bad row.
+    squad_df = squad_df.copy()
+    pool_df = pool_df.copy()
+    for df in (squad_df, pool_df):
+        for col in ("price", "xpts_horizon_sum", this_gw_col):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+    bank = 0.0 if bank is None or pd.isna(bank) else float(bank)
+
     raw = []
     for _, out_p in squad_df.iterrows():
+        if pd.isna(out_p.get("price")) or pd.isna(out_p.get("xpts_horizon_sum")):
+            continue  # can't evaluate a swap against an incomplete row — skip, don't crash
         same_pos = pool_df[(pool_df["position"] == out_p["position"]) &
-                            (pool_df["status"] == "a")]
+                            (pool_df["status"] == "a") & pool_df["price"].notna()]
         budget_cap = out_p["price"] + bank
         afford = same_pos[same_pos["price"] <= budget_cap]
         for _, in_p in afford.iterrows():
+            if pd.isna(in_p.get("xpts_horizon_sum")):
+                continue
             gain = round(in_p["xpts_horizon_sum"] - out_p["xpts_horizon_sum"], 2)
             if gain <= 0:
                 continue
-            gain_this_gw = round(in_p.get(this_gw_col, 0) - out_p.get(this_gw_col, 0), 2)
+            in_gw = in_p.get(this_gw_col, 0)
+            out_gw = out_p.get(this_gw_col, 0)
+            in_gw = 0 if pd.isna(in_gw) else in_gw
+            out_gw = 0 if pd.isna(out_gw) else out_gw
+            gain_this_gw = round(in_gw - out_gw, 2)
             raw.append({
                 "out": out_p["web_name"], "out_team": out_p["team"], "out_price": out_p["price"],
                 "in": in_p["web_name"], "in_team": in_p["team"], "in_price": in_p["price"],
