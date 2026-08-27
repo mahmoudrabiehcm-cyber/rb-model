@@ -78,6 +78,35 @@ covers what's in the repo and how to change the model later.
   upgrade it later if you add persistent storage.
 - **Wildcard timing is always a flag, never a verdict** — by design
   (Standing Rule #24), not a limitation to fix.
+- **`current_gw` vs `planning_gw`** (fixed, documented here since it's easy
+  to reintroduce). `fpl_data.py`'s `FplSnapshot` carries both: `current_gw`
+  is the last COMPLETED/locked gameweek (the official API's `is_current`
+  flag) — the only one it has an actual picks snapshot for, so it's what
+  fetches the manager's squad. `planning_gw` is the next gameweek whose
+  deadline hasn't passed (`is_next`) — what xPts, transfer suggestions,
+  captaincy, and chip advisories should all target. They're different for
+  most of the week: `is_current` stays pointed at a gameweek for a while
+  after its deadline passes (through kickoff and results processing), so a
+  naive single "current GW" reads as the gameweek that just finished, not
+  the one you can still act on. Passing `current_gw` where `planning_gw`
+  belongs makes every recommendation look like it's reasoning about a dead
+  gameweek — that was a real bug here until this fix, not just a labeling
+  issue.
+- **Team Rating % defaults to MECHANICAL-TIER** (MODEL_POISSON CS% + the xM
+  Floor Rule only). Steps 4 (full Role Multiplier table), 4a (Manager
+  Tenure Split), 5 (Pre-Season Evidence) and 6 (Manager System Fit) need
+  web research/judgment a zero-cost automated pipeline can't do on its own
+  — but they're not unreachable, they route through `manual_overrides.csv`:
+  `xm_override` carries a Step 4/4a/5-researched xM number, `cs_pct_override`
+  carries a Step 6 blended CS%, and `tenure_discount` (0.40-1.00, clamped)
+  applies Step 4a's red-flag scale directly inside `estimate_xm()`. Because
+  the file lives in the repo, not per-visitor, populating it (e.g. via a
+  periodic Claude-run research pass, pasted into GitHub's web editor and
+  committed) upgrades that player's numbers for **every** visitor to the
+  app's URL, dynamically, the next time they run their team through it —
+  not just whoever asked for the research. `tenure_discount` was loaded by
+  `load_overrides()` but silently never consumed anywhere before this fix —
+  now wired into `estimate_xm()` in `fpl_engine.py`.
 
 ## Running locally (optional — mainly for testing changes before pushing)
 

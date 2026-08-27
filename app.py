@@ -222,6 +222,13 @@ with st.sidebar:
     horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=6, value=1,
                          help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture.")
 
+    meaningful_bar_override = st.slider(
+        "Free-transfer materiality bar (xPts)", min_value=0.0, max_value=5.0,
+        value=float(cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)), step=0.25,
+        help="A free transfer only gets recommended if the best swap gains at least this many xPts "
+             "over your horizon. Raise it if the model is suggesting moves that don't feel worth it; "
+             "lower it if it's rolling too conservatively.")
+
     run_clicked = st.button("Run Model →", use_container_width=True, type="primary")
 
 # ---------------------------------------------------------------------------
@@ -244,11 +251,22 @@ with st.spinner("Fetching live data and computing xPts..."):
         st.stop()
 
     overrides = eng.load_overrides()
-    current_gw = cfg["meta"].get("current_gw_override") or snap.current_gw
-    gw_list = list(range(current_gw, current_gw + horizon))
+    # squad_gw = last COMPLETED/locked gameweek -- the only one the official
+    # API has an actual picks snapshot for (querying a not-yet-deadlined GW
+    # 404s). planning_gw = the next gameweek whose deadline hasn't passed --
+    # the one every recommendation (xPts, transfers, captaincy, chips)
+    # should target. These used to be the same variable, which meant the
+    # whole app kept planning for a gameweek that had already been played
+    # for the ~week between its deadline passing and the next one arriving.
+    # current_gw_override (model_config.yaml) applies to planning_gw, since
+    # that's the value Standing Rule #17's "auto-inference can be wrong"
+    # caveat is actually about.
+    squad_gw = snap.current_gw
+    planning_gw = cfg["meta"].get("current_gw_override") or snap.planning_gw
+    gw_list = list(range(planning_gw, planning_gw + horizon))
 
     proj = _project(snap, hist_df, overrides, cfg, gw_list)
-    picks = _picks(entry_id, current_gw)
+    picks = _picks(entry_id, squad_gw)
 
     id_to_code = proj.set_index("id")["code"].to_dict() if "id" in proj.columns else {}
     squad_codes, captain_id, bench_codes = [], None, []
@@ -273,11 +291,16 @@ with st.spinner("Fetching live data and computing xPts..."):
     squad_total = squad_df["xpts_horizon_sum"].sum() if not squad_df.empty else 0.0
     ceiling_total = ceiling["total_xpts"] if ceiling else 0.0
     rating = eng.team_rating_pct(squad_total, ceiling_total,
-                                  "MECHANICAL-TIER — MODEL_POISSON CS%, xM Floor Rule only. "
+                                  "MECHANICAL-TIER (default) — MODEL_POISSON CS%, xM Floor Rule only. "
                                   "Steps 4 (full Role Multiplier table), 4a (Manager Tenure Split), "
-                                  "5 (Pre-Season Evidence) and 6 (Manager System Fit) are NOT automated here "
-                                  "(they need web research/judgment) — a chat-run review that applies those "
-                                  "by hand will read differently. Standing Rules #16/#18 disclosure.")
+                                  "5 (Pre-Season Evidence) and 6 (Manager System Fit) need web research/"
+                                  "judgment, so this run stays at MECHANICAL-TIER unless manual_overrides.csv "
+                                  "has entries for the players involved. Those entries carry real weight once "
+                                  "present — xm_override applies Steps 4/4a/5's researched xM directly, "
+                                  "cs_pct_override applies Step 6's blended CS%, and tenure_discount applies "
+                                  "Step 4a's 0.40-1.00 scale — this is repo-wide, so every visitor to this "
+                                  "app's URL sees the upgraded numbers for any player that's been researched, "
+                                  "not just the manager who requested it. Standing Rules #16/#18 disclosure.")
 
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []
@@ -285,7 +308,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     points_total = entry.get("summary_overall_points") if entry else None
     hits_last_3 = sum(1 for r in cur_hist[-3:] if (r.get("event_transfers_cost") or 0) > 0)
 
-    verdict = recommend.chess_verdict(rank_history, hits_last_3, current_gw)
+    verdict = recommend.chess_verdict(rank_history, hits_last_3, squad_gw)
 
     # free transfers + bank
     ft = transfers.derive_free_transfers(cur_hist, history.get("chips", []) if history else [])
@@ -304,21 +327,8 @@ with st.spinner("Fetching live data and computing xPts..."):
         cap_alt_row = alt_pool.sort_values("eo", ascending=True).iloc[0] if not alt_pool.empty else None
         cap_pick_row = cap_pick
 
-    # transfer suggestions — isolated so a bad row here can't take down the
-    # rest of the page (pitch view, chip rack, captaincy, ledger all still
-    # render even if this section fails).
-    transfer_error = None
-    try:
-        rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
-                                           ft["free_transfers"], bank, current_gw, gw_list, forced_count)
-    except Exception as e:
-        transfer_error = str(e)
-        rec = {"moves": [], "plan": [], "profile_used": style_name,
-               "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
-               "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
-               "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
-
-    # chip status + timing
+    # chip status + timing — computed before transfer suggestions so the
+    # transfer plan can factor in "a chip is coming, banking may beat spending"
     boot_chips = fpl_data.fetch_bootstrap_chips(snap.raw_boot) if snap.raw_boot else []
     chips_played = history.get("chips", []) if history else []
     chip_rows = chip_protocol.chip_status(boot_chips, chips_played)
@@ -329,6 +339,37 @@ with st.spinner("Fetching live data and computing xPts..."):
     chip_notes = chip_protocol.chip_recommendations(chip_rows, dgw_bgw, squad_team_ids, max(len(squad_df), 1))
     flagged_players = squad_df[(squad_df["status"] != "a") | (squad_df["est_rescue_needed"])]
     wc_flag = chip_protocol.wildcard_flag(rank_history, len(flagged_players))
+
+    # Chip-aware transfer advisory (Standing Rule #24: only from signals
+    # already computed mechanically above — never a guess at the manager's
+    # intent). Wildcard: only fires when the objective wc_flag is already
+    # active AND a Wildcard is currently available — both real, not invented.
+    # Free Hit: only fires when chip_notes already surfaced genuine blank
+    # exposure — reuses that evidence rather than re-deriving it.
+    advisory_bits = []
+    if wc_flag and any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows):
+        advisory_bits.append("a Wildcard flag is active (see Chip Rack) and a Wildcard is available — if "
+                             "you're leaning toward playing it soon, banking this transfer costs nothing "
+                             "since the Wildcard resets your squad anyway")
+    if any("Free Hit" in n for n in chip_notes):
+        advisory_bits.append("a Free Hit has genuine exposure against a confirmed blank in your horizon "
+                             "(see Chip Rack) — weigh banking against spending here too")
+    chip_advisory = f"GW{planning_gw}: Chip context — " + "; ".join(advisory_bits) + "." if advisory_bits else None
+
+    # transfer suggestions — isolated so a bad row here can't take down the
+    # rest of the page (pitch view, chip rack, captaincy, ledger all still
+    # render even if this section fails).
+    transfer_error = None
+    try:
+        rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
+                                           ft["free_transfers"], bank, planning_gw, gw_list, forced_count,
+                                           meaningful_bar_override, set(bench_df["code"]), chip_advisory)
+    except Exception as e:
+        transfer_error = str(e)
+        rec = {"moves": [], "plan": [], "profile_used": style_name,
+               "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
+               "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
+               "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
 
 # ---------------------------------------------------------------------------
 # Header + verdict
@@ -349,7 +390,8 @@ with col2:
       <div class="stat"><div class="n">{points_total if points_total is not None else '—'}</div><div class="l">Points</div></div>
     </div>""", unsafe_allow_html=True)
 
-st.markdown(f'<div class="side-note">Source: {snap.source} · GW{current_gw} · '
+st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squad_gw} · '
+            f'planning for GW{planning_gw} · '
             f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
 if rating["rating_pct"] is not None:
@@ -382,7 +424,7 @@ for note in chip_notes:
 # ---------------------------------------------------------------------------
 # Pitch view
 # ---------------------------------------------------------------------------
-st.markdown(f'<div class="section-h">Squad · GW{current_gw}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
 if starters_df.empty:
     st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if this is a brand-new team). "
                "Transfer targets and captaincy below still use the full player pool.")
