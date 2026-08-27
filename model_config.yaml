@@ -1,0 +1,198 @@
+# =============================================================================
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v4.0")
+# =============================================================================
+# This file is the ONLY place model logic/weights should be tuned.
+# fpl_engine.py / setpiece.py / chip_protocol.py read this file at runtime and
+# never hardcode these numbers. Edit a value, commit, push -- Streamlit Cloud
+# auto-redeploys. No code change, no manual redeploy, no cost.
+# =============================================================================
+
+meta:
+  model_version: "4.0"
+  base_version: "3.3"    # Core Formula, Decay Schedule, DEFCON calibration, Data
+                          # Source Hierarchy, Standing Rules #1-22 unchanged from
+                          # v3.3 -- see FPL_Model_v4.0_Changelog.md for the deltas.
+  season: "2026-27"
+  previous_season: "2025-26"
+  fpl_id_current_season: 26073
+  manager_style: "Calculated Maverick"   # default preset -- see style_profiles.py
+  # Auto-inference of "current gameweek" from mirrored data can be wrong when
+  # the mirror lags real fixtures (Standing Rule #17 -- confirmed happens in
+  # practice, see README). Set this manually after checking the official
+  # site/app if the auto value looks off; leave null to auto-infer.
+  current_gw_override: null
+
+# -----------------------------------------------------------------------------
+# 1. Core formula position multipliers
+# xPts = xM * [2 + npxG*GoalPts + xA*3 + CS%*CSPts + P_defcon*2 + xBonus] - DiscCost
+# -----------------------------------------------------------------------------
+position_multipliers:
+  GK:
+    goal_pts: 6
+    assist_pts: 3
+    clean_sheet_pts: 4
+    defcon_threshold: 10   # CBIT actions
+  DEF:
+    goal_pts: 6
+    assist_pts: 3
+    clean_sheet_pts: 4
+    defcon_threshold: 10
+  MID:
+    goal_pts: 5
+    assist_pts: 3
+    clean_sheet_pts: 1
+    defcon_threshold: 12   # CBIRT actions
+  FWD:
+    goal_pts: 4
+    assist_pts: 3
+    clean_sheet_pts: 0
+    defcon_threshold: null   # no DEFCON pts for forwards
+
+disc_cost: 0.05   # expected value lost to cards, constant per Core Formula
+
+# -----------------------------------------------------------------------------
+# DEFCON probability — CALIBRATED curve (v2.4).
+# Interpolate linearly between DC90 buckets; clamp outside range [0, last].
+# -----------------------------------------------------------------------------
+defcon_calibration:
+  DEF:        # threshold 10 CBIT
+    - {dc90: 0,  p: 0.00}
+    - {dc90: 3,  p: 0.00}
+    - {dc90: 5,  p: 0.052}
+    - {dc90: 7,  p: 0.176}
+    - {dc90: 9,  p: 0.398}
+    - {dc90: 11, p: 0.589}
+    - {dc90: 13, p: 0.650}
+  MID_FWD:    # threshold 12 CBIRT (used for MID; FWD gets no DEFCON pts)
+    - {dc90: 0,  p: 0.000}
+    - {dc90: 3,  p: 0.000}
+    - {dc90: 5,  p: 0.007}
+    - {dc90: 7,  p: 0.057}
+    - {dc90: 9,  p: 0.176}
+    - {dc90: 11, p: 0.349}
+    - {dc90: 13, p: 0.548}
+
+# -----------------------------------------------------------------------------
+# BPS Profile Multiplier — 2026/27 BPS calculation change adjustment
+# xBonus_adjusted = xBonus_historical * multiplier
+# Tag players in manual_overrides.csv with a "bps_profile" value matching a key
+# below. Untagged players default to "default".
+# -----------------------------------------------------------------------------
+bps_profile_multiplier:
+  high_dribble_winger_or_attacking_fb: 1.06
+  high_cbi_cb_or_defensive_mid: 0.95
+  default: 1.00
+
+# -----------------------------------------------------------------------------
+# 3b. Competition-load discount. Maintain the European-competition team list
+# each season/round -- this is NOT derivable from the domestic fixtures CSV.
+# -----------------------------------------------------------------------------
+competition_load_discount:
+  champions_league: 0.97
+  europa_league: 0.95
+  conference_league: 0.95
+  domestic_only: 1.00
+
+european_competition_teams:
+  # short_name (from teams.csv) -> competition key above. Update weekly from
+  # UEFA fixture congestion (a team only takes the discount in gameweeks
+  # adjacent to a midweek European tie).
+  champions_league: []      # e.g. ["ARS", "LIV", "MCI"]
+  europa_league: []         # e.g. ["AVL"]
+  conference_league: []     # e.g. ["CRY"]
+
+# -----------------------------------------------------------------------------
+# 5. Decay Schedule -- applies to BOTH xM confidence and output-rate blend
+# (npxG/90, xA/90, DEFCON/90) per Step 3's v3.0 fix.
+# -----------------------------------------------------------------------------
+decay_schedule:
+  # gw_from, gw_to (inclusive), historical_weight, current_weight
+  - {gw_from: 1,  gw_to: 1,  historical: 1.00, current: 0.00}
+  - {gw_from: 2,  gw_to: 3,  historical: 0.85, current: 0.15}
+  - {gw_from: 4,  gw_to: 5,  historical: 0.70, current: 0.30}
+  - {gw_from: 6,  gw_to: 8,  historical: 0.45, current: 0.55}
+  - {gw_from: 9,  gw_to: 12, historical: 0.25, current: 0.75}
+  - {gw_from: 13, gw_to: 38, historical: 0.15, current: 0.85}
+
+# -----------------------------------------------------------------------------
+# CS% source hierarchy fallback order (Step 3 / §3). The engine always
+# computes tier "MODEL_POISSON" for free from official team strength ratings.
+# Paste a higher-tier number into manual_overrides.csv's cs_pct_override
+# column (sourced by Claude via WebSearch from oddschecker.com /
+# soccerstats.com) to promote a specific fixture to VERIFIED / tier-2/3.
+# -----------------------------------------------------------------------------
+cs_source_hierarchy:
+  - {tier: 2, name: "oddschecker.com match-winner odds -> Poisson CS%", mode: "manual_paste"}
+  - {tier: 3, name: "soccerstats.com clean-sheet data",                  mode: "manual_paste"}
+  - {tier: 5, name: "MODEL_POISSON (FPL team strength ratings)",         mode: "automatic"}
+
+# -----------------------------------------------------------------------------
+# xM estimation heuristic thresholds (proxy for Step 4's Role Multiplier /
+# xM Floor Rule until a human/Claude overrides via manual_overrides.csv)
+# -----------------------------------------------------------------------------
+data_quality:
+  # Standing Rule #21 / Step 2b — a per-90 rate built on a tiny sample must
+  # be discarded, never used as-is (the "Dasilva bug": a 2-minute cameo
+  # annualized into a fabricated npxG/90 of 3.6). Any historical or
+  # current-season leg with fewer minutes than this is zeroed out and
+  # flagged `est_rescue_needed` instead of feeding the formula raw.
+  # External Data Rescue (Step 2b) = populate manual_overrides.csv for that
+  # player's code once a real external rate (Understat/FBref/etc.) is found.
+  min_sample_minutes: 270   # ~3 full matches
+
+xm_heuristic:
+  confirmed_current_season_start_floor: 0.88   # Step 4 "xM Floor Rule"
+  max_xm: 0.95
+  unavailable_statuses: ["i", "u", "s", "n"]    # injured/unavailable/suspended/not-in-squad
+  doubtful_status_multiplier_applies: true      # scale by chance_of_playing_next_round
+
+# -----------------------------------------------------------------------------
+# Step 7a — Transfer Path Optimization
+# -----------------------------------------------------------------------------
+transfer:
+  horizon_gameweeks: 4          # Horizon N = 3-4 GWs per Step 7a
+  hit_cost_per_transfer: 4
+  hit_justification_threshold: 6.0   # Standing Rule #13
+
+# -----------------------------------------------------------------------------
+# Step 8 — Captaincy Protocol
+# -----------------------------------------------------------------------------
+captaincy:
+  shortlist_xpts_window: 1.0    # within ~1.0 xPts of top = "statistically tied"
+  eo_tiers:
+    contrarian_max: 40
+    mixed_max: 70
+    # >70 = rank-neutral
+
+# -----------------------------------------------------------------------------
+# Squad optimizer constraints (Step 7)
+# -----------------------------------------------------------------------------
+squad_rules:
+  budget: 100.0
+  squad_size: 15
+  formation: {GK: 2, DEF: 5, MID: 5, FWD: 3}
+  max_per_club: 3
+  bench_value_rule: true   # P(autosub) x points, not full xPts, for bench slots
+
+# -----------------------------------------------------------------------------
+# Step 3c — Set-Piece Role Signal (v4.0, new). See setpiece.py for the
+# decay-out mechanism. Tagged EST until real 2026/27 conversion data exists
+# to replace these ranges with an observed rate (same standard as the BPS
+# Profile Multiplier above).
+# -----------------------------------------------------------------------------
+setpiece_signal:
+  enabled: true
+  penalty_multiplier_max: 1.15     # range per v4.0 doc: 1.10-1.20, midpoint default
+  dead_ball_multiplier_max: 1.075  # range per v4.0 doc: 1.05-1.10, midpoint default
+
+# -----------------------------------------------------------------------------
+# Step 9 — Chip Timing Protocol (v4.0, new). Thresholds for surfacing a
+# Bench Boost / Triple Captain / Free Hit note against a confirmed DGW/BGW —
+# see chip_protocol.py. Wildcard timing has no threshold here by design: it
+# is always a flag (Standing Rule #24), never a mechanical trigger.
+# -----------------------------------------------------------------------------
+chip_timing:
+  bench_boost_min_double_exposure_frac: 0.25   # >= this fraction of your 15 in a double
+  free_hit_min_blank_exposure_frac: 0.35        # >= this fraction of your 15 in a blank
+  wildcard_flag_rank_decline_gws: 2             # consecutive worsening GWs to flag
+  wildcard_flag_min_flagged_players: 3          # squad players with a status/data flag
