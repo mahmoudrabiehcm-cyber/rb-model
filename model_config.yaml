@@ -150,9 +150,19 @@ xm_heuristic:
 # Step 7a — Transfer Path Optimization
 # -----------------------------------------------------------------------------
 transfer:
-  horizon_gameweeks: 4          # Horizon N = 3-4 GWs per Step 7a
+  horizon_gameweeks: 4          # Horizon N = 3-4 GWs per Step 7a (RB Model's UI defaults its
+                                 # slider to 1 GW instead -- see app.py -- this value still
+                                 # governs the CLI tool and anything else that reads config directly)
   hit_cost_per_transfer: 4
   hit_justification_threshold: 6.0   # Standing Rule #13
+  # Free-Transfer Materiality Rule (v4.0 addition, not yet in the changelog doc --
+  # flag this to the manager before treating it as settled model methodology).
+  # A free transfer has a real opportunity cost (banked flexibility, squad
+  # stability) even though it costs 0 points, so it should clear the same kind
+  # of bar a paid transfer does -- just a lower one. Below this horizon-xPts
+  # gain, the model recommends "Roll" instead of spending a free transfer on
+  # a marginal upgrade.
+  minimum_meaningful_gain_free: 1.5
 
 # -----------------------------------------------------------------------------
 # Step 8 — Captaincy Protocol

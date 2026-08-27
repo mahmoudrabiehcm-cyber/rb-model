@@ -55,6 +55,15 @@ covers what's in the repo and how to change the model later.
   constrained MILP solver (`optimizer.py`) — that's the "what's the
   theoretical best squad for this budget" number, just not turned into a
   turn-by-turn multi-transfer path yet.
+- **Player photos hotlink the official `resources.premierleague.com` CDN
+  directly** — the same images the official site itself uses. For a player
+  who transferred clubs very recently, that CDN photo can still show the
+  old kit for a while until the Premier League's own media team refreshes
+  it; the club-color card stripe is still correct immediately (it's read
+  live from `team_id`, unrelated to the photo), only the headshot can lag.
+  Nothing in this app can force that update — check the same player's
+  photo on the official FPL site itself as a quick way to confirm it's an
+  upstream CDN lag and not something specific to this app.
 - **Live news beyond the official API's own `news`/`chance_of_playing_next_round`
   fields** (press-conference quotes, journalist reports) is not something
   this deployed app does — that needs an LLM actively searching the web,

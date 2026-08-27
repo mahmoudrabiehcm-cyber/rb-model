@@ -62,7 +62,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .stat .l{ font-size:10.5px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
 .trend-up{ color:var(--accent); } .trend-down{ color:var(--warn); }
 
-h2.section{ font-family:"Fraunces"; font-weight:700; font-size:1.15rem; margin:30px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule); }
+.section-h{ font-family:"Fraunces"; font-weight:700; font-size:1.15rem; margin:30px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule); }
 
 .chip-rack{ display:flex; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
 .chip{ display:flex; align-items:center; gap:7px; background:var(--surface); border:1px solid var(--rule);
@@ -219,8 +219,8 @@ with st.sidebar:
     if hit_stance == "Force":
         forced_count = st.number_input("Transfers to force", min_value=1, max_value=5, value=2, step=1)
 
-    horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=6,
-                         value=cfg["transfer"]["horizon_gameweeks"])
+    horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=6, value=1,
+                         help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture.")
 
     run_clicked = st.button("Run Model →", use_container_width=True, type="primary")
 
@@ -301,7 +301,7 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     # transfer suggestions
     rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
-                                       ft["free_transfers"], bank, forced_count)
+                                       ft["free_transfers"], bank, current_gw, gw_list, forced_count)
 
     # chip status + timing
     boot_chips = fpl_data.fetch_bootstrap_chips(snap.raw_boot) if snap.raw_boot else []
@@ -343,7 +343,7 @@ if snap.stale_warning:
 # ---------------------------------------------------------------------------
 # Chip rack
 # ---------------------------------------------------------------------------
-st.markdown('<h2 class="section">Chip Rack</h2>', unsafe_allow_html=True)
+st.markdown('<div class="section-h">Chip Rack</div>', unsafe_allow_html=True)
 flagged_chip_names = set()
 if wc_flag:
     flagged_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available" and r["chip"].startswith("Wildcard")}
@@ -362,7 +362,7 @@ for note in chip_notes:
 # ---------------------------------------------------------------------------
 # Pitch view
 # ---------------------------------------------------------------------------
-st.markdown(f'<h2 class="section">Squad · GW{current_gw}</h2>', unsafe_allow_html=True)
+st.markdown(f'<div class="section-h">Squad · GW{current_gw}</div>', unsafe_allow_html=True)
 if starters_df.empty:
     st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if this is a brand-new team). "
                "Transfer targets and captaincy below still use the full player pool.")
@@ -389,24 +389,32 @@ else:
 # ---------------------------------------------------------------------------
 # Transfer recommendations
 # ---------------------------------------------------------------------------
-st.markdown('<h2 class="section">Transfer Recommendations</h2>', unsafe_allow_html=True)
-st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** "
-           f"· free transfers available: **{ft['free_transfers']}** (bank £{bank}m)")
+st.markdown('<div class="section-h">Transfer Recommendations</div>', unsafe_allow_html=True)
+st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
+           f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
+           f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
 with st.expander("How the free-transfer count was derived"):
     for line in ft["trace"]:
         st.markdown(f"- {line}")
 
-if rec["moves"]:
-    moves_df = pd.DataFrame(rec["moves"])
-    show_cols = [c for c in ["out", "in", "position", "xpts_gain", "in_eo", "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
-    st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
+st.markdown("**Plan**")
+if rec["plan"]:
+    for line in rec["plan"]:
+        st.markdown(f"- {line}")
 else:
-    st.info("No upgrades clear the bar this run — your current squad already fits the model's top picks within budget for this horizon.")
+    st.info("No squad/pool data to plan against this run.")
+
+if rec["moves"]:
+    with st.expander("Move-by-move detail"):
+        moves_df = pd.DataFrame(rec["moves"])
+        show_cols = [c for c in ["out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
+                                  "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
+        st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # Captaincy
 # ---------------------------------------------------------------------------
-st.markdown('<h2 class="section">Captaincy Pick</h2>', unsafe_allow_html=True)
+st.markdown('<div class="section-h">Captaincy Pick</div>', unsafe_allow_html=True)
 if cap_pick_row is not None:
     c1, c2 = st.columns(2)
     with c1:
@@ -424,7 +432,7 @@ else:
 # ---------------------------------------------------------------------------
 # Season ledger
 # ---------------------------------------------------------------------------
-st.markdown('<h2 class="section">Season Ledger</h2>', unsafe_allow_html=True)
+st.markdown('<div class="section-h">Season Ledger</div>', unsafe_allow_html=True)
 if cur_hist:
     chip_by_event = {c.get("event"): c.get("name") for c in chips_played}
     ledger_rows = []
@@ -443,7 +451,7 @@ else:
 # ---------------------------------------------------------------------------
 # Manager style fit
 # ---------------------------------------------------------------------------
-st.markdown('<h2 class="section">Manager Style Fit</h2>', unsafe_allow_html=True)
+st.markdown('<div class="section-h">Manager Style Fit</div>', unsafe_allow_html=True)
 st.markdown(f"**{style_name}** — {style_profiles.get_profile(style_name)['description']} "
             f"Ownership is never a reason on its own to prefer a pick — the EO weighting above only breaks ties "
             f"once xPts is already close, and any differential still has to clear the pool-average floor on merit.")
