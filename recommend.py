@@ -25,17 +25,37 @@ import style_profiles
 def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        profile_name: str, hit_stance: str, free_transfers: int,
                        bank: float, current_gw: int, gw_list: list[int],
-                       forced_count: int | None = None) -> dict:
+                       forced_count: int | None = None,
+                       meaningful_bar: float | None = None,
+                       bench_codes: set | None = None,
+                       chip_advisory: str | None = None) -> dict:
     """Free transfers are never auto-spent just because they're banked
     (Free-Transfer Materiality Rule, model_config.yaml `transfer.
     minimum_meaningful_gain_free`): a move has to clear that horizon-xPts
     bar in "No hits" / "Hit if worth it" mode or the model recommends
     Roll instead. "Force" bypasses the bar on purpose — that mode exists
-    for the manager to override the model, not the other way round."""
+    for the manager to override the model, not the other way round.
+
+    Bench Value Rule (Standing Rule #12): pass `bench_codes` (the set of
+    player codes currently sitting on the bench) and a swap whose OUT
+    player is one of them gets its xPts gain discounted by
+    `transfer.bench_autosub_discount` before the materiality check — a
+    big raw gain on a player who mostly doesn't play barely moves your
+    actual score, so it shouldn't clear the same bar a starter swap does.
+
+    `chip_advisory`: an optional pre-built sentence (the caller already
+    has chip status/DGW data) appended to the plan as-is — this function
+    stays agnostic of chip internals, it just surfaces what it's given.
+
+    Pass `meaningful_bar` to override the config default from the UI;
+    leave it None to use model_config.yaml's value."""
     profile = style_profiles.get_profile(profile_name)
     hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
     threshold = profile["hit_cost_threshold"]
-    meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
+    if meaningful_bar is None:
+        meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
+    bench_discount = cfg["transfer"].get("bench_autosub_discount", 0.2)
+    bench_codes = bench_codes or set()
     this_gw_col = f"xpts_gw{current_gw}"
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
@@ -55,6 +75,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     for _, out_p in squad_df.iterrows():
         if pd.isna(out_p.get("price")) or pd.isna(out_p.get("xpts_horizon_sum")):
             continue  # can't evaluate a swap against an incomplete row — skip, don't crash
+        is_bench_out = out_p.get("code") in bench_codes
         same_pos = pool_df[(pool_df["position"] == out_p["position"]) &
                             (pool_df["status"] == "a") & pool_df["price"].notna()]
         budget_cap = out_p["price"] + bank
@@ -65,6 +86,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             gain = round(in_p["xpts_horizon_sum"] - out_p["xpts_horizon_sum"], 2)
             if gain <= 0:
                 continue
+            effective_gain = round(gain * bench_discount, 2) if is_bench_out else gain
             in_gw = in_p.get(this_gw_col, 0)
             out_gw = out_p.get(this_gw_col, 0)
             in_gw = 0 if pd.isna(in_gw) else in_gw
@@ -73,17 +95,21 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             raw.append({
                 "out": out_p["web_name"], "out_team": out_p["team"], "out_price": out_p["price"],
                 "in": in_p["web_name"], "in_team": in_p["team"], "in_price": in_p["price"],
-                "position": out_p["position"], "xpts_gain": gain, "xpts_gain_this_gw": gain_this_gw,
+                "position": out_p["position"], "xpts_gain": gain, "effective_gain": effective_gain,
+                "xpts_gain_this_gw": gain_this_gw, "is_bench_out": is_bench_out,
                 "in_eo": in_p.get("selected_by_percent"),
                 "setpiece_flag": bool(in_p.get("setpiece_flag", False)),
             })
 
     cols = ["out", "out_team", "out_price", "in", "in_team", "in_price",
-            "position", "xpts_gain", "xpts_gain_this_gw", "in_eo", "setpiece_flag"]
+            "position", "xpts_gain", "effective_gain", "xpts_gain_this_gw", "is_bench_out",
+            "in_eo", "setpiece_flag"]
     ranked = pd.DataFrame(raw, columns=cols)
     if not ranked.empty:
-        # one suggestion per OUT player at most (best replacement for that slot)
-        ranked = ranked.sort_values("xpts_gain", ascending=False).drop_duplicates(subset=["out"], keep="first")
+        # one suggestion per OUT player at most (best replacement for that slot),
+        # ranked by effective (bench-discounted) gain — a bench-only upgrade
+        # shouldn't outrank a smaller but real starter upgrade.
+        ranked = ranked.sort_values("effective_gain", ascending=False).drop_duplicates(subset=["out"], keep="first")
 
     plan = []
     horizon_n = len(gw_list)
@@ -101,26 +127,35 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                      f"check `justified` per row before locking these in.")
 
     else:
-        meets_bar = ranked[ranked["xpts_gain"] >= meaningful_bar] if not ranked.empty else ranked
+        # Gate on effective (bench-discounted) gain, not raw — a bench-only
+        # upgrade has to clear the bar on its real, autosub-weighted value.
+        meets_bar = ranked[ranked["effective_gain"] >= meaningful_bar] if not ranked.empty else ranked
         free_moves = meets_bar.head(free_transfers).to_dict("records")
         moves = [{**r, "hit_cost": 0, "justified": True, "paid": False} for r in free_moves]
         used_free = len(free_moves)
         rolled = free_transfers - used_free
 
         for r in free_moves:
+            bench_note = (f" (bench swap — {r['xpts_gain']} raw discounted to {r['effective_gain']} "
+                          f"at {int(bench_discount*100)}% autosub weighting, still clears the bar)"
+                          if r["is_bench_out"] else "")
             plan.append(f"GW{current_gw}: {r['out']} → {r['in']} — "
-                        f"+{r['xpts_gain_this_gw']} xPts this GW, +{r['xpts_gain']} over {horizon_n} GW(s). "
-                        f"Clears the {meaningful_bar} xPts bar — worth the free transfer.")
+                        f"+{r['xpts_gain_this_gw']} xPts this GW, +{r['xpts_gain']} over {horizon_n} GW(s)"
+                        f"{bench_note}. Clears the {meaningful_bar} xPts bar — worth the free transfer.")
 
         if rolled > 0:
             taken_out_names = {r["out"] for r in free_moves}
             rejected = ranked[~ranked["out"].isin(taken_out_names)] if not ranked.empty else ranked
             best_rejected = rejected.iloc[0].to_dict() if not rejected.empty else None
             if best_rejected:
+                bench_note = (f" — it's a bench-only upgrade ({best_rejected['xpts_gain']} raw, only "
+                              f"{best_rejected['effective_gain']} once autosub-weighted since that player "
+                              f"isn't in your starting XI)" if best_rejected["is_bench_out"] else "")
                 plan.append(f"GW{current_gw}: Roll {rolled} free transfer(s) — best remaining option "
                             f"({best_rejected['out']} → {best_rejected['in']}) only gains "
-                            f"+{best_rejected['xpts_gain']} over {horizon_n} GW(s), below the "
-                            f"{meaningful_bar} xPts bar. Bank it (up to 5) for a move that actually clears it.")
+                            f"+{best_rejected['effective_gain']} (effective) over {horizon_n} GW(s), below the "
+                            f"{meaningful_bar} xPts bar{bench_note}. Bank it (up to 5) for a move that "
+                            f"actually clears it.")
             else:
                 plan.append(f"GW{current_gw}: Roll {rolled} free transfer(s) — no upgrade found in the pool "
                             f"this run. Reassess next gameweek once prices/fixtures move.")
@@ -130,7 +165,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             extra_pool = ranked[~ranked["out"].isin(excluded)].iloc[:2] if not ranked.empty else ranked
             for r in extra_pool.to_dict("records"):
                 hit_cost = hit_cost_per
-                net_gain = r["xpts_gain"] - hit_cost
+                net_gain = r["effective_gain"] - hit_cost
                 if net_gain >= threshold:
                     moves.append({**r, "hit_cost": hit_cost, "net_gain": round(net_gain, 2),
                                   "justified": True, "paid": True})
@@ -138,12 +173,16 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                 f"+{round(net_gain,2)} xPts after the {hit_cost}-pt hit, clears the "
                                 f"{profile_name} profile's {threshold} xPts hit-cost threshold.")
 
+    if chip_advisory:
+        plan.append(chip_advisory)
+
     return {
         "moves": moves,
         "plan": plan,
         "profile_used": profile_name,
         "hit_cost_threshold": threshold,
         "minimum_meaningful_gain_free": meaningful_bar,
+        "bench_autosub_discount": bench_discount,
         "hit_stance": hit_stance,
         "free_transfers": free_transfers,
     }

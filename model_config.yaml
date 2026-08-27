@@ -163,6 +163,20 @@ transfer:
   # gain, the model recommends "Roll" instead of spending a free transfer on
   # a marginal upgrade.
   minimum_meaningful_gain_free: 1.5
+  # Bench Value Rule applied to the materiality check (Standing Rule #12, same
+  # rule the doc's own "worked failure" example calls out for never actually
+  # being wired into a solver's scoring). A swap whose OUT player is currently
+  # a bench slot is discounted toward its real, autosub-weighted value before
+  # comparing to the bar above -- a big raw xPts gap on a player who mostly
+  # doesn't play barely moves your actual score. This is a flat approximation
+  # of P(autosub), not a true per-gameweek autosub-probability model (that
+  # would need to know the rest of the bench's own xM too) -- disclosed
+  # simplification, not the full rule.
+  bench_autosub_discount: 0.2
+  # How many gameweeks ahead to look when checking whether a Wildcard/Free
+  # Hit is coming up soon enough that banking a transfer for it beats
+  # spending it on an incremental swap now.
+  chip_lookahead_gameweeks: 3
 
 # -----------------------------------------------------------------------------
 # Step 8 — Captaincy Protocol

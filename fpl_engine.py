@@ -125,6 +125,20 @@ def estimate_xm(row: pd.Series, cfg: dict, override: Optional[float]) -> float:
         if cop is not None and not pd.isna(cop):
             base *= float(cop) / 100.0
 
+    # Step 4a -- Manager Tenure Split Check. `tenure_discount` (0.40-1.00,
+    # scaled by red-flag count per the v3.3 doc) is a judgment call -- a
+    # researched read on whether this player's minutes are safe under the
+    # current manager -- so it can only ever arrive by hand via
+    # manual_overrides.csv, the same mechanism as xm_override/cs_pct_override.
+    # NOTE: this column was previously loaded by load_overrides() and merged
+    # into every player row, but never actually multiplied into xM anywhere
+    # -- a dead column. Fixed here. Clamped to the documented 0.40-1.00 range
+    # so a stray typo in the CSV can't zero out or inflate a player's xM.
+    tenure_discount = row.get("tenure_discount", None)
+    if tenure_discount is not None and not pd.isna(tenure_discount):
+        td = max(0.40, min(1.00, float(tenure_discount)))
+        base *= td
+
     return min(heur["max_xm"], base)
 
 
