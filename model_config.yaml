@@ -164,7 +164,12 @@ transfer:
   # of bar a paid transfer does -- just a lower one. Below this horizon-xPts
   # gain, the model recommends "Roll" instead of spending a free transfer on
   # a marginal upgrade.
-  minimum_meaningful_gain_free: 1.5
+  # Raised 1.5 -> 2.0 (manager-directed, Patch 7): brings this bar in line
+  # with Standing Rule #34's own margin-of-error floor (2.0 xPts) instead of
+  # sitting below it -- a materiality bar lower than the model's own noise
+  # floor could otherwise "pass" a gain that Rule #34 was always going to
+  # roll back anyway, which is exactly the confusion a 1.5 bar produced.
+  minimum_meaningful_gain_free: 2.0
   # Bench Value Rule applied to the materiality check (Standing Rule #12, same
   # rule the doc's own "worked failure" example calls out for never actually
   # being wired into a solver's scoring). A swap whose OUT player is currently

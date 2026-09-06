@@ -194,7 +194,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
     threshold = profile["hit_cost_threshold"]
     if meaningful_bar is None:
-        meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
+        meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 2.0)
     bench_discount = cfg["transfer"].get("bench_autosub_discount", 0.2)  # kept for return-dict compatibility only
     this_gw_col = f"xpts_gw{current_gw}"
     horizon_n = len(gw_list)
@@ -203,6 +203,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": profile_name,
         "hit_cost_threshold": threshold, "minimum_meaningful_gain_free": meaningful_bar,
         "bench_autosub_discount": bench_discount, "hit_stance": hit_stance, "free_transfers": free_transfers,
+        "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
     }
 
     if squad_df is None or squad_df.empty or "code" not in squad_df.columns:
@@ -389,6 +390,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "bench_autosub_discount": bench_discount,
         "hit_stance": hit_stance,
         "free_transfers": free_transfers,
+        "margin_of_error": moe,
     }
 
 
@@ -420,7 +422,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     profile = style_profiles.get_profile(profile_name)
     hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
     threshold = profile["hit_cost_threshold"]
-    meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
+    meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 2.0)
     this_gw_col = f"xpts_gw{current_gw}"
     horizon_n = len(gw_list)
 
@@ -453,10 +455,70 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
     moe = eng.margin_of_error_threshold(old_total, cfg)
 
-    k_max = 5 if hit_stance != "No hits" else free_transfers
-    k_max = max(1, k_max)
+    # Diagnostic (Patch 8): reasons a straight 1-for-1 in the target's own
+    # position might not be legal — computed directly rather than inferred
+    # from a solver failure, so a "why wasn't this a clean swap" question
+    # has a concrete, checkable answer instead of a black-box "no legal
+    # way." Reported regardless of outcome when the target's own row looks
+    # incomplete (Standing Rule #4 — show the inputs, never silently
+    # estimate), and appended to the summary whenever the eventual result
+    # needs more than 1 transfer, so the manager can see exactly which
+    # check the clean swap actually failed.
+    diagnostic = []
+    target_row = full_pool[full_pool["code"] == target_code].iloc[0]
+    target_price = target_row.get("price")
+    target_pos = target_row.get("position")
+    target_team = target_row.get("team")
+    for col_name, val in [("price", target_price), ("position", target_pos),
+                           ("xpts_horizon_sum", target_row.get("xpts_horizon_sum")),
+                           (this_gw_col, target_row.get(this_gw_col) if this_gw_col in full_pool.columns else None)]:
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            diagnostic.append(f"Data gap: this player's `{col_name}` is missing for this run — the solver silently "
+                               f"drops any row missing price/position/projection, which can make a completely "
+                               f"legal-looking swap fail to appear at any transfer count. Worth checking the raw "
+                               f"projection for this player before trusting a 'no legal way' result.")
+    if not diagnostic and pd.notna(target_price) and pd.notna(target_pos):
+        same_pos = squad_df[squad_df["position"] == target_pos].copy()
+        if not same_pos.empty:
+            same_pos = same_pos.sort_values("price")
+            cheapest_out = same_pos.iloc[0]
+            gap = round(float(target_price) - float(cheapest_out["price"]), 1)
+            budget_ok = gap <= bank + 1e-9
+            new_team_counts = squad_df[squad_df["code"] != cheapest_out["code"]]["team"].value_counts()
+            new_target_team_count = int(new_team_counts.get(target_team, 0)) + 1
+            club_ok = new_target_team_count <= cfg["squad_rules"]["max_per_club"]
+            if not budget_ok:
+                diagnostic.append(f"Budget check: selling your cheapest {target_pos} ({cheapest_out['web_name']}, "
+                                   f"£{cheapest_out['price']}m) for this player (£{target_price}m) needs "
+                                   f"£{gap}m more than your £{bank}m bank covers — that's the real constraint on "
+                                   f"a clean 1-for-1, not a bug.")
+            elif not club_ok:
+                diagnostic.append(f"Club-limit check: adding this player would put you at {new_target_team_count} "
+                                   f"{target_team} players, over the {cfg['squad_rules']['max_per_club']}-per-club "
+                                   f"cap — that's why a clean 1-for-1 isn't legal here.")
+            else:
+                diagnostic.append(f"Budget and club-limit checks both pass for a straight swap of "
+                                   f"{cheapest_out['web_name']} ({cheapest_out['position']}, £{cheapest_out['price']}m) "
+                                   f"for this player (£{target_price}m, gap £{gap}m vs your £{bank}m bank) — if the "
+                                   f"model still needed more than 1 transfer, that points to something else (a data "
+                                   f"gap on one of the two players' projections, or the solver preferring a "
+                                   f"different, higher-xPts combination at the same transfer count) rather than a "
+                                   f"genuine legality problem with this specific swap.")
+
+    # Always search the full 1-5 transfer range here, regardless of hit
+    # stance (fixing a real bug: capping this at `free_transfers` under "No
+    # hits" meant a target requiring 2 legal swaps was reported as "no legal
+    # way" when a real, findable fit needed one more transfer than was ever
+    # attempted). Possible reasons a clean 1-for-1 isn't found are checked
+    # directly above (`diagnostic`) rather than guessed at here — budget,
+    # club-limit, or a data gap on one of the two players, not assumed to be
+    # any one of those by default. This is a what-if tool: the manager named
+    # a specific target on purpose, so it should always show what it would
+    # actually take, hit or no hit, and let the manager judge — same
+    # principle as "Force" mode existing to let the manager override the
+    # model's own default caution.
     candidates = {}
-    for k in range(1, k_max + 1):
+    for k in range(1, 6):
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
                                   min_retain=min_retain, must_include_codes=[target_code],
@@ -475,8 +537,9 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
                                      "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k}
 
     if not candidates:
-        return {**empty, "summary": ["No legal way to fit that player into your squad within budget/transfer "
-                                      "limits this run — try a higher hit stance or check the budget."]}
+        fallback = [f"Tried 1 through 5 transfers and found no legal, budget-fitting way to add this player — "
+                    f"your total team value this run is £{team_value}m."]
+        return {**empty, "summary": diagnostic + fallback}
 
     # Cheapest legal way in that also maximizes net gain: same fewest-
     # transfers-within-margin-of-error tie-break as suggest_transfers().
@@ -495,6 +558,15 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
                      f"doesn't clear the {bar} xPts bar this move needs — not worth it as evaluated")
     summary = [f"Your scenario — {move_bits}{hit_note}: net {chosen['net_gain']:+.1f} xPts over "
                f"{horizon_n} GW(s), {verdict_note}."]
+    if chosen["actual_k"] > 1:
+        # Say WHY more than one swap was needed using the diagnostic actually
+        # computed above (budget/club-limit/data-gap), never a generic guess
+        # — a prior version of this message asserted a formation-shape cause
+        # by default, which turned out to be wrong for a same-position
+        # MID-for-MID swap in a real case; that guess is retired in favor of
+        # the concrete checks above.
+        summary.append(f"Needed {chosen['actual_k']} linked swaps, not a single 1-for-1:")
+        summary.extend(diagnostic)
     if default_net_gain is not None:
         diff = round(chosen["net_gain"] - default_net_gain, 2)
         if abs(diff) < moe:

@@ -357,7 +357,7 @@ with st.sidebar:
 
     meaningful_bar_override = st.slider(
         "Free-transfer materiality bar (xPts)", min_value=0.0, max_value=5.0,
-        value=float(cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)), step=0.25,
+        value=float(cfg["transfer"].get("minimum_meaningful_gain_free", 2.0)), step=0.25,
         help="A free transfer only gets recommended if the best swap gains at least this many xPts "
              "over your horizon. Raise it if the model is suggesting moves that don't feel worth it; "
              "lower it if it's rolling too conservatively.")
@@ -611,7 +611,8 @@ with st.spinner("Fetching live data and computing xPts..."):
         transfer_error = str(e)
         rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,
                "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
-               "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
+               "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 2.0),
+               "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
                "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
 
 # ---------------------------------------------------------------------------
@@ -789,9 +790,15 @@ if rec.get("summary"):
 else:
     st.info("No squad/pool data to plan against this run.")
 
+st.caption(f"Two separate bars gate a transfer: a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar "
+           f"(is the gain worth spending a free transfer at all) and a **{rec.get('margin_of_error', 2.0):.1f} xPts** "
+           f"margin-of-error floor (is the gain distinguishable from this model's own known projection noise — "
+           f"Standing Rule #34, not adjustable via the sidebar slider). A move must clear BOTH to be recommended.")
+
 with st.expander("Why — full trace, rule references, and move-by-move detail"):
     st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
                f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
+               f"margin-of-error floor **{rec.get('margin_of_error', 2.0):.1f} xPts** · "
                f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
     for line in ft["trace"]:
         st.markdown(f"- {line}")
