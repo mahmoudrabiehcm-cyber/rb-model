@@ -174,7 +174,25 @@ transfer:
   # of P(autosub), not a true per-gameweek autosub-probability model (that
   # would need to know the rest of the bench's own xM too) -- disclosed
   # simplification, not the full rule.
+  # LEGACY / SUPERSEDED (Patch 5): the flat 0.2 discount above is no longer
+  # read by the live code path. Rule #12 is now implemented properly in
+  # optimizer.realized_gw_value()/realized_horizon_value() as a two-factor
+  # heuristic (position-group minutes exposure x bench-order decay) instead
+  # of one flat number applied to every bench slot alike. Key left in place,
+  # same pattern as captaincy.shortlist_xpts_window below.
   bench_autosub_discount: 0.2
+  # Rule #12 (Bench Value Rule) heuristic parameters (Patch 5). Disclosed
+  # EST, not a full per-fixture autosub model — flagged as revisable once
+  # real per-gameweek autosub outcome data exists for this season.
+  # bench_order_decay: P(autosub) multiplier by outfield bench-order rank
+  # (index 0 = the highest-projected outfield reserve this GW, i.e. "1st
+  # reserve"). An autosub chain rarely reaches past the first one or two
+  # reserves, so probability decays fast down the bench.
+  bench_order_decay: [1.0, 0.55, 0.30, 0.15]
+  # bench_gk_autosub_prob: fixed floor for the backup goalkeeper specifically
+  # (there is only ever one starting GK, and a club's own #1 missing a match
+  # entirely is rare — this is NOT the outfield exposure formula).
+  bench_gk_autosub_prob: 0.05
   # How many gameweeks ahead to look when checking whether a Wildcard/Free
   # Hit is coming up soon enough that banking a transfer for it beats
   # spending it on an incremental swap now.
@@ -246,3 +264,36 @@ chip_timing:
 margin_of_error:
   floor_points: 2.0
   pct_of_total: 0.02
+
+# -----------------------------------------------------------------------------
+# Chip Advisor thresholds (Patch 5) — chip-specific margin-of-error bands for
+# the Bench Boost / Triple Captain / Free Hit play-vs-hold verdicts, replacing
+# the single generic Standing Rule #34 band those verdicts used before.
+#
+# DISCLOSURE: the model doc's Rule #34 defines exactly ONE blanket formula
+# (max(2.0, 2%)) and does not itself specify separate numbers per chip — this
+# section is a manager-directed extension on top of the documented rule, not
+# something sourced from the doc itself. Any chip key left out of this
+# section falls back to the generic `margin_of_error` band above.
+#
+# Reasoning behind the starting values (all open to revision as real
+# in-season chip outcomes accumulate):
+#   - triple_captain (5.0 / 8%, manager-confirmed): rests on a SINGLE
+#     player's SINGLE week — the model's own demonstrated single-player
+#     weekly correction noise (3-9 points) hits this verdict hardest of the
+#     three, so it gets the widest band.
+#   - bench_boost (3.0 / 5%): rests on 4 players' SUMMED projection —
+#     averaging across 4 independent players' noise partially cancels out
+#     relative to a single-player bet, and an unused Bench Boost costs
+#     nothing extra next week (the chip just stays available), so a smaller
+#     bump above the generic band is enough.
+#   - free_hit (6.0 / 6%): a full 15-man rebuild for one gameweek — the chip
+#     itself is burned regardless of outcome once played (Step 8b), so a
+#     wrong "play" call is the most costly mistake of the three even though
+#     the compared total (a full squad) is larger and so a given percentage
+#     already yields a bigger absolute number.
+# -----------------------------------------------------------------------------
+chip_advisor_thresholds:
+  bench_boost: {floor_points: 3.0, pct_of_total: 0.05}
+  triple_captain: {floor_points: 5.0, pct_of_total: 0.08}
+  free_hit: {floor_points: 6.0, pct_of_total: 0.06}

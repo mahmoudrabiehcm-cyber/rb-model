@@ -151,13 +151,31 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     - Rule #36 (Squad-Legality Validation): `_pair_moves()` mechanically
       asserts the OUT/IN position multisets match before returning a plan.
 
-    The old Bench Value Rule (Standing Rule #12) autosub-discount heuristic
-    is retired here (flagged to the manager, not silently dropped): each
-    player's own `xm` already prices in their expected minutes within
-    `xpts_horizon_sum`, so a bench player's low game-time is already
-    reflected in a low projection — a separate flat discount on top of that
-    double-counts the same signal. `bench_codes` is accepted for backward
-    compatibility but no longer changes the math.
+    Bench Value Rule reinstated (Patch 5, reversing a Patch 3 error). Every
+    squad comparison in this function — the current squad's own baseline
+    and every k-transfer candidate — is scored via
+    `optimizer.realized_horizon_value()`, which values each GW's best
+    starting XI at full projection and the 4 bench slots at their
+    autosub-discounted value (Standing Rule #12), never a bench player's raw
+    "if he started every week" number. This is what actually fixes the
+    reported failure mode: a bench-only swap (e.g. a backup-GK upgrade that
+    never affects the starting XI) now nets close to zero real gain instead
+    of being scored as if the swap were a starting-XI upgrade, so it
+    correctly fails the materiality/hit-cost bar and "Roll" wins instead.
+    `bench_codes` is kept for backward compatibility (unused by the math
+    directly — the realized-value calculation re-derives who's actually
+    bench per GW from each candidate squad's own best-XI solve, since bench
+    membership can shift week to week even for a fixed 15).
+
+    Note on scope: the MILP inside `optimizer.solve_squad()` still searches
+    for candidate 15-man squads using the raw `xpts_horizon_sum` objective —
+    that's a tractable way to explore the combinatorial squad space, and
+    isn't itself where Rule #12 bites. The rule is enforced at the actual
+    DECISION point: which candidate is scored best, and whether any
+    transfer clears the bar, both computed from realized (bench-discounted)
+    value below. Flagged here explicitly per Rule #4 ("show the inputs") —
+    this is a disclosed engineering simplification, not a claim that every
+    internal MILP coefficient itself carries the discount.
 
     Free transfers are never auto-spent just because they're banked
     (Free-Transfer Materiality Rule, `transfer.minimum_meaningful_gain_free`):
@@ -182,7 +200,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     horizon_n = len(gw_list)
 
     empty_result = {
-        "moves": [], "plan": [], "profile_used": profile_name, "hit_cost_threshold": threshold,
+        "moves": [], "plan": [], "summary": [], "profile_used": profile_name, "hit_cost_threshold": threshold,
         "minimum_meaningful_gain_free": meaningful_bar, "bench_autosub_discount": bench_discount,
         "hit_stance": hit_stance, "free_transfers": free_transfers,
     }
@@ -205,8 +223,12 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
 
     current_codes = list(squad_df["code"])
     out_codes_all = set(current_codes)
-    old_total = squad_df["xpts_horizon_sum"].sum(skipna=True)
-    old_total = 0.0 if pd.isna(old_total) else float(old_total)
+    # Rule #12 (Bench Value Rule): the baseline is the squad's REALIZED
+    # value (best XI + autosub-discounted bench, per GW, summed over the
+    # horizon) — never a raw sum of all 15 players' full projections, which
+    # is exactly the number that let a bench-only swap look like a genuine
+    # upgrade in Patch 3.
+    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg)
     team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
 
     full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
@@ -237,14 +259,25 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         if actual_k == 0:
             continue  # solver found nothing worth swapping at this k — already covered by k=0
         hit_cost = hit_cost_per * max(0, actual_k - free_transfers)
-        net_gain = round(result["total_xpts"] - old_total - hit_cost, 2)
+        # Rule #12: score the candidate on its REALIZED value (best XI +
+        # autosub-discounted bench), not the MILP's raw xpts_horizon_sum —
+        # the MILP objective is only a search heuristic for finding
+        # candidate squads, the realized value is what actually decides.
+        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg)
+        net_gain = round(new_total - old_total - hit_cost, 2)
         # keyed by actual_k so two requested k's that land on the same real
         # swap count don't create a spurious "tie" against themselves
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
-            candidates[actual_k] = {"squad": new_squad, "total": result["total_xpts"],
+            candidates[actual_k] = {"squad": new_squad, "total": new_total,
                                      "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k}
 
+    # `plan`: full technical trace (rule citations, candidate math) — kept
+    # for the "How this was worked out" detail expander. `summary`: the
+    # plain-language recommendation itself, one or two short lines, no rule
+    # numbers — this is what's shown by default (manager feedback: the old
+    # UI surfaced the trace as the primary content, which read as noise).
     plan = []
+    summary = []
     moves = []
 
     if hit_stance == "Force":
@@ -256,6 +289,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             chosen_k = max(smaller) if smaller else 0
         chosen = candidates[chosen_k]
         if chosen["actual_k"] == 0:
+            summary.append("No legal improving swap found at the forced transfer count — squad unchanged.")
             plan.append(f"GW{current_gw}: Forced transfer requested, but no legal improving swap was found in "
                         f"the full pool at that count — squad unchanged this run.")
         else:
@@ -263,6 +297,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes_all,
                                     {p["in_code"] for p in pairs})
             moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
+            summary.append(f"Forced: {chosen['actual_k']} transfer(s), net {chosen['net_gain']:+.1f} xPts "
+                            f"after a {chosen['hit_cost']:.0f}-pt hit.")
             plan.append(f"GW{current_gw}: Forced {chosen['actual_k']} transfer(s) — bypasses the materiality bar "
                         f"by design; net {chosen['net_gain']:+.2f} xPts after the {chosen['hit_cost']:.0f}-pt "
                         f"hit ({old_total:.1f} → {chosen['total']:.1f} xPts over {horizon_n} GW(s)).")
@@ -286,11 +322,14 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             if best_alt_k is not None and candidates[best_alt_k]["actual_k"] > 0:
                 alt = candidates[best_alt_k]
                 bar = threshold if alt["hit_cost"] > 0 else meaningful_bar
+                summary.append(f"Roll your transfer(s) — the best available move only nets "
+                                f"{alt['net_gain']:+.1f} xPts, not enough to be worth it yet.")
                 plan.append(f"GW{current_gw}: Roll — best alternative found ({alt['actual_k']} move(s), jointly "
                             f"optimized across the full pool) nets {alt['net_gain']:+.2f} xPts after cost, below "
                             f"the {bar} xPts bar. Bank free transfer(s) (up to 5) for a move that actually "
                             f"clears it.")
             else:
+                summary.append("Roll your transfer(s) — no improving swap found this run.")
                 plan.append(f"GW{current_gw}: Roll — no improving swap found in the full pool this run. "
                             f"Reassess next gameweek once prices/fixtures move.")
         else:
@@ -298,25 +337,32 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes_all,
                                     {p["in_code"] for p in pairs})
             moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
-            hit_note = (f" — {chosen['hit_cost']:.0f}-pt hit taken, clears the {profile_name} profile's "
+            move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+            hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
+            summary.append(f"{move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over {horizon_n} GW(s).")
+            hit_note2 = (f" — {chosen['hit_cost']:.0f}-pt hit taken, clears the {profile_name} profile's "
                         f"{threshold} xPts hit-cost threshold" if chosen["hit_cost"] > 0 else "")
             eo_note = " (one leg adjusted for style fit — see `eo_pull_applied` rows)" if any(
                 p.get("eo_pull_applied") for p in pairs) else ""
             plan.append(f"GW{current_gw}: {chosen['actual_k']} transfer(s) — jointly optimized across the full "
                         f"player pool (Rules #28/#30), net {chosen['net_gain']:+.2f} xPts over {horizon_n} "
-                        f"GW(s){hit_note}{eo_note}. Fewest-transfers tie-break applied within the {moe:.1f} "
-                        f"xPts margin-of-error band (Rules #34/#35).")
+                        f"GW(s){hit_note2}{eo_note}. Fewest-transfers tie-break applied within the {moe:.1f} "
+                        f"xPts margin-of-error band (Rules #34/#35). Scored on realized (bench-discounted) "
+                        f"value per Standing Rule #12.")
             used_free = min(chosen["actual_k"], free_transfers)
             rolled = free_transfers - used_free
             if rolled > 0:
+                summary.append(f"{rolled} free transfer(s) banked after this move.")
                 plan.append(f"GW{current_gw}: {rolled} free transfer(s) banked (up to 5) after this move.")
 
     if chip_advisory:
+        summary.append(chip_advisory)
         plan.append(chip_advisory)
 
     return {
         "moves": moves,
         "plan": plan,
+        "summary": summary,
         "profile_used": profile_name,
         "hit_cost_threshold": threshold,
         "minimum_meaningful_gain_free": meaningful_bar,

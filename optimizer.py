@@ -96,6 +96,83 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     }
 
 
+def bench_autosub_prob(position: str, bench_rank: int, starters_xi: pd.DataFrame,
+                        xm_col: str, cfg: dict) -> float:
+    """Standing Rule #12 (Bench Value Rule) heuristic. Disclosed EST, not a
+    full per-fixture autosub model — the doc's own text flags this as
+    revisable once real per-gameweek autosub data exists (Patch 5, reversing
+    the Patch 3 error of retiring this rule entirely on the mistaken
+    reasoning that a player's own `xm` already prices it in; the manager
+    corrected this directly — `xm` prices a player's OWN minutes if picked,
+    it says nothing about the separate question of whether an autosub even
+    fires for him).
+
+    Two independent factors, multiplied:
+    - Exposure: how likely the starting XI's own players at this position
+      fail to feature at all, approximated as 1 - the XI's average `xm` in
+      that position, clamped to [0.03, 0.6]. GK is a special case — there is
+      only ever one starting GK, and a Premier League #1 missing a match
+      entirely is rare, so the backup keeper gets a small fixed floor
+      instead (`bench_gk_autosub_prob`), never the outfield formula.
+    - Bench-order decay: an autosub chain rarely reaches past the first
+      reserve or two, so the Nth-highest-projected outfield bench player
+      (0 = first reserve) is scaled down by `bench_order_decay[N]`.
+    """
+    tcfg = cfg.get("transfer", {}) if cfg else {}
+    if position == "GK":
+        return float(tcfg.get("bench_gk_autosub_prob", 0.05))
+    curve = tcfg.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15])
+    decay = curve[min(bench_rank, len(curve) - 1)]
+    xm_vals = starters_xi[xm_col].dropna() if (xm_col in starters_xi.columns) else pd.Series(dtype=float)
+    avg_xm = float(xm_vals.mean()) if not xm_vals.empty else 0.8
+    exposure = max(0.03, min(0.6, 1.0 - avg_xm))
+    return round(exposure * decay, 3)
+
+
+def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm") -> dict:
+    """Standing Rule #12 (Bench Value Rule): "a bench player's value in any
+    comparison is P(autosub triggers) x their points in that scenario, never
+    their full 'if they started every week' xPts — and this must actually be
+    implemented in any solver's scoring function, not just documented."
+
+    Picks the best valid starting XI for this single GW (Horizon-Matching
+    Rule, same mechanic as `best_starting_xi`), then values the 4 remaining
+    bench slots at their autosub-discounted rate (`bench_autosub_prob`)
+    instead of their raw projection, so the returned total is a squad's
+    REALIZED value for this week — not a fantasy "everyone started" total."""
+    empty = {"xi_total": 0.0, "bench_total": 0.0, "total_realized": 0.0}
+    if squad is None or squad.empty or gw_col not in squad.columns:
+        return empty
+    xi_result = best_starting_xi(squad, gw_col)
+    if xi_result is None:
+        return empty
+    xi = xi_result["xi"]
+    xi_total = float(xi_result["total"])
+    bench = squad[~squad.index.isin(xi.index)]
+    bench_total = 0.0
+    for pos in ["GK", "DEF", "MID", "FWD"]:
+        pos_bench = bench[bench["position"] == pos].sort_values(gw_col, ascending=False)
+        for rank, (_, row) in enumerate(pos_bench.iterrows()):
+            pts = row.get(gw_col, 0.0)
+            pts = 0.0 if pd.isna(pts) else float(pts)
+            prob = bench_autosub_prob(pos, rank, xi, xm_col, cfg)
+            bench_total += prob * pts
+    return {"xi_total": round(xi_total, 2), "bench_total": round(bench_total, 2),
+            "total_realized": round(xi_total + bench_total, 2)}
+
+
+def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_col: str = "xm") -> float:
+    """Sums `realized_gw_value()`'s total across every GW in the horizon —
+    the Rule #12-compliant replacement for a raw `xpts_horizon_sum` sum
+    whenever squads/transfer-candidates are being SCORED against each other.
+    Never used to display a single player's own projection — only to decide
+    which candidate squad actually wins a comparison."""
+    total = 0.0
+    for gw in gw_list:
+        total += realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col)["total_realized"]
+    return round(total, 2)
+
+
 def best_starting_xi(squad: pd.DataFrame, gw_col: str) -> dict:
     """Pick the highest-scoring valid formation (1 GK + valid outfield shape)
     for a single gameweek from a fixed 15-man squad — Horizon-Matching Rule:

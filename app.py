@@ -143,6 +143,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   box-shadow:var(--shadow); padding:9px 14px; margin-top:10px; }
 .cap-caption b{ color:var(--accent-strong); }
 
+/* Patch 5 — Transfer Recommendations simplification: the primary display is
+   now just the recommendation sentence(s), styled the same as the
+   captaincy caption for visual consistency; the old rule-citation trace and
+   raw move table moved into an on-demand expander. */
+.tx-reco{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--accent-strong);
+  box-shadow:var(--shadow); padding:9px 14px; margin-top:6px; margin-bottom:6px; }
+
 /* Patch 2 — mobile simplification: at narrow widths the card drops the price
    line entirely (least-needed info at this size — still visible in the GW
    Breakdown table) and shrinks text so name + position + opponent + xPts
@@ -218,7 +225,15 @@ def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool
 
     ticker_html = ""
     meta_right = row.get(opp_col) if opp_col else None
-    xp_label = "xpts"
+    # Patch 5 — the dominant "xp" stat on every pitch card is the CURRENT
+    # planning-GW value (via xp_col, passed by the caller), matching exactly
+    # what actually decided the starting XI and the captain armband (Step 7
+    # / Step 8 are both single-GW), never the multi-GW horizon sum — that
+    # mismatch (card showing a horizon total next to an armband picked on a
+    # single-GW basis) was flagged as a real source of confusion. The
+    # fixture ticker below is a SEPARATE multi-GW difficulty view (dots, no
+    # points total) and stays independent of this.
+    xp_label = f"GW{xp_col.split('gw')[1]} xp" if (xp_col and xp_col.startswith("xpts_gw")) else "xpts"
     if gw_list and len(gw_list) > 1:
         dots = []
         for gw in gw_list:
@@ -227,7 +242,6 @@ def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool
             dots.append(f'<span class="fdr-dot {tier}" title="GW{gw}: {opp_label}"></span>')
         ticker_html = f'<div class="ticker">{"".join(dots)}</div>'
         meta_right = f"{len(gw_list)}-GW horizon"
-        xp_label = f"xpts ({len(gw_list)}gw)"
     meta_html = f'<div class="meta"><span class="pos {pos}">{pos_label}</span> · {meta_right}</div>' if meta_right else \
         f'<div class="meta"><span class="pos {pos}">{pos_label}</span></div>'
 
@@ -538,19 +552,36 @@ with st.spinner("Fetching live data and computing xPts..."):
     # a fresh MILP solve per horizon GW, so it's skipped entirely once that
     # chip is used, rather than burning compute on a verdict nobody can act on.
     available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
-    moe_fn = lambda total: eng.margin_of_error_threshold(total, cfg)
+    # Chip-specific margin-of-error thresholds (Patch 5). Standing Rule #34
+    # itself only defines ONE blanket band (max(2.0, 2%)) — the model doc
+    # does not specify separate numeric thresholds per chip. Using a single
+    # band for a chip verdict was flagged as wrong by the manager: a Bench
+    # Boost verdict rests on 4 players' summed variance, a Triple Captain
+    # verdict rests on a single player's single week (much higher variance),
+    # and a Free Hit verdict is a full-squad rebuild whose chip cost is
+    # burned regardless of outcome (highest stakes). `chip_advisor_thresholds`
+    # in model_config.yaml is a disclosed, manager-directed EXTENSION beyond
+    # Rule #34's text — never presented as if the source document specified
+    # it — falling back to the generic band for any chip left unconfigured.
+    cat_cfg = cfg.get("chip_advisor_thresholds", {})
+
+    def _chip_moe_fn(chip_key: str):
+        t = cat_cfg.get(chip_key, {})
+        return lambda total: eng.margin_of_error_threshold(
+            total, cfg, floor_points=t.get("floor_points"), pct_of_total=t.get("pct_of_total"))
+
     bb_advisor = None
     if any(c.startswith("Bench Boost") for c in available_chip_names):
-        bb_advisor = chip_protocol.evaluate_bench_boost(bench_df, gw_list, moe_fn)
+        bb_advisor = chip_protocol.evaluate_bench_boost(bench_df, gw_list, _chip_moe_fn("bench_boost"))
     tc_advisor = None
     if any(c.startswith("Triple Captain") for c in available_chip_names):
-        tc_advisor = chip_protocol.evaluate_triple_captain(starters_df, gw_list, moe_fn)
+        tc_advisor = chip_protocol.evaluate_triple_captain(starters_df, gw_list, _chip_moe_fn("triple_captain"))
     fh_advisor = None
     if any(c.startswith("Free Hit") for c in available_chip_names) and not squad_df.empty:
         fh_advisor = chip_protocol.evaluate_free_hit(
             squad_df, gw_list,
             lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, proj, team_value, gw),
-            moe_fn)
+            _chip_moe_fn("free_hit"))
 
     # Chip-aware transfer advisory (Standing Rule #24: only from signals
     # already computed mechanically above — never a guess at the manager's
@@ -578,7 +609,7 @@ with st.spinner("Fetching live data and computing xPts..."):
                                            meaningful_bar_override, set(bench_df["code"]), chip_advisory)
     except Exception as e:
         transfer_error = str(e)
-        rec = {"moves": [], "plan": [], "profile_used": style_name,
+        rec = {"moves": [], "plan": [], "summary": [], "profile_used": style_name,
                "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
                "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
                "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
@@ -692,12 +723,12 @@ else:
             rec_cap = cap_pick_row is not None and r["code"] == cap_pick_row["code"]
             live_cap_diff = (r["code"] == captain_id) and not rec_cap
             pitch_html += _player_card(r, is_captain=rec_cap, is_live_captain=live_cap_diff,
-                                        opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
+                                        xp_col=opt_col, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
         pitch_html += '</div>'
     if not bench_df.empty:
         pitch_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
         for _, r in bench_df.sort_values("xpts_horizon_sum", ascending=False).iterrows():
-            pitch_html += _player_card(r, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
+            pitch_html += _player_card(r, xp_col=opt_col, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
         pitch_html += '</div></div>'
     pitch_html += '</div>'
     st.markdown(pitch_html, unsafe_allow_html=True)
@@ -747,22 +778,26 @@ st.markdown('<div class="section-h">Transfer Recommendations</div>', unsafe_allo
 if transfer_error:
     st.error(f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
              f"is unaffected — try Run Model again, and if it repeats, this is worth reporting with that message.")
-st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
-           f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
-           f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
-with st.expander("How the free-transfer count was derived"):
-    for line in ft["trace"]:
-        st.markdown(f"- {line}")
 
-st.markdown("**Plan**")
-if rec["plan"]:
-    for line in rec["plan"]:
-        st.markdown(f"- {line}")
+# Patch 5 — simplified primary display: just the recommendation, in plain
+# language, front and center. All the rule-citation trace and the raw move
+# table that used to be the primary content now live behind one expander,
+# available on demand rather than shown by default.
+if rec.get("summary"):
+    for line in rec["summary"]:
+        st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
 else:
     st.info("No squad/pool data to plan against this run.")
 
-if rec["moves"]:
-    with st.expander("Move-by-move detail"):
+with st.expander("Why — full trace, rule references, and move-by-move detail"):
+    st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
+               f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
+               f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
+    for line in ft["trace"]:
+        st.markdown(f"- {line}")
+    for line in rec["plan"]:
+        st.markdown(f"- {line}")
+    if rec["moves"]:
         moves_df = pd.DataFrame(rec["moves"])
         show_cols = [c for c in ["out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
                                   "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]

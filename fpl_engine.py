@@ -227,23 +227,38 @@ def team_rating_pct(squad_xpts_total: float, ceiling_xpts_total: float,
 # ---------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6)
 # ---------------------------------------------------------------------------
-def margin_of_error_threshold(compared_total: float, cfg: dict | None = None) -> float:
+def margin_of_error_threshold(compared_total: float, cfg: dict | None = None,
+                               floor_points: float | None = None,
+                               pct_of_total: float | None = None) -> float:
     """A cumulative xPts difference smaller than this must be reported as a
     statistical tie, never a clear winner/verdict — demonstrated single-
     player weekly correction noise runs 3-9 points, so anything inside this
     band is indistinguishable from that noise. threshold = max(floor_points,
     pct_of_total * the compared horizon's combined total), defaulting to
-    2.0 / 0.02 but tunable via model_config.yaml's `margin_of_error` section
-    (pass cfg through; omit it to get the documented defaults). Shared by
-    the Team Rating % headline, the Chip Advisor's play/hold verdicts, and
-    (once Patch 2 lands) the captaincy shortlist window — one threshold, one
-    rule, used everywhere a "is this actually better" call gets made."""
-    floor_points, pct_of_total = 2.0, 0.02
+    2.0 / 0.02 (model_config.yaml's `margin_of_error` section) — the generic
+    Standing Rule #34 band used for Team Rating %, transfer-path comparisons,
+    and the captaincy shortlist window.
+
+    Explicit `floor_points`/`pct_of_total` args override the config default
+    for this one call — added (Patch 5) so the Chip Advisor can apply a
+    chip-specific band instead of the generic one for its own play/hold
+    verdicts (see model_config.yaml's `chip_advisor_thresholds`). This is a
+    disclosed EXTENSION beyond Rule #34's own text, not something the model
+    doc specifies per-chip itself: Rule #34 states one blanket formula.
+    Widening it per chip for Bench Boost/Triple Captain/Free Hit specifically
+    was a manager-directed adjustment (higher stakes / higher single-player
+    variance than a routine transfer comparison), never presented as if it
+    were already in the source document."""
+    fp, pct = 2.0, 0.02
     if cfg is not None:
         moe_cfg = cfg.get("margin_of_error", {})
-        floor_points = moe_cfg.get("floor_points", floor_points)
-        pct_of_total = moe_cfg.get("pct_of_total", pct_of_total)
-    return max(floor_points, pct_of_total * abs(compared_total))
+        fp = moe_cfg.get("floor_points", fp)
+        pct = moe_cfg.get("pct_of_total", pct)
+    if floor_points is not None:
+        fp = floor_points
+    if pct_of_total is not None:
+        pct = pct_of_total
+    return max(fp, pct * abs(compared_total))
 
 
 # ---------------------------------------------------------------------------
