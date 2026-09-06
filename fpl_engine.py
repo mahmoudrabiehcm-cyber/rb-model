@@ -264,11 +264,24 @@ def transfer_net_gain(xpts_in_horizon: float, xpts_out_horizon: float,
 def captaincy_protocol(candidates: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     """candidates needs columns: web_name, xpts_this_gw, selected_by_percent
     (used as an ownership proxy for EO; true EO = ownership% + captaincy%,
-    supply a `captaincy_pct` column if you have better data)."""
+    supply a `captaincy_pct` column if you have better data).
+
+    Patch 3: the shortlist window is now `margin_of_error_threshold(top,
+    cfg)` (Standing Rule #34) instead of the old fixed
+    `captaincy.shortlist_xpts_window` — a flat 1.0 xPts band didn't scale
+    with how big the top score actually was (the config key is kept, now
+    documented as legacy/superseded, so nothing that still references it
+    directly breaks). A `near_miss` column also flags candidates just
+    outside the shortlist but within `near_miss_multiplier x` the same
+    threshold — used by `style_profiles.captain_alt_pick()` so a genuine
+    "clear standout" week still surfaces a profile-aware alternative
+    instead of no alt slot at all."""
     c = candidates.copy()
     top = c["xpts_this_gw"].max()
-    window = cfg["captaincy"]["shortlist_xpts_window"]
+    window = margin_of_error_threshold(top, cfg)
     c["shortlisted"] = c["xpts_this_gw"] >= (top - window)
+    near_miss_mult = cfg.get("captaincy", {}).get("near_miss_multiplier", 2.0)
+    c["near_miss"] = (~c["shortlisted"]) & (c["xpts_this_gw"] >= (top - window * near_miss_mult))
     if "captaincy_pct" in c.columns:
         c["eo"] = c["selected_by_percent"].astype(float) + c["captaincy_pct"].astype(float)
     else:

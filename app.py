@@ -48,6 +48,7 @@ st.markdown("""
   --blue:#2E6E93; --blue-tint:#E1EDF3;
   --coral:#C1502E; --coral-tint:#F7E3DA;
   --warn:#B23B1E; --bench:#EFF1E9;
+  --fdr-easy:#375A2E; --fdr-mid:#B8842A; --fdr-hard:#B23B1E;
   --shadow:0 1px 2px rgba(20,30,22,.07), 0 8px 22px -12px rgba(20,30,22,.24);
 }
 html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--ink); }
@@ -97,8 +98,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .pitch{ background:linear-gradient(180deg, var(--accent-tint), var(--surface-2) 70%);
   border:1px solid var(--rule); padding:22px 14px 10px; }
 .prow{ display:flex; justify-content:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
-.card{ background:var(--surface); border:1px solid var(--rule); border-top:4px solid var(--team,var(--accent));
-  box-shadow:var(--shadow); width:clamp(58px, 15vw, 104px); padding:10px 6px 8px; text-align:center; position:relative; }
+
+/* Patch 4 — card redesign: tighter top-cropped photo in a team-color ring,
+   name-first info hierarchy (name -> compact pos+opponent meta line -> xPts
+   as the dominant stat with price as a quiet footnote), replacing the old
+   five-equal-weight stacked-line layout. */
+.card{ background:var(--surface); border:1px solid var(--rule); box-shadow:var(--shadow);
+  width:clamp(64px, 15vw, 112px); padding:10px 8px 9px; text-align:center; position:relative; }
 .card .cap{ position:absolute; top:-9px; right:-9px; width:20px; height:20px; border-radius:50%;
   background:var(--gold); color:#241A05; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700;
   display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow); z-index:2; }
@@ -107,21 +113,35 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   font-size:8px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:2; cursor:help; }
 .card .sp{ position:absolute; top:5px; left:5px; font-family:"IBM Plex Mono"; font-size:7.5px; font-weight:700;
   color:var(--gold); border:1px solid var(--gold); border-radius:2px; padding:0 3px; }
-.avatar-wrap{ width:42px; height:42px; margin:0 auto 6px; position:relative; }
-.avatar-wrap img{ width:42px; height:42px; border-radius:50%; object-fit:cover; box-shadow:var(--shadow); }
-.avatar-fallback{ width:42px; height:42px; border-radius:50%; background:linear-gradient(160deg, var(--team,var(--accent)), #12492E);
-  color:#fff; font-family:"Fraunces"; font-weight:700; font-size:14px; align-items:center; justify-content:center;
-  position:absolute; top:0; left:0; }
-.card .pos{ display:inline-block; font-family:"IBM Plex Mono"; font-size:9px; font-weight:600; padding:1px 5px; border-radius:2px; margin-bottom:4px; }
-.card .pos.gk{ background:var(--gold-tint); color:var(--gold); } .card .pos.def{ background:var(--blue-tint); color:var(--blue); }
-.card .pos.mid{ background:var(--accent-tint); color:var(--accent-strong); } .card .pos.fwd{ background:var(--coral-tint); color:var(--coral); }
-.card .opp{ display:inline-block; font-family:"IBM Plex Mono"; font-size:9px; font-weight:600; color:var(--blue);
-  background:var(--blue-tint); padding:1px 5px; border-radius:2px; margin-bottom:4px; }
-.card .name{ font-weight:600; font-size:12px; } .card .xp{ font-family:"IBM Plex Mono"; font-size:11px; color:var(--accent-strong); font-weight:600; margin-top:2px; }
-.card .price{ font-family:"IBM Plex Mono"; font-size:9.5px; color:var(--ink-faint); }
+.photo-ring{ width:48px; height:48px; border-radius:50%; margin:0 auto 7px; padding:2px;
+  background:var(--team,var(--accent)); position:relative; }
+.photo-ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
+  display:block; border:2px solid var(--surface); }
+.photo-ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%;
+  background:linear-gradient(160deg, var(--team,var(--accent)), #12492E); color:#fff; font-family:"Fraunces";
+  font-weight:700; font-size:13px; align-items:center; justify-content:center; border:2px solid var(--surface); }
+.card .name{ font-weight:700; font-size:12.5px; margin-bottom:2px; }
+.card .meta{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-muted); margin-bottom:6px; }
+.card .meta .pos{ font-weight:700; }
+.card .meta .pos.gk{ color:var(--gold); } .card .meta .pos.def{ color:var(--blue); }
+.card .meta .pos.mid{ color:var(--accent-strong); } .card .meta .pos.fwd{ color:var(--coral); }
+.card .ticker{ display:flex; justify-content:center; gap:3px; margin-bottom:6px; }
+.card .fdr-dot{ width:7px; height:7px; border-radius:50%; cursor:help; flex:none; }
+.card .fdr-dot.easy{ background:var(--fdr-easy); } .card .fdr-dot.mid{ background:var(--fdr-mid); }
+.card .fdr-dot.hard{ background:var(--fdr-hard); } .card .fdr-dot.blank{ background:var(--ink-faint); opacity:.4; }
+.card .stats-row{ display:flex; align-items:baseline; justify-content:center; gap:6px; }
+.card .xp{ font-family:"IBM Plex Mono"; font-size:14px; font-weight:700; color:var(--accent-strong); }
+.card .xp-l{ font-family:"IBM Plex Mono"; font-size:7px; color:var(--ink-faint); text-transform:uppercase; display:block; margin-top:-2px; }
+.card .price{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-faint); }
 .bench-strip{ background:var(--bench); margin:0 -14px; padding:12px 14px 4px; border-top:1px dashed var(--rule); }
-.bench-strip .card{ opacity:.68; width:clamp(50px, 13vw, 92px); }
+.bench-strip .card{ opacity:.68; width:clamp(56px, 13vw, 96px); }
 .side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
+
+/* Patch 4 — captaincy-on-pitch caption, replacing the old standalone
+   "Captaincy Pick" metric section entirely. */
+.cap-caption{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--gold);
+  box-shadow:var(--shadow); padding:9px 14px; margin-top:10px; }
+.cap-caption b{ color:var(--accent-strong); }
 
 /* Patch 2 — mobile simplification: at narrow widths the card drops the price
    line entirely (least-needed info at this size — still visible in the GW
@@ -132,12 +152,14 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   .card{ padding:7px 4px 6px; }
   .card .price{ display:none; }
   .card .name{ font-size:10.5px; }
-  .card .xp{ font-size:9.5px; }
-  .card .pos, .card .opp{ font-size:7.5px; padding:1px 4px; }
-  .avatar-wrap, .avatar-wrap img, .avatar-fallback{ width:30px; height:30px; }
-  .avatar-fallback{ font-size:11px; }
+  .card .xp{ font-size:12px; }
+  .card .meta{ font-size:7.5px; }
+  .photo-ring, .photo-ring img, .photo-ring .avatar-fallback{ width:32px; height:32px; }
+  .photo-ring{ height:32px; }
+  .photo-ring .avatar-fallback{ font-size:11px; }
   .card .cap{ width:16px; height:16px; font-size:9px; top:-7px; right:-7px; }
   .card .cap-actual{ width:13px; height:13px; font-size:7px; }
+  .card .fdr-dot{ width:6px; height:6px; }
   .prow{ gap:6px; }
 }
 </style>
@@ -161,34 +183,66 @@ def _photo_url(code) -> str:
 
 
 def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool = False,
-                  xp_col: str | None = None, opp_col: str | None = None) -> str:
-    """is_captain: model's recommended captain this run -> solid gold armband.
+                  xp_col: str | None = None, opp_col: str | None = None,
+                  gw_list: list[int] | None = None) -> str:
+    """Patch 4 card redesign: name-first info hierarchy — name, then a
+    single compact "pos · opponent" meta line, then xPts as the dominant
+    stat with price as a quiet footnote — plus a tight top-cropped photo in
+    a team-color ring instead of a plain centered avatar.
+
+    is_captain: model's recommended captain this run -> solid gold armband.
     is_live_captain: your actual live FPL captain, only ever passed True when
     it's a DIFFERENT player from the recommendation (Patch 2) -> a smaller
     hollow-ring secondary marker, so both are visible without implying the
-    recommendation and your real team agree when they don't."""
+    recommendation and your real team agree when they don't.
+
+    gw_list: when given with more than one gameweek, the card shows a
+    multi-GW fixture-difficulty ticker (one dot per GW, sourced from
+    `fdr_gw{gw}`, hover for the exact opponent) instead of the single
+    opponent chip — the "fixtures still show the current GW only" gap this
+    patch closes. Falls back to the single-GW opponent chip (via `opp_col`)
+    when `gw_list` is None or length 1, i.e. horizon = 1 behaves exactly as
+    before."""
     team_color = _team_color(row.get("team", ""))
     initials = "".join([w[0] for w in str(row.get("web_name", "??")).split()][:2]).upper() or "??"
     xp = row.get(xp_col) if xp_col else row.get("xpts_horizon_sum")
+    xp = 0.0 if pd.isna(xp) else xp
     cap_html = '<div class="cap">C</div>' if is_captain else ""
     cap_actual_html = ('<div class="cap-actual" title="Your live captain — the model recommends someone else this run">C</div>'
                         if is_live_captain else "")
     sp_html = '<div class="sp">SP</div>' if row.get("setpiece_flag") else ""
     pos = str(row.get("position", "")).lower()
+    pos_label = row.get("position", "")
     price = row.get("price")
     price_html = f'<div class="price mono">£{price}m</div>' if price is not None else ""
-    opp = row.get(opp_col) if opp_col else None
-    opp_html = f'<span class="opp">{opp}</span><br>' if opp else ""
+
+    ticker_html = ""
+    meta_right = row.get(opp_col) if opp_col else None
+    xp_label = "xpts"
+    if gw_list and len(gw_list) > 1:
+        dots = []
+        for gw in gw_list:
+            opp_label = row.get(f"opp_gw{gw}", "") or "Blank"
+            tier = row.get(f"fdr_gw{gw}", "") or "blank"
+            dots.append(f'<span class="fdr-dot {tier}" title="GW{gw}: {opp_label}"></span>')
+        ticker_html = f'<div class="ticker">{"".join(dots)}</div>'
+        meta_right = f"{len(gw_list)}-GW horizon"
+        xp_label = f"xpts ({len(gw_list)}gw)"
+    meta_html = f'<div class="meta"><span class="pos {pos}">{pos_label}</span> · {meta_right}</div>' if meta_right else \
+        f'<div class="meta"><span class="pos {pos}">{pos_label}</span></div>'
+
     return f"""<div class="card" style="--team:{team_color}">{cap_html}{cap_actual_html}{sp_html}
-      <div class="avatar-wrap">
+      <div class="photo-ring">
         <img src="{_photo_url(row.get('code', 0))}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
         <div class="avatar-fallback" style="display:none;">{initials}</div>
       </div>
-      <span class="pos {pos}">{row.get('position','')}</span><br>
-      {opp_html}
       <div class="name">{row.get('web_name','')}</div>
-      {price_html}
-      <div class="xp">{xp:.1f} xPts</div>
+      {meta_html}
+      {ticker_html}
+      <div class="stats-row">
+        <div><div class="xp">{xp:.1f}</div><span class="xp-l">{xp_label}</span></div>
+        {price_html}
+      </div>
     </div>"""
 
 
@@ -421,7 +475,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     # (Patch 2) so the pitch view can match the recommendation back to its
     # card and place the armband there directly, rather than just displaying
     # the pick in its own section.
-    cap_pick_row, cap_alt_row, cap_alt_label = None, None, "Alternative"
+    cap_pick_row, cap_alt_row, cap_alt_label, cap_caption = None, None, "Alternative", None
     if not starters_df.empty:
         cap_col = f"xpts_gw{gw_list[0]}"
         cap_candidates = starters_df.rename(columns={cap_col: "xpts_this_gw"})[
@@ -430,6 +484,27 @@ with st.spinner("Fetching live data and computing xPts..."):
         cap_pick = style_profiles.captaincy_pick(cap_result, style_name)
         cap_alt_row, cap_alt_label = style_profiles.captain_alt_pick(cap_result, cap_pick["web_name"], style_name)
         cap_pick_row = cap_pick
+
+        # Patch 4 — captaincy-on-pitch caption: a single themed line replacing
+        # the old standalone "Captaincy Pick" section. Genuinely distinguishes
+        # a clear standout week (shortlist of one) from a real statistical tie
+        # (Standing Rule #34's margin-of-error window), rather than always
+        # phrasing it as a coin-flip.
+        shortlist_ct = int(cap_result["shortlisted"].sum()) if "shortlisted" in cap_result.columns else 1
+        cap_xp = cap_pick_row["xpts_this_gw"]
+        if shortlist_ct <= 1:
+            cap_caption = (f"🎯 Armband: <b>{cap_pick_row['web_name']}</b> — the standout pick this week "
+                           f"({cap_xp:.1f} xPts, clear of the field).")
+        elif cap_alt_row is not None and not cap_alt_label.startswith("Near miss"):
+            cap_caption = (f"🎯 Armband: <b>{cap_pick_row['web_name']}</b> — a coin-flip with "
+                           f"{cap_alt_row['web_name']} this week ({cap_xp:.1f} xPts); {cap_alt_label.lower()} "
+                           f"given per your style profile (<b>{style_name}</b>).")
+        else:
+            cap_caption = (f"🎯 Armband: <b>{cap_pick_row['web_name']}</b> — a coin-flip within the shortlist "
+                           f"this week ({cap_xp:.1f} xPts).")
+        if cap_alt_row is not None and cap_alt_label.startswith("Near miss"):
+            cap_caption += (f" Nearest alternative if this pick disappoints: <b>{cap_alt_row['web_name']}</b> "
+                            f"({cap_alt_label.replace('Near miss – ', '')}, outside this week's shortlist).")
 
     # chip status + timing — computed before transfer suggestions so the
     # transfer plan can factor in "a chip is coming, banking may beat spending"
@@ -608,17 +683,28 @@ else:
             rec_cap = cap_pick_row is not None and r["code"] == cap_pick_row["code"]
             live_cap_diff = (r["code"] == captain_id) and not rec_cap
             pitch_html += _player_card(r, is_captain=rec_cap, is_live_captain=live_cap_diff,
-                                        opp_col=f"opp_gw{planning_gw}")
+                                        opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
         pitch_html += '</div>'
     if not bench_df.empty:
         pitch_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
         for _, r in bench_df.sort_values("xpts_horizon_sum", ascending=False).iterrows():
-            pitch_html += _player_card(r, opp_col=f"opp_gw{planning_gw}")
+            pitch_html += _player_card(r, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
         pitch_html += '</div></div>'
     pitch_html += '</div>'
     st.markdown(pitch_html, unsafe_allow_html=True)
+    if gw_list and len(gw_list) > 1:
+        st.markdown('<p class="side-note">Fixture ticker: one dot per GW in your horizon — '
+                    'easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the '
+                    'table below.</p>', unsafe_allow_html=True)
     st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season minutes accrue.</p>',
                 unsafe_allow_html=True)
+
+# Patch 4 — captaincy-on-pitch caption, replacing the old standalone
+# "Captaincy Pick" section. Rendered here (own top-level block, not nested
+# inside the pitch if/else above) so it still shows even in the rare case
+# starters_df is empty but the pool-only captaincy protocol still ran.
+if cap_caption:
+    st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # GW Breakdown table (Patch 2) — opponent + per-GW xPts split out instead of
@@ -674,23 +760,13 @@ if rec["moves"]:
         st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Captaincy
+# Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric
+# boxes) has been retired. The armband on the pitch card is the primary
+# signal; the themed `.cap-caption` line rendered directly under the pitch
+# (see the Pitch view section above) carries the "why" — EO%/tier detail is
+# still available via the alt-pick's underlying data, just not surfaced as
+# its own section any more.
 # ---------------------------------------------------------------------------
-st.markdown('<div class="section-h">Captaincy Pick</div>', unsafe_allow_html=True)
-if cap_pick_row is not None:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric(f"{cap_pick_row['web_name']} ({cap_pick_row['team']})", f"{cap_pick_row['xpts_this_gw']:.1f} xPts",
-                   help=f"EO {cap_pick_row['eo']:.1f}% · tier: {cap_pick_row['eo_tier']}")
-    with c2:
-        if cap_alt_row is not None:
-            st.metric(f"{cap_alt_label}: {cap_alt_row['web_name']} ({cap_alt_row['team']})", f"{cap_alt_row['xpts_this_gw']:.1f} xPts",
-                       help=f"EO {cap_alt_row['eo']:.1f}% · tier: {cap_alt_row['eo_tier']} · "
-                            f"alt-pick direction set by style profile: **{style_name}**")
-        else:
-            st.caption("No alternative inside the shortlist window this week.")
-else:
-    st.info("No squad data to run the captaincy protocol against this run.")
 
 # ---------------------------------------------------------------------------
 # Season ledger

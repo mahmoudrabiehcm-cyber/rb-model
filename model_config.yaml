@@ -184,7 +184,18 @@ transfer:
 # Step 8 — Captaincy Protocol
 # -----------------------------------------------------------------------------
 captaincy:
-  shortlist_xpts_window: 1.0    # within ~1.0 xPts of top = "statistically tied"
+  # LEGACY / SUPERSEDED (Patch 3): the shortlist window is now computed
+  # dynamically as margin_of_error_threshold(top_xpts, cfg) — Standing Rule
+  # #34 — instead of this flat figure, so it scales with how big the top
+  # score actually is. Key left in place (not deleted) in case anything
+  # else still reads it directly; fpl_engine.captaincy_protocol() no
+  # longer does.
+  shortlist_xpts_window: 1.0
+  # A candidate within (margin-of-error window x this multiplier) of the
+  # top score, but outside the shortlist itself, is flagged `near_miss` —
+  # used as the alt-captain fallback pool on a clear-standout week where
+  # the real shortlist has no second member.
+  near_miss_multiplier: 2.0
   eo_tiers:
     contrarian_max: 40
     mixed_max: 70

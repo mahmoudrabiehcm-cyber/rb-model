@@ -93,16 +93,31 @@ def captain_alt_pick(cap_result: pd.DataFrame, primary_web_name: str, profile_na
     no-EO-weighting profile gets its next-best pick on raw projection —
     consistent with each profile's own stated logic (Standing Rule #23).
     Returns (row_or_None, label) — label describes what the slot actually is
-    this time, since it isn't always "Differential" any more."""
+    this time, since it isn't always "Differential" any more.
+
+    Patch 3: when the shortlist has no other member (a clear standout
+    week — one player genuinely clear of the field, per the Rule #34
+    margin-of-error window), falls back to the `near_miss` pool
+    (fpl_engine.captaincy_protocol's near-just-outside-the-window
+    candidates) using the same eo_pull direction, labelled "Near miss –"
+    so the UI never implies it's a genuine statistical tie."""
     shortlist = cap_result[cap_result["shortlisted"]]
     pool = shortlist[shortlist["web_name"] != primary_web_name]
+    near_miss_fallback = False
+    if pool.empty and "near_miss" in cap_result.columns:
+        pool = cap_result[cap_result["near_miss"]]
+        near_miss_fallback = True
     if pool.empty:
         return None, "Alternative"
 
     eo_pull = get_profile(profile_name).get("eo_pull", "mild_low_eo")
     if eo_pull == "strong_high_eo":
-        return pool.sort_values("eo", ascending=False).iloc[0], "Next-safest"
-    if eo_pull == "none":
-        return pool.sort_values("xpts_this_gw", ascending=False).iloc[0], "Next-best"
-    # "mild_low_eo" / "strong_low_eo" — a genuine differential alternative
-    return pool.sort_values("eo", ascending=True).iloc[0], "Differential"
+        row, label = pool.sort_values("eo", ascending=False).iloc[0], "Next-safest"
+    elif eo_pull == "none":
+        row, label = pool.sort_values("xpts_this_gw", ascending=False).iloc[0], "Next-best"
+    else:
+        # "mild_low_eo" / "strong_low_eo" — a genuine differential alternative
+        row, label = pool.sort_values("eo", ascending=True).iloc[0], "Differential"
+    if near_miss_fallback:
+        label = f"Near miss – {label}"
+    return row, label

@@ -4,12 +4,16 @@ A live, zero-cost Streamlit app implementing **FPL Projection Model v5.0**
 (base formula v3.3 + Step 3c Set-Piece Signal, parameterized §7 Manager
 Style Profile, Step 9 Chip Timing Protocol, Rule #34 Margin-of-Error Tie
 Rule) plus **Patch 1** (reachable-ceiling Team Rating %, a quantified Chip
-Advisor, and a style-aware alt-captain) and **Patch 2** (auto-optimized
+Advisor, and a style-aware alt-captain), **Patch 2** (auto-optimized
 starting XI, dual captain markers, per-GW opponent + a GW Breakdown table,
-a mobile-adaptive pitch view, and a football-terminology UI pass — see
-"Patch 2" below). Enter an FPL team ID, pick a style profile and hit-stance,
-click **Run Model**, get live xPts-driven transfer, captaincy, and chip
-recommendations pulled straight from the official FPL API.
+a mobile-adaptive pitch view, and a football-terminology UI pass), and
+**Patch 3 + Patch 4** (joint multi-transfer optimization with an EO-pull
+style tie-break, a dynamic margin-of-error captaincy shortlist, a redesigned
+player card with a multi-GW fixture ticker, and captaincy moved onto the
+pitch as a single themed caption — see "Patch 3 + Patch 4" below). Enter an
+FPL team ID, pick a style profile and hit-stance, click **Run Model**, get
+live xPts-driven transfer, captaincy, and chip recommendations pulled
+straight from the official FPL API.
 
 For the click-by-click hosting walkthrough, see **DEPLOY.md**. This file
 covers what's in the repo and how to change the model later.
@@ -20,15 +24,15 @@ covers what's in the repo and how to change the model later.
 |---|---|
 | `app.py` | The Streamlit UI — gate screen, sidebar, all display sections. Start here to change layout/wording. |
 | `model_config.yaml` | **Every tunable number in the model.** Position multipliers, DEFCON calibration, decay schedule, hit-cost thresholds, set-piece multipliers, chip-timing thresholds. Change a weight here — no code edit needed. |
-| `fpl_engine.py` | Core Formula, Decay Schedule, DEFCON probability, CS% (MODEL_POISSON), xM estimation, Team Rating %, base Transfer Net Gain, Captaincy Protocol, Rule #34 margin-of-error threshold (Patch 1). |
+| `fpl_engine.py` | Core Formula, Decay Schedule, DEFCON probability, CS% (MODEL_POISSON), xM estimation, Team Rating %, base Transfer Net Gain, Captaincy Protocol (Patch 3: shortlist window is now `margin_of_error_threshold()`-driven, plus a `near_miss` fallback column), Rule #34 margin-of-error threshold (Patch 1). |
 | `fpl_data.py` | All live-fetch functions — official API first, GitHub mirror fallback. |
-| `data_pipeline.py` | Wires a raw API snapshot into a computed player table (Patch 2: now also captures each player's per-GW opponent + venue, `opp_gw{n}`); also owns the three squad-solves (`solve_ceiling`, `solve_reachable_ceiling`, `solve_free_hit_rebuild` — Patch 1) that `app.py` and any future CLI/script use. |
+| `data_pipeline.py` | Wires a raw API snapshot into a computed player table (Patch 2: per-GW opponent + venue, `opp_gw{n}`; Patch 4: per-GW fixture-difficulty tier, `fdr_gw{n}`, from the official API's difficulty field with a strength-rating fallback); also owns the three squad-solves (`solve_ceiling`, `solve_reachable_ceiling`, `solve_free_hit_rebuild` — Patch 1) that `app.py` and any future CLI/script use. |
 | `setpiece.py` | Step 3c — Set-Piece Role Signal. |
-| `style_profiles.py` | §7 — the four Manager Style Profile presets and their dials, plus `captain_alt_pick()` (Patch 1) which picks the captaincy panel's second slot by each profile's own `eo_pull` direction instead of a hardcoded lowest-EO pick. |
+| `style_profiles.py` | §7 — the four Manager Style Profile presets and their dials, plus `captain_alt_pick()` (Patch 1; Patch 3 adds a near-miss fallback for clear-standout weeks) which picks the captaincy panel's second slot by each profile's own `eo_pull` direction, and `differential_floor()` (Patch 1, wired in by Patch 3) — the merit bar a low-EO pick must clear before a profile's EO pull is allowed to favour it. |
 | `chip_protocol.py` | Step 9 — Chip Timing Protocol: chip status tracking, DGW/BGW detection, Wildcard flag, and (Patch 1) the Chip Advisor's `evaluate_bench_boost` / `evaluate_triple_captain` / `evaluate_free_hit` quantified play/hold verdicts. |
 | `transfers.py` | Step 7a addendum — free-transfer count derived from transfer history. |
-| `recommend.py` | Transfer-swap suggestions + the season verdict text (Patch 2: football-commentary phrase bank — `season_verdict()`, was `chess_verdict()`). |
-| `optimizer.py` | PuLP/CBC constrained squad solver. `solve_squad()` (Patch 1) takes an `objective_col` (multi-GW horizon sum or a single GW, for Free Hit) and an optional `retain_pool_codes`/`min_retain` constraint (for the reachable ceiling). `best_starting_xi()` (existing, newly wired into `app.py` in Patch 2) picks the model's own best valid formation from a fixed squad for the pitch view. |
+| `recommend.py` | Transfer suggestions (Patch 3: full rewrite — a joint multi-transfer solve via `optimizer.solve_squad()`, Rules #28/#30/#34/#35/#36, with an EO-pull style tie-break) + the season verdict text (Patch 2: football-commentary phrase bank — `season_verdict()`, was `chess_verdict()`). |
+| `optimizer.py` | PuLP/CBC constrained squad solver. `solve_squad()` (Patch 1) takes an `objective_col` (multi-GW horizon sum or a single GW, for Free Hit) and an optional `retain_pool_codes`/`min_retain` constraint — Patch 3 reuses this same mechanism for the joint transfer-count (k=0..5) solve. `best_starting_xi()` (existing, newly wired into `app.py` in Patch 2) picks the model's own best valid formation from a fixed squad for the pitch view. |
 | `manual_overrides.csv` | Optional hand-pasted overrides (xM floor, CS% tier-2/3 odds-derived numbers, BPS profile tags, tiny-sample rescue rates). Empty by default; edit and push to use. |
 | `requirements.txt` | Python dependencies — this is what Streamlit Cloud installs on deploy. |
 | `.streamlit/config.toml` | Theme colors so native widgets (buttons, sliders) match the design. |
@@ -133,6 +137,92 @@ no changes to the underlying xPts math itself:
   an inline hover ("i") tooltip so the "what is this measuring" answer
   doesn't require opening the expander below it.
 
+## Patch 3 + Patch 4 (joint transfer optimization, dynamic captaincy, card redesign, fixture ticker)
+
+Delivered together (no file overlap — Patch 3 touches `recommend.py` /
+`fpl_engine.py` / `style_profiles.py` / `model_config.yaml`, Patch 4 touches
+`app.py` / `data_pipeline.py`) at the user's request, but they're two
+conceptually separate changes:
+
+**Patch 3 — transfer/captaincy math rewrite**
+
+- **`recommend.suggest_transfers()` now solves jointly, not pairwise.** The
+  old logic ranked the single best replacement per OUT slot and picked the
+  top N — it could never find a genuinely better 2-or-3-player reshuffle
+  that no individual swap looks best in isolation. It's replaced with a real
+  joint solve: for every transfer count k in the hit-stance's allowed range
+  ("No hits" tests 0..free transfers; "Hit if worth it" tests 0..5; "Force"
+  tests the requested count), `optimizer.solve_squad()` runs against the
+  **full squad+pool combined** (Standing Rule #30 — never a pre-filtered
+  subset) with `retain_pool_codes=<current squad>, min_retain=15-k`
+  (Standing Rule #28 — one MILP per k, not k independent pairwise choices).
+  Among the k's whose net gain (after any hit cost) lands within
+  `margin_of_error_threshold()` of the best net gain found, the **smallest**
+  k wins outright (Standing Rules #34/#35) — a bigger transfer count only
+  gets picked when it clears noise by a real margin. `_pair_moves()`
+  mechanically asserts the OUT/IN position multisets match (Standing Rule
+  #36) before turning the chosen squad diff into a move-by-move plan.
+- **EO-pull tie-break, finally wired in.** `style_profiles.differential_floor()`
+  existed since Patch 1 but nothing called it. Now, after the joint xPts
+  solve has already picked the best squad, `_apply_eo_pull()` looks for a
+  same-position, same-or-cheaper, genuinely-tied (margin-of-error) alternative
+  to each chosen IN player and substitutes per the active profile's
+  `eo_pull` direction — low-EO profiles only substitute a pick that *also*
+  clears the differential floor (merit, not a relaxation); the no-EO-weighting
+  profile never substitutes at all. This never overrides a real projection
+  edge, only breaks a genuine statistical tie in the direction the manager's
+  own style profile already implies.
+- **The old Bench Value Rule autosub-discount heuristic is retired.** Each
+  player's own `xm` already prices in their expected minutes inside
+  `xpts_horizon_sum`, so a flat discount on top of that for a bench-slot OUT
+  player was double-counting the same signal (the model doc's own worked
+  example flagged this as never properly wired in). `bench_codes` is still
+  accepted by `suggest_transfers()` for backward compatibility but no longer
+  changes the math — the joint solve doesn't need it, since it already
+  reasons about the whole 15-man squad shape directly, not per-slot swaps.
+- **Captaincy shortlist window is now dynamic.** `captaincy_protocol()`'s
+  "statistically tied" window used to be a flat `1.0 xPts`
+  (`captaincy.shortlist_xpts_window`, now documented as legacy/superseded
+  in `model_config.yaml`, kept in the file but no longer read) regardless of
+  how big the week's top score actually was. It's now
+  `margin_of_error_threshold(top_xpts, cfg)` (Standing Rule #34) — the same
+  shared threshold used everywhere else. A `near_miss` column also flags
+  candidates just outside the shortlist but within
+  `captaincy.near_miss_multiplier x` the same window; `captain_alt_pick()`
+  falls back to that pool (labelled "Near miss – ...") on a genuine
+  clear-standout week, so the alt-captain slot isn't just empty when one
+  player is miles ahead.
+
+**Patch 4 — card redesign, fixture ticker, captaincy on the pitch**
+
+- **Player card redesign.** Tighter, top-cropped player photo
+  (`object-position:center 12%`) in a thin team-color ring, replacing the
+  plain centered avatar. Info hierarchy is now name first, a single compact
+  "position · opponent" meta line, then xPts as the clearly dominant number
+  with price as a quiet mono footnote beside it — not five equal-weight
+  stacked lines.
+- **Multi-GW fixture ticker.** At horizon 1 the card still shows the single
+  opponent chip exactly as Patch 2 shipped it. At horizon > 1, that line is
+  replaced by a small row of difficulty-colored dots — one per GW in the
+  horizon, hover for the exact opponent — closing the gap where a wider
+  horizon still only showed the current gameweek's fixture on the card
+  itself (the GW Breakdown table below always had the full text version).
+  Sourced from the new `fdr_gw{n}` column (`data_pipeline.compute_all()`):
+  the official FPL `team_h_difficulty`/`team_a_difficulty` field (1-5 scale,
+  mapped 1-2→easy/3→mid/4-5→hard) when present, falling back to a tier
+  derived from the same team-strength ratings `cs_pct_poisson()` already
+  reads when it's missing. A double gameweek shows its harder fixture's tier
+  (worst case); a blank gameweek shows a dim neutral dot.
+- **Captaincy moved onto the pitch.** The standalone "Captaincy Pick"
+  section (two `st.metric` boxes) is retired entirely. The gold armband on
+  the pitch card stays the primary signal; a single themed caption directly
+  under the pitch carries the "why" in plain football language — genuinely
+  distinguishing a clear standout week ("the standout pick this week, clear
+  of the field") from an actual statistical tie ("a coin-flip with
+  {alt}... differential edge given per your style profile"), using the same
+  shortlist/near-miss data Patch 3 computes rather than always phrasing it
+  as a coin-flip.
+
 ## Updating the model later
 
 - **A weight or threshold changes** (e.g. hit-cost threshold, a decay-schedule
@@ -153,13 +243,13 @@ no changes to the underlying xPts math itself:
   official API only exposes your exact sale price via an authenticated
   endpoint this zero-cost, no-login tool deliberately doesn't use. Suggested
   budgets run slightly conservative, not optimistic.
-- **Transfer suggestions are single-slot swaps** (best replacement per
-  position, ranked by net gain), not a full multi-transfer squad
-  re-optimization. The Team Rating % and Chip Advisor's Free Hit check
-  *do* run the full constrained MILP solver (`optimizer.py`) — that's the
-  "what's the best reachable/rebuildable squad" number, just not turned
-  into a turn-by-turn multi-transfer path for the ordinary weekly transfer
-  plan yet (scoped for Patch 3's Step 7c multi-GW path optimization).
+- **Transfer suggestions now run a full joint multi-transfer solve**
+  (Patch 3 — see above), same MILP (`optimizer.py`) the Team Rating % and
+  Chip Advisor's Free Hit check already used for "what's the best
+  reachable/rebuildable squad." One thing still not modeled: real banked
+  sale price (see the bullet above) feeds the same `team_value` budget the
+  joint solve optimizes against, so its budget constraint carries the same
+  slightly-conservative bias as the single-swap version did.
 - **Player photos hotlink the official `resources.premierleague.com` CDN
   directly** — the same images the official site itself uses. For a player
   who transferred clubs very recently, that CDN photo can still show the

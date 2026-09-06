@@ -107,16 +107,53 @@ def comp_discount_for_team(cfg: dict, short_name: str) -> float:
 
 
 def get_fixture_for_gw(fixtures: pd.DataFrame, team_id: int, gw: int):
+    """Returns (opp_team_id, is_home, official_difficulty) tuples —
+    official_difficulty is FPL's own team_h_difficulty/team_a_difficulty
+    field (1-5 scale) when the fixtures source carries it, else None (the
+    caller falls back to a strength-rating-based tier — see
+    `_fdr_tier_from_strength`)."""
     if fixtures.empty or "event" not in fixtures.columns:
         return []
     rows = fixtures[fixtures["event"] == gw]
     out = []
     for _, r in rows.iterrows():
         if r.get("team_h") == team_id:
-            out.append((int(r["team_a"]), True))
+            out.append((int(r["team_a"]), True, r.get("team_h_difficulty")))
         elif r.get("team_a") == team_id:
-            out.append((int(r["team_h"]), False))
+            out.append((int(r["team_h"]), False, r.get("team_a_difficulty")))
     return out
+
+
+def _fdr_tier_from_official(value) -> str | None:
+    """Maps FPL's official 1-5 team_h_difficulty/team_a_difficulty scale to
+    the three-tier easy/mid/hard the fixture ticker (Patch 4) renders as
+    dots: 1-2 -> easy, 3 -> mid, 4-5 -> hard. Returns None when the value
+    is missing so the caller can fall back to strength-rating tiering."""
+    if value is None or pd.isna(value):
+        return None
+    v = int(value)
+    if v <= 2:
+        return "easy"
+    if v == 3:
+        return "mid"
+    return "hard"
+
+
+def _fdr_tier_from_strength(opp_row: pd.Series, is_home: bool) -> str:
+    """Fallback fixture-difficulty tier for the rare case a fixtures source
+    is missing the official difficulty field entirely — reuses the same
+    strength_attack_home/away ratings `fpl_engine.cs_pct_poisson()` already
+    reads, so it needs no extra data source. Bands the OPPONENT's attack
+    rating (the threat facing our player's defence/clean-sheet odds) around
+    the raw 1000-1300ish scale's rough league-average midpoint."""
+    opp_att = opp_row.get("strength_attack_away") if is_home else opp_row.get("strength_attack_home")
+    if opp_att is None or pd.isna(opp_att) or opp_att == 0:
+        return "mid"
+    if opp_att < 1050:
+        return "easy"
+    if opp_att > 1200:
+        return "hard"
+    return "mid"
 
 
 def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
@@ -144,19 +181,27 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
 
         gw_xpts = {}
         gw_opp = {}
+        gw_fdr = {}
         sp_mult_last = 1.0
+        fdr_rank = {"easy": 0, "mid": 1, "hard": 2}
         for gw in gw_list:
             fixtures = get_fixture_for_gw(snap.fixtures, team_id, gw)
             if not fixtures:
                 gw_xpts[gw] = 0.0
                 gw_opp[gw] = ""  # blank gameweek — no fixture, surfaced as-is in the UI
+                gw_fdr[gw] = ""  # no fixture -> no difficulty dot to show
                 continue
             gw_total = 0.0
             opp_labels = []
-            for opp_id, is_home in fixtures:
+            fdr_tiers = []
+            for opp_id, is_home, official_diff in fixtures:
                 opp_row = teams.loc[teams["id"] == opp_id]
                 opp_row = opp_row.iloc[0] if not opp_row.empty else pd.Series(dtype=float)
                 opp_labels.append(f"{team_short_name(teams, opp_id)} ({'H' if is_home else 'A'})")
+                tier = _fdr_tier_from_official(official_diff)
+                if tier is None:
+                    tier = _fdr_tier_from_strength(opp_row, is_home)
+                fdr_tiers.append(tier)
 
                 cs_override = p.get("cs_pct_override", np.nan)
                 if pd.notna(cs_override):
@@ -181,6 +226,9 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                 gw_total += res["xpts"]
             gw_xpts[gw] = round(gw_total, 3)
             gw_opp[gw] = " / ".join(opp_labels)  # "/"-joined for a double gameweek, single label otherwise
+            # hardest of the two fixtures in a double gameweek — the fixture
+            # ticker (Patch 4) shows the worst-case dot, not an averaged one
+            gw_fdr[gw] = max(fdr_tiers, key=lambda t: fdr_rank.get(t, 1)) if fdr_tiers else ""
 
         rec = {
             "code": p.get("code"), "id": p.get("id"), "web_name": p.get("web_name"),
@@ -195,6 +243,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         for gw in gw_list:
             rec[f"xpts_gw{gw}"] = gw_xpts[gw]
             rec[f"opp_gw{gw}"] = gw_opp[gw]
+            rec[f"fdr_gw{gw}"] = gw_fdr[gw]
         rec["xpts_horizon_sum"] = round(sum(gw_xpts.values()), 3)
         rows.append(rec)
 
