@@ -413,6 +413,27 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     pool_df = proj[~proj["code"].isin(squad_codes)].copy()
 
+    # TEMPORARY DIAGNOSTIC (remove once the "only GK shows on the pitch at
+    # horizon=1" bug is found) — pinpoints exactly which stage drops players:
+    # picks->code mapping, proj row count, or best_starting_xi's fallback.
+    with st.expander("🔧 Debug — pitch diagnostic (temporary)"):
+        picks_list = picks.get("picks", []) if picks else []
+        unmapped = [pk["element"] for pk in picks_list if id_to_code.get(pk["element"]) is None]
+        st.markdown(f"- squad_gw={squad_gw} · planning_gw={planning_gw} · horizon={horizon} · gw_list={gw_list}")
+        st.markdown(f"- picks fetched: {len(picks_list)} · squad_codes resolved: {len(squad_codes)} · "
+                    f"bench_codes: {len(bench_codes)} · unmapped element IDs: {unmapped}")
+        st.markdown(f"- proj rows: {len(proj)} · squad_df rows: {len(squad_df)} · pool_df rows: {len(pool_df)}")
+        if not squad_df.empty and "position" in squad_df.columns:
+            st.markdown(f"- squad_df position counts: {squad_df['position'].value_counts().to_dict()}")
+        st.markdown(f"- opt_col='{opt_col}' · present in squad_df: {opt_col in squad_df.columns if not squad_df.empty else 'n/a (squad_df empty)'}")
+        if not squad_df.empty and opt_col in squad_df.columns:
+            st.markdown(f"- {opt_col} non-null count: {squad_df[opt_col].notna().sum()}/{len(squad_df)} · "
+                        f"sample values: {squad_df[opt_col].head(15).tolist()}")
+        st.markdown(f"- optimized_xi: {'FOUND, shape=' + str(optimized_xi['shape']) + ', total=' + str(optimized_xi['total']) if optimized_xi is not None else 'NONE (fell back to live bench split)'}")
+        st.markdown(f"- starters_df rows: {len(starters_df)} · bench_df rows: {len(bench_df)}")
+        if not starters_df.empty and "position" in starters_df.columns:
+            st.markdown(f"- starters_df position counts: {starters_df['position'].value_counts().to_dict()}")
+
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []
     rank_history = [r.get("overall_rank") for r in cur_hist if r.get("overall_rank") is not None]
