@@ -231,19 +231,28 @@ def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool
     meta_html = f'<div class="meta"><span class="pos {pos}">{pos_label}</span> · {meta_right}</div>' if meta_right else \
         f'<div class="meta"><span class="pos {pos}">{pos_label}</span></div>'
 
-    return f"""<div class="card" style="--team:{team_color}">{cap_html}{cap_actual_html}{sp_html}
-      <div class="photo-ring">
-        <img src="{_photo_url(row.get('code', 0))}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-        <div class="avatar-fallback" style="display:none;">{initials}</div>
-      </div>
-      <div class="name">{row.get('web_name','')}</div>
-      {meta_html}
-      {ticker_html}
-      <div class="stats-row">
-        <div><div class="xp">{xp:.1f}</div><span class="xp-l">{xp_label}</span></div>
-        {price_html}
-      </div>
-    </div>"""
+    # Built as ONE physical line, deliberately — a multi-line f-string here
+    # (the pre-Patch-4 shape) put optional interpolations like `ticker_html`
+    # alone on their own line, and whenever that value is "" (which it
+    # always is at horizon=1, since the fixture ticker only renders for a
+    # 2+ GW horizon) that line is blank/whitespace-only. Streamlit's
+    # Markdown renderer treats a blank line inside a raw HTML block as the
+    # end of that block (a CommonMark HTML-block rule) — so at horizon=1
+    # every card past that point in the string silently vanished, which is
+    # exactly the "only the GK shows, and only at horizon=1" bug this fixes.
+    # Keeping the whole card on one line makes that class of bug structurally
+    # impossible, regardless of which piece happens to be empty.
+    return ('<div class="card" style="--team:' + team_color + '">' + cap_html + cap_actual_html + sp_html +
+            '<div class="photo-ring">'
+            '<img src="' + _photo_url(row.get('code', 0)) + '" '
+            'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
+            '<div class="avatar-fallback" style="display:none;">' + initials + '</div>'
+            '</div>'
+            '<div class="name">' + str(row.get('web_name', '')) + '</div>' +
+            meta_html + ticker_html +
+            '<div class="stats-row"><div><div class="xp">' + f"{xp:.1f}" + '</div>'
+            '<span class="xp-l">' + xp_label + '</span></div>' + price_html + '</div>'
+            '</div>')
 
 
 # ---------------------------------------------------------------------------
@@ -412,27 +421,6 @@ with st.spinner("Fetching live data and computing xPts..."):
         gw_xpts_total = round(starters_df[opt_col].sum(), 1) if (opt_col in starters_df.columns and not starters_df.empty) else 0.0
 
     pool_df = proj[~proj["code"].isin(squad_codes)].copy()
-
-    # TEMPORARY DIAGNOSTIC (remove once the "only GK shows on the pitch at
-    # horizon=1" bug is found) — pinpoints exactly which stage drops players:
-    # picks->code mapping, proj row count, or best_starting_xi's fallback.
-    with st.expander("🔧 Debug — pitch diagnostic (temporary)"):
-        picks_list = picks.get("picks", []) if picks else []
-        unmapped = [pk["element"] for pk in picks_list if id_to_code.get(pk["element"]) is None]
-        st.markdown(f"- squad_gw={squad_gw} · planning_gw={planning_gw} · horizon={horizon} · gw_list={gw_list}")
-        st.markdown(f"- picks fetched: {len(picks_list)} · squad_codes resolved: {len(squad_codes)} · "
-                    f"bench_codes: {len(bench_codes)} · unmapped element IDs: {unmapped}")
-        st.markdown(f"- proj rows: {len(proj)} · squad_df rows: {len(squad_df)} · pool_df rows: {len(pool_df)}")
-        if not squad_df.empty and "position" in squad_df.columns:
-            st.markdown(f"- squad_df position counts: {squad_df['position'].value_counts().to_dict()}")
-        st.markdown(f"- opt_col='{opt_col}' · present in squad_df: {opt_col in squad_df.columns if not squad_df.empty else 'n/a (squad_df empty)'}")
-        if not squad_df.empty and opt_col in squad_df.columns:
-            st.markdown(f"- {opt_col} non-null count: {squad_df[opt_col].notna().sum()}/{len(squad_df)} · "
-                        f"sample values: {squad_df[opt_col].head(15).tolist()}")
-        st.markdown(f"- optimized_xi: {'FOUND, shape=' + str(optimized_xi['shape']) + ', total=' + str(optimized_xi['total']) if optimized_xi is not None else 'NONE (fell back to live bench split)'}")
-        st.markdown(f"- starters_df rows: {len(starters_df)} · bench_df rows: {len(bench_df)}")
-        if not starters_df.empty and "position" in starters_df.columns:
-            st.markdown(f"- starters_df position counts: {starters_df['position'].value_counts().to_dict()}")
 
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []

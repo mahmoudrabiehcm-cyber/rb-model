@@ -222,6 +222,19 @@ conceptually separate changes:
   {alt}... differential edge given per your style profile"), using the same
   shortlist/near-miss data Patch 3 computes rather than always phrasing it
   as a coin-flip.
+- **Fixed: pitch only showed the goalkeeper at horizon = 1.** `_player_card()`
+  originally built its HTML as a multi-line f-string with the fixture-ticker
+  interpolation (`{ticker_html}`) alone on its own line. That value is only
+  ever non-empty when the horizon is 2+ GWs (the ticker doesn't render at
+  horizon 1 — see above), so at horizon = 1 that line was blank. Streamlit's
+  Markdown renderer treats a blank line inside a raw HTML block as the end
+  of that block (a CommonMark HTML-block rule), so everything in the pitch's
+  combined HTML string past the first blank line — the rest of that very
+  card plus all ten others — silently never rendered. `_player_card()` now
+  builds its return value as a single physical line with no embedded blank
+  lines possible, regardless of which optional piece (ticker, price, captain
+  markers) happens to be empty — verified by rendering a full 11-card pitch
+  through an actual CommonMark parser and confirming all 11 survive.
 
 ## Updating the model later
 
