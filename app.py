@@ -1,6 +1,6 @@
 """
 app.py — RB Model
-Streamlit front end for the FPL Projection Model v4.0. Zero-cost: official
+Streamlit front end for the FPL Projection Model v5.0. Zero-cost: official
 FPL API (free, no key), Streamlit Community Cloud (free, public apps),
 Google Fonts (free). See DEPLOY.md for the full deploy walkthrough and
 README.md for how the pieces fit together.
@@ -16,16 +16,25 @@ import streamlit as st
 import fpl_data
 import fpl_engine as eng
 import data_pipeline
+import optimizer as opt
 import style_profiles
 import chip_protocol
 import transfers
 import recommend
 
-st.set_page_config(page_title="RB Model", page_icon="♟️", layout="wide")
+st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
+
+# Crest mark (Patch 2) — replaces the pawn icon everywhere it appeared inline
+# in the brand wordmark. A small geometric badge rather than an emoji glyph.
+_CREST_SVG = ('<svg viewBox="0 0 100 100" width="26" height="26" style="flex:none;">'
+              '<polygon points="50,4 90,26 90,68 50,96 10,68 10,26" fill="none" stroke="#0E3D26" stroke-width="6"/>'
+              '<polygon points="50,22 74,36 74,64 50,80 26,64 26,36" fill="#1F6D45"/>'
+              '<circle cx="50" cy="50" r="9" fill="#F5F6F0"/></svg>')
 
 # ---------------------------------------------------------------------------
-# Style — same palette/type system as the design mockup ("chess soul": terse
-# notation-style micro-copy, restraint, one accent per screen).
+# Style — a considered, precise identity (terse micro-copy, restraint, one
+# accent per screen) expressed through football's own vocabulary (Patch 2)
+# rather than chess — same underlying "soul," different, more natural words.
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -45,6 +54,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .mono{ font-family:"IBM Plex Mono",monospace; }
 .stApp{ background:var(--bg); }
 
+.brand-row{ display:flex; align-items:center; gap:8px; }
 .brand-mark{ font-family:"Fraunces"; font-weight:900; font-size:2rem; line-height:1; margin-bottom:2px; }
 .brand-mark .b2{ color:var(--accent-strong); }
 .brand-tag{ font-family:"IBM Plex Mono"; font-size:10.5px; color:var(--ink-faint); letter-spacing:.06em; text-transform:uppercase; }
@@ -54,13 +64,23 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   border:1px solid var(--rule); border-left:4px solid var(--accent);
   box-shadow:var(--shadow); padding:18px 20px; margin-bottom:6px;
 }
+.verdict-card .phase-tag{ font-family:"IBM Plex Mono"; font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:4px; display:block; }
 .verdict-card .h{ font-family:"Fraunces"; font-weight:800; font-size:1.35rem; margin:0 0 6px; color:var(--accent-strong); }
 .verdict-card .b{ margin:0; color:var(--ink-muted); font-size:.94rem; font-style:italic; }
 
-.stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:wrap; }
+.stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:wrap; align-items:flex-start; }
 .stat .n{ font-size:1.5rem; font-weight:600; }
 .stat .l{ font-size:10.5px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
+.stat.rating .n{ display:flex; align-items:center; gap:6px; }
+.stat.new .n{ color:var(--accent-strong); }
 .trend-up{ color:var(--accent); } .trend-down{ color:var(--warn); }
+
+/* Patch 2 — hover-hidden reasoning: rule citations / methodology notes move
+   behind this "i" affordance instead of sitting as a permanent caption. */
+.info-dot{ width:15px; height:15px; border-radius:50%; background:var(--surface-2); border:1px solid var(--rule);
+  color:var(--ink-muted); font-family:"IBM Plex Sans"; font-size:10px; font-weight:700; display:inline-flex;
+  align-items:center; justify-content:center; cursor:help; flex:none; }
+.rating-basis{ font-family:"IBM Plex Sans"; font-size:10px; color:var(--ink-faint); margin-top:3px; max-width:150px; line-height:1.3; }
 
 .section-h{ font-family:"Fraunces"; font-weight:700; font-size:1.15rem; margin:30px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule); }
 
@@ -78,10 +98,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   border:1px solid var(--rule); padding:22px 14px 10px; }
 .prow{ display:flex; justify-content:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
 .card{ background:var(--surface); border:1px solid var(--rule); border-top:4px solid var(--team,var(--accent));
-  box-shadow:var(--shadow); width:104px; padding:10px 6px 8px; text-align:center; position:relative; }
+  box-shadow:var(--shadow); width:clamp(58px, 15vw, 104px); padding:10px 6px 8px; text-align:center; position:relative; }
 .card .cap{ position:absolute; top:-9px; right:-9px; width:20px; height:20px; border-radius:50%;
   background:var(--gold); color:#241A05; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700;
   display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow); z-index:2; }
+.card .cap-actual{ position:absolute; bottom:-8px; right:-8px; width:16px; height:16px; border-radius:50%;
+  background:var(--surface); border:2px solid var(--ink-faint); color:var(--ink-muted); font-family:"IBM Plex Mono";
+  font-size:8px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:2; cursor:help; }
 .card .sp{ position:absolute; top:5px; left:5px; font-family:"IBM Plex Mono"; font-size:7.5px; font-weight:700;
   color:var(--gold); border:1px solid var(--gold); border-radius:2px; padding:0 3px; }
 .avatar-wrap{ width:42px; height:42px; margin:0 auto 6px; position:relative; }
@@ -92,11 +115,31 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .card .pos{ display:inline-block; font-family:"IBM Plex Mono"; font-size:9px; font-weight:600; padding:1px 5px; border-radius:2px; margin-bottom:4px; }
 .card .pos.gk{ background:var(--gold-tint); color:var(--gold); } .card .pos.def{ background:var(--blue-tint); color:var(--blue); }
 .card .pos.mid{ background:var(--accent-tint); color:var(--accent-strong); } .card .pos.fwd{ background:var(--coral-tint); color:var(--coral); }
+.card .opp{ display:inline-block; font-family:"IBM Plex Mono"; font-size:9px; font-weight:600; color:var(--blue);
+  background:var(--blue-tint); padding:1px 5px; border-radius:2px; margin-bottom:4px; }
 .card .name{ font-weight:600; font-size:12px; } .card .xp{ font-family:"IBM Plex Mono"; font-size:11px; color:var(--accent-strong); font-weight:600; margin-top:2px; }
 .card .price{ font-family:"IBM Plex Mono"; font-size:9.5px; color:var(--ink-faint); }
 .bench-strip{ background:var(--bench); margin:0 -14px; padding:12px 14px 4px; border-top:1px dashed var(--rule); }
-.bench-strip .card{ opacity:.68; width:92px; }
+.bench-strip .card{ opacity:.68; width:clamp(50px, 13vw, 92px); }
 .side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
+
+/* Patch 2 — mobile simplification: at narrow widths the card drops the price
+   line entirely (least-needed info at this size — still visible in the GW
+   Breakdown table) and shrinks text so name + position + opponent + xPts
+   stay legible. .prow's flex-wrap (already set above) means a 5-defender
+   row degrades to two lines here instead of a horizontal scrollbar. */
+@media (max-width:480px){
+  .card{ padding:7px 4px 6px; }
+  .card .price{ display:none; }
+  .card .name{ font-size:10.5px; }
+  .card .xp{ font-size:9.5px; }
+  .card .pos, .card .opp{ font-size:7.5px; padding:1px 4px; }
+  .avatar-wrap, .avatar-wrap img, .avatar-fallback{ width:30px; height:30px; }
+  .avatar-fallback{ font-size:11px; }
+  .card .cap{ width:16px; height:16px; font-size:9px; top:-7px; right:-7px; }
+  .card .cap-actual{ width:13px; height:13px; font-size:7px; }
+  .prow{ gap:6px; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -117,21 +160,32 @@ def _photo_url(code) -> str:
     return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{int(code)}.png"
 
 
-def _player_card(row: pd.Series, is_captain: bool = False, xp_col: str | None = None) -> str:
+def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool = False,
+                  xp_col: str | None = None, opp_col: str | None = None) -> str:
+    """is_captain: model's recommended captain this run -> solid gold armband.
+    is_live_captain: your actual live FPL captain, only ever passed True when
+    it's a DIFFERENT player from the recommendation (Patch 2) -> a smaller
+    hollow-ring secondary marker, so both are visible without implying the
+    recommendation and your real team agree when they don't."""
     team_color = _team_color(row.get("team", ""))
     initials = "".join([w[0] for w in str(row.get("web_name", "??")).split()][:2]).upper() or "??"
     xp = row.get(xp_col) if xp_col else row.get("xpts_horizon_sum")
     cap_html = '<div class="cap">C</div>' if is_captain else ""
+    cap_actual_html = ('<div class="cap-actual" title="Your live captain — the model recommends someone else this run">C</div>'
+                        if is_live_captain else "")
     sp_html = '<div class="sp">SP</div>' if row.get("setpiece_flag") else ""
     pos = str(row.get("position", "")).lower()
     price = row.get("price")
     price_html = f'<div class="price mono">£{price}m</div>' if price is not None else ""
-    return f"""<div class="card" style="--team:{team_color}">{cap_html}{sp_html}
+    opp = row.get(opp_col) if opp_col else None
+    opp_html = f'<span class="opp">{opp}</span><br>' if opp else ""
+    return f"""<div class="card" style="--team:{team_color}">{cap_html}{cap_actual_html}{sp_html}
       <div class="avatar-wrap">
         <img src="{_photo_url(row.get('code', 0))}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
         <div class="avatar-fallback" style="display:none;">{initials}</div>
       </div>
-      <span class="pos {pos}">{row.get('position','')}</span>
+      <span class="pos {pos}">{row.get('position','')}</span><br>
+      {opp_html}
       <div class="name">{row.get('web_name','')}</div>
       {price_html}
       <div class="xp">{xp:.1f} xPts</div>
@@ -172,9 +226,10 @@ if "unlocked" not in st.session_state:
 
 if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
-    st.markdown('<div class="brand-mark">RB <span class="b2">Model</span></div>'
-                '<div class="brand-tag">v4.0 engine · live · zero-cost</div>'
-                '<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
+    st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
+                f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
+                f'<div class="brand-tag">v5.0 engine · live · zero-cost</div>'
+                f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
     if st.button("Unlock →", use_container_width=True):
@@ -200,8 +255,9 @@ cfg = eng.load_config()
 entry_id = st.session_state.team_id
 
 with st.sidebar:
-    st.markdown('<div class="brand-mark">RB <span class="b2">Model</span></div>'
-                '<div class="brand-tag">v4.0 engine · live · zero-cost</div><br>',
+    st.markdown(f'<div class="brand-row">{_CREST_SVG}'
+                f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
+                f'<div class="brand-tag">v5.0 engine · live · zero-cost</div><br>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="side-note">TEAM ID</div>'
                 f'<div style="font-family:\'IBM Plex Mono\'; color:var(--accent-strong); '
@@ -238,7 +294,8 @@ if run_clicked:
     st.session_state.has_run = True
 
 if not st.session_state.get("has_run"):
-    st.markdown('<div class="brand-mark">RB <span class="b2">Model</span></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="brand-row">{_CREST_SVG}<div class="brand-mark">RB <span class="b2">Model</span></div></div>',
+                unsafe_allow_html=True)
     st.info("Set your style and hit stance in the sidebar, then click **Run Model** to fetch live data and build your recommendations.")
     st.stop()
 
@@ -282,8 +339,24 @@ with st.spinner("Fetching live data and computing xPts..."):
                 bench_codes.append(code)
 
     squad_df = proj[proj["code"].isin(squad_codes)].copy()
-    bench_df = squad_df[squad_df["code"].isin(bench_codes)]
-    starters_df = squad_df[~squad_df["code"].isin(bench_codes)]
+
+    # Patch 2 — auto-optimized XI: the pitch, captaincy, chip advisor, and the
+    # new GWn xPts stat all render the BEST valid formation from your actual
+    # 15 for this gameweek (highest projected xpts_gw{planning_gw}), not a
+    # copy of whatever arrangement your live FPL team happens to have set.
+    # Falls back to the live split only if the optimizer can't produce a
+    # valid XI (e.g. incomplete GW data right after a deadline).
+    opt_col = f"xpts_gw{planning_gw}"
+    optimized_xi = opt.best_starting_xi(squad_df, opt_col) if (not squad_df.empty and opt_col in squad_df.columns) else None
+    if optimized_xi is not None:
+        starters_df = optimized_xi["xi"]
+        bench_df = squad_df[~squad_df["code"].isin(starters_df["code"])]
+        gw_xpts_total = round(optimized_xi["total"], 1)
+    else:
+        bench_df = squad_df[squad_df["code"].isin(bench_codes)]
+        starters_df = squad_df[~squad_df["code"].isin(bench_codes)]
+        gw_xpts_total = round(starters_df[opt_col].sum(), 1) if (opt_col in starters_df.columns and not starters_df.empty) else 0.0
+
     pool_df = proj[~proj["code"].isin(squad_codes)].copy()
 
     # rank history + points from entry history
@@ -292,7 +365,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     points_total = entry.get("summary_overall_points") if entry else None
     hits_last_3 = sum(1 for r in cur_hist[-3:] if (r.get("event_transfers_cost") or 0) > 0)
 
-    verdict = recommend.chess_verdict(rank_history, hits_last_3, squad_gw)
+    verdict = recommend.season_verdict(rank_history, hits_last_3, squad_gw)
 
     # free transfers + bank — moved ahead of Team Rating % (below) because the
     # reachable-ceiling solve needs free_transfers to set its min-retain constraint.
@@ -344,12 +417,15 @@ with st.spinner("Fetching live data and computing xPts..."):
                   f"Standing Rules #16/#18 disclosure.")
     rating = eng.team_rating_pct(squad_total, reachable_total, tier_label)
 
-    # captaincy — starting XI only, never the bench
+    # captaincy — starting XI only, never the bench. "code" is carried through
+    # (Patch 2) so the pitch view can match the recommendation back to its
+    # card and place the armband there directly, rather than just displaying
+    # the pick in its own section.
     cap_pick_row, cap_alt_row, cap_alt_label = None, None, "Alternative"
     if not starters_df.empty:
         cap_col = f"xpts_gw{gw_list[0]}"
         cap_candidates = starters_df.rename(columns={cap_col: "xpts_this_gw"})[
-            ["web_name", "team", "xpts_this_gw", "selected_by_percent"]]
+            ["code", "web_name", "team", "xpts_this_gw", "selected_by_percent"]]
         cap_result = eng.captaincy_protocol(cap_candidates, cfg)
         cap_pick = style_profiles.captaincy_pick(cap_result, style_name)
         cap_alt_row, cap_alt_label = style_profiles.captain_alt_pick(cap_result, cap_pick["web_name"], style_name)
@@ -428,7 +504,8 @@ with st.spinner("Fetching live data and computing xPts..."):
 # ---------------------------------------------------------------------------
 col1, col2 = st.columns([2, 1])
 with col1:
-    st.markdown(f'<div class="verdict-card"><p class="h">{verdict["headline"]}</p>'
+    st.markdown(f'<div class="verdict-card"><span class="phase-tag">GW{planning_gw}</span>'
+                f'<p class="h">{verdict["headline"]}</p>'
                 f'<p class="b">{verdict["body"]}</p></div>', unsafe_allow_html=True)
 with col2:
     trend = ""
@@ -436,10 +513,18 @@ with col2:
         trend = '<span class="trend-up">▲</span>' if rank_history[-1] < rank_history[-2] \
             else ('<span class="trend-down">▼</span>' if rank_history[-1] > rank_history[-2] else "")
     rank_disp = f"{rank_history[-1]:,}" if rank_history else "—"
+    rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon, divided by the best "
+                       "squad actually reachable using your free transfers right now (not an unlimited-budget "
+                       "fantasy ideal). See the disclosure expander below for the full researched-tier breakdown.")
     st.markdown(f"""<div class="stat-row">
       <div class="stat"><div class="n">{rank_disp} {trend}</div><div class="l">Overall rank</div></div>
-      <div class="stat"><div class="n">{rating['rating_pct'] if rating['rating_pct'] is not None else '—'}%</div><div class="l">Team rating</div></div>
-      <div class="stat"><div class="n">{points_total if points_total is not None else '—'}</div><div class="l">Points</div></div>
+      <div class="stat rating">
+        <div class="n">{rating['rating_pct'] if rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{rating_tooltip}">i</span></div>
+        <div class="l">Team rating</div>
+        <div class="rating-basis">vs. reachable ceiling</div>
+      </div>
+      <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
+      <div class="stat"><div class="n">{points_total if points_total is not None else '—'}</div><div class="l">Season points</div></div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squad_gw} · '
@@ -448,10 +533,9 @@ st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squ
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
 if rating["rating_pct"] is not None:
     if at_ceiling:
-        st.caption(f"✓ Within margin-of-error (Rule #34) of your own reachable ceiling — "
-                   f"{rating_gap:.1f} xPts gap, threshold {moe:.1f} xPts. This is a statistical tie, "
-                   f"not room left on the table.")
-    with st.expander("Team Rating % — data-source tier disclosure (Standing Rules #16/#18)"):
+        st.caption(f"✓ Already at your reachable ceiling this week — the {rating_gap:.1f} xPts gap is inside "
+                   f"normal weekly noise (threshold {moe:.1f} xPts), not real room left on the table.")
+    with st.expander("Team Rating % — full breakdown"):
         st.markdown(tier_label)
         st.caption(f"Squad horizon xPts: {squad_total:.1f} · Reachable ceiling: {reachable_total:.1f} "
                    f"(best squad gettable using your {ft['free_transfers']} free transfer(s) right now, "
@@ -503,8 +587,8 @@ if advisor_lines:
     with st.expander("Chip Advisor — quantified play/hold verdicts for this horizon"):
         for line in advisor_lines:
             st.markdown(line)
-        st.caption("Wildcard has no verdict here by design (Standing Rule #24) — see the flag above instead. "
-                   "Verdicts only compute for chips you haven't already played this season.")
+        st.caption("Wildcard timing is always your call, never a verdict — see the flag above instead. "
+                   "Verdicts here only compute for chips you haven't already played this season.")
 
 # ---------------------------------------------------------------------------
 # Pitch view
@@ -521,16 +605,44 @@ else:
             continue
         pitch_html += '<div class="prow">'
         for _, r in rows.iterrows():
-            pitch_html += _player_card(r, is_captain=(r["code"] == captain_id))
+            rec_cap = cap_pick_row is not None and r["code"] == cap_pick_row["code"]
+            live_cap_diff = (r["code"] == captain_id) and not rec_cap
+            pitch_html += _player_card(r, is_captain=rec_cap, is_live_captain=live_cap_diff,
+                                        opp_col=f"opp_gw{planning_gw}")
         pitch_html += '</div>'
     if not bench_df.empty:
         pitch_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
         for _, r in bench_df.sort_values("xpts_horizon_sum", ascending=False).iterrows():
-            pitch_html += _player_card(r)
+            pitch_html += _player_card(r, opp_col=f"opp_gw{planning_gw}")
         pitch_html += '</div></div>'
     pitch_html += '</div>'
     st.markdown(pitch_html, unsafe_allow_html=True)
     st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season minutes accrue.</p>',
+                unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# GW Breakdown table (Patch 2) — opponent + per-GW xPts split out instead of
+# blended into one horizon number. Only shown when horizon > 1; at horizon=1
+# the pitch view's opponent chip + xp already tell the whole story. Uses
+# st.dataframe (not custom HTML) so it gets native horizontal scroll on
+# narrow screens for free, same pattern as the Season Ledger / move-by-move
+# tables elsewhere on this page.
+# ---------------------------------------------------------------------------
+if horizon > 1 and not squad_df.empty:
+    st.markdown('<div class="section-h">GW Breakdown</div>', unsafe_allow_html=True)
+    breakdown_rows = []
+    for _, r in squad_df.sort_values(["position", "xpts_horizon_sum"], ascending=[True, False]).iterrows():
+        row = {"Player": f"{r.get('web_name','')}", "Pos": r.get("position", "")}
+        for gw in gw_list:
+            opp = r.get(f"opp_gw{gw}", "") or "—"
+            xp = r.get(f"xpts_gw{gw}", 0.0)
+            xp = 0.0 if pd.isna(xp) else xp
+            row[f"GW{gw}"] = f"{opp} · {xp:.1f}"
+        total = r.get("xpts_horizon_sum", 0.0)
+        row["Horizon total"] = f"{(0.0 if pd.isna(total) else total):.1f}"
+        breakdown_rows.append(row)
+    st.dataframe(pd.DataFrame(breakdown_rows), hide_index=True, use_container_width=True)
+    st.markdown('<p class="side-note">Each GW cell: opponent (H/A) · projected xPts for that gameweek specifically.</p>',
                 unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------

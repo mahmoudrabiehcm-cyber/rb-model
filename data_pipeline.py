@@ -143,16 +143,20 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         xm = eng.estimate_xm(p, cfg, xm_override if pd.notna(xm_override) else None)
 
         gw_xpts = {}
+        gw_opp = {}
         sp_mult_last = 1.0
         for gw in gw_list:
             fixtures = get_fixture_for_gw(snap.fixtures, team_id, gw)
             if not fixtures:
                 gw_xpts[gw] = 0.0
+                gw_opp[gw] = ""  # blank gameweek — no fixture, surfaced as-is in the UI
                 continue
             gw_total = 0.0
+            opp_labels = []
             for opp_id, is_home in fixtures:
                 opp_row = teams.loc[teams["id"] == opp_id]
                 opp_row = opp_row.iloc[0] if not opp_row.empty else pd.Series(dtype=float)
+                opp_labels.append(f"{team_short_name(teams, opp_id)} ({'H' if is_home else 'A'})")
 
                 cs_override = p.get("cs_pct_override", np.nan)
                 if pd.notna(cs_override):
@@ -176,6 +180,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                                                   dc90, comp_disc, cfg, override_row)
                 gw_total += res["xpts"]
             gw_xpts[gw] = round(gw_total, 3)
+            gw_opp[gw] = " / ".join(opp_labels)  # "/"-joined for a double gameweek, single label otherwise
 
         rec = {
             "code": p.get("code"), "id": p.get("id"), "web_name": p.get("web_name"),
@@ -189,6 +194,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         }
         for gw in gw_list:
             rec[f"xpts_gw{gw}"] = gw_xpts[gw]
+            rec[f"opp_gw{gw}"] = gw_opp[gw]
         rec["xpts_horizon_sum"] = round(sum(gw_xpts.values()), 3)
         rows.append(rec)
 

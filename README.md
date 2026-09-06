@@ -4,10 +4,12 @@ A live, zero-cost Streamlit app implementing **FPL Projection Model v5.0**
 (base formula v3.3 + Step 3c Set-Piece Signal, parameterized §7 Manager
 Style Profile, Step 9 Chip Timing Protocol, Rule #34 Margin-of-Error Tie
 Rule) plus **Patch 1** (reachable-ceiling Team Rating %, a quantified Chip
-Advisor, and a style-aware alt-captain — see "Patch 1" below). Enter an FPL
-team ID, pick a style profile and hit-stance, click **Run Model**, get live
-xPts-driven transfer, captaincy, and chip recommendations pulled straight
-from the official FPL API.
+Advisor, and a style-aware alt-captain) and **Patch 2** (auto-optimized
+starting XI, dual captain markers, per-GW opponent + a GW Breakdown table,
+a mobile-adaptive pitch view, and a football-terminology UI pass — see
+"Patch 2" below). Enter an FPL team ID, pick a style profile and hit-stance,
+click **Run Model**, get live xPts-driven transfer, captaincy, and chip
+recommendations pulled straight from the official FPL API.
 
 For the click-by-click hosting walkthrough, see **DEPLOY.md**. This file
 covers what's in the repo and how to change the model later.
@@ -20,13 +22,13 @@ covers what's in the repo and how to change the model later.
 | `model_config.yaml` | **Every tunable number in the model.** Position multipliers, DEFCON calibration, decay schedule, hit-cost thresholds, set-piece multipliers, chip-timing thresholds. Change a weight here — no code edit needed. |
 | `fpl_engine.py` | Core Formula, Decay Schedule, DEFCON probability, CS% (MODEL_POISSON), xM estimation, Team Rating %, base Transfer Net Gain, Captaincy Protocol, Rule #34 margin-of-error threshold (Patch 1). |
 | `fpl_data.py` | All live-fetch functions — official API first, GitHub mirror fallback. |
-| `data_pipeline.py` | Wires a raw API snapshot into a computed player table; also owns the three squad-solves (`solve_ceiling`, `solve_reachable_ceiling`, `solve_free_hit_rebuild` — Patch 1) that `app.py` and any future CLI/script use. |
+| `data_pipeline.py` | Wires a raw API snapshot into a computed player table (Patch 2: now also captures each player's per-GW opponent + venue, `opp_gw{n}`); also owns the three squad-solves (`solve_ceiling`, `solve_reachable_ceiling`, `solve_free_hit_rebuild` — Patch 1) that `app.py` and any future CLI/script use. |
 | `setpiece.py` | Step 3c — Set-Piece Role Signal. |
 | `style_profiles.py` | §7 — the four Manager Style Profile presets and their dials, plus `captain_alt_pick()` (Patch 1) which picks the captaincy panel's second slot by each profile's own `eo_pull` direction instead of a hardcoded lowest-EO pick. |
 | `chip_protocol.py` | Step 9 — Chip Timing Protocol: chip status tracking, DGW/BGW detection, Wildcard flag, and (Patch 1) the Chip Advisor's `evaluate_bench_boost` / `evaluate_triple_captain` / `evaluate_free_hit` quantified play/hold verdicts. |
 | `transfers.py` | Step 7a addendum — free-transfer count derived from transfer history. |
-| `recommend.py` | Transfer-swap suggestions + the chess-themed season verdict text. |
-| `optimizer.py` | PuLP/CBC constrained squad solver. `solve_squad()` (Patch 1) now takes an `objective_col` (multi-GW horizon sum or a single GW, for Free Hit) and an optional `retain_pool_codes`/`min_retain` constraint (for the reachable ceiling). |
+| `recommend.py` | Transfer-swap suggestions + the season verdict text (Patch 2: football-commentary phrase bank — `season_verdict()`, was `chess_verdict()`). |
+| `optimizer.py` | PuLP/CBC constrained squad solver. `solve_squad()` (Patch 1) takes an `objective_col` (multi-GW horizon sum or a single GW, for Free Hit) and an optional `retain_pool_codes`/`min_retain` constraint (for the reachable ceiling). `best_starting_xi()` (existing, newly wired into `app.py` in Patch 2) picks the model's own best valid formation from a fixed squad for the pitch view. |
 | `manual_overrides.csv` | Optional hand-pasted overrides (xM floor, CS% tier-2/3 odds-derived numbers, BPS profile tags, tiny-sample rescue rates). Empty by default; edit and push to use. |
 | `requirements.txt` | Python dependencies — this is what Streamlit Cloud installs on deploy. |
 | `.streamlit/config.toml` | Theme colors so native widgets (buttons, sliders) match the design. |
@@ -87,6 +89,49 @@ Every reachable-ceiling/Free-Hit solve still uses each player's current
 price as a stand-in for real sell value (bank + individual sell prices
 isn't tracked per-player here) — same disclosed-simplification standard as
 the existing Bench Value Rule autosub discount.
+
+## Patch 2 (auto-optimized XI, opponent + GW Breakdown, mobile, football-terminology theme)
+
+Six changes, all UI/presentation-layer plus one small pipeline addition —
+no changes to the underlying xPts math itself:
+
+- **Auto-optimized starting XI.** The pitch now renders `optimizer.best_starting_xi()`
+  against your actual 15-man squad for the planning gameweek, instead of
+  copying whatever XI/bench arrangement your live FPL team happens to have
+  set. Bench players are whoever the model itself would leave out.
+- **Dual captain markers.** The gold armband marks the model's own
+  recommended captain (from `captaincy_protocol()` + your style profile).
+  If your actual live FPL captain is a different player, that player gets a
+  smaller hollow-ring secondary marker instead — both visible at once, with
+  a hover explanation on each, rather than the armband silently disagreeing
+  with your real team.
+- **Per-GW opponent capture.** `data_pipeline.compute_all()` already looked
+  up each player's fixture per GW to compute CS% — it just discarded the
+  opponent afterward. Now captured as `opp_gw{n}` ("BOU (H)", or
+  `"BOU (H) / NEW (A)"` for a double gameweek, `""` for a blank) and
+  surfaced two ways: a compact chip on the pitch card (next GW only — the
+  card stays uncluttered) and a full column in the new GW Breakdown table.
+- **GW Breakdown table.** New section below the pitch, shown whenever
+  horizon > 1: one row per squad player, one column per GW in the horizon,
+  each cell showing that GW's opponent + projected xPts, plus a horizon
+  total column. Uses `st.dataframe` (not custom HTML) so it gets native
+  horizontal scroll on narrow screens for free.
+- **Mobile-adaptive pitch.** Card width is now `clamp(58px, 15vw, 104px)`
+  instead of a fixed 104px, with a `max-width:480px` media query that drops
+  the price line and compresses position/opponent tags so a full 11-man XI
+  (including the worst-case 5-defender row) still fits without horizontal
+  scrolling on a ~360-375px phone screen. `flex-wrap` was already on the
+  card rows, so anything narrower than tested just wraps to more lines
+  instead of breaking.
+- **Football-terminology theme pass.** The pawn icon is replaced with a
+  small inline-SVG crest; `recommend.py`'s season-verdict phrase bank
+  (`season_verdict()`, was `chess_verdict()`) now uses genuine football
+  commentary language for the same six rank/hits situations (e.g. "Losing
+  the Run of Play," "Chasing the Game," "Finding Your XI" for early season);
+  and several rule-citation captions (Team Rating, Chip Advisor, Wildcard)
+  were reworded into plain language, with the Team Rating stat also gaining
+  an inline hover ("i") tooltip so the "what is this measuring" answer
+  doesn't require opening the expander below it.
 
 ## Updating the model later
 

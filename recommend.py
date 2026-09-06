@@ -1,9 +1,11 @@
 """
 recommend.py
-Transfer suggestions (Step 7a) and the chess-themed one/two-phrase season
-verdict. Both are plain deterministic logic — no external AI call, so both
-stay inside the zero-cost design (an LLM-generated verdict would need a
-paid API key; this doesn't).
+Transfer suggestions (Step 7a) and the one/two-phrase season verdict —
+football-commentary language (Patch 2; was chess-themed before), keeping
+the same considered, situational-headline structure. Both are plain
+deterministic logic — no external AI call, so both stay inside the
+zero-cost design (an LLM-generated verdict would need a paid API key; this
+doesn't).
 
 KNOWN LIMITATION (documented, not hidden): budget-fit uses each player's
 current `now_cost`, not your actual banked sale price (FPL sells a player
@@ -189,25 +191,30 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
 
 
 # ---------------------------------------------------------------------------
-# Chess-themed season verdict — deterministic phrase bank, no external AI call.
+# Season verdict — deterministic phrase bank, no external AI call. Football-
+# commentary vocabulary (Patch 2): each headline is a genuine footballing
+# phrase for the situation it describes, not an invented metaphor — "losing
+# the run of play" and "chasing the game" mean exactly what they say on any
+# football broadcast, they just map naturally onto a rank/hits classification
+# the same way chess's opening/middlegame/endgame language used to.
 # ---------------------------------------------------------------------------
-_OPENINGS = [
-    ("rank_climbing_no_hits", "The Long Endgame",
+_VERDICTS = [
+    ("rank_climbing_no_hits", "The Patient Build",
      "A patient climb: no hits taken, tight bench management, and a rank trajectory that's quietly improved."),
-    ("rank_climbing_with_hits", "The Calculated Gambit",
-     "Points spent to win the position — hits taken, and the rank trend says they've paid off so far."),
-    ("rank_falling_stable_squad", "A Slow Retreat",
+    ("rank_climbing_with_hits", "The Calculated Punt",
+     "Points spent to push the position forward — hits taken, and the rank trend says they've paid off so far."),
+    ("rank_falling_stable_squad", "Losing the Run of Play",
      "The squad hasn't collapsed, but the clock is running — rank has drifted back over recent gameweeks."),
-    ("rank_falling_high_hits", "Overextended",
-     "Too many pieces moved too fast — repeated hits without the rank gains to justify them."),
-    ("flat_early_season", "The Opening Book",
-     "Early days — the position is still being built. Too soon for a verdict, not too soon for a plan."),
-    ("rank_stable_strong", "Consolidation",
-     "No fireworks, no damage — a settled position banking points quietly while others thrash around it."),
+    ("rank_falling_high_hits", "Chasing the Game",
+     "Too many changes made too fast — repeated hits without the rank gains to justify them."),
+    ("flat_early_season", "Finding Your XI",
+     "Early days — the XI is still taking shape. Too soon for a verdict, not too soon for a plan."),
+    ("rank_stable_strong", "Game Management",
+     "No fireworks, no damage — a settled team banking points quietly while others thrash around it."),
 ]
 
 
-def chess_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) -> dict:
+def season_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) -> dict:
     """rank_history: overall rank per finished GW, oldest first (lower=better).
     Deterministic rule-based classification -> a fixed phrase pair. No LLM
     call, so this stays inside the tool's zero-cost design."""
@@ -228,7 +235,7 @@ def chess_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) ->
         else:
             key = "rank_stable_strong"
 
-    for k, headline, body in _OPENINGS:
+    for k, headline, body in _VERDICTS:
         if k == key:
             return {"headline": headline, "body": body, "key": key}
-    return {"headline": "The Opening Book", "body": "Too soon for a verdict, not too soon for a plan.", "key": "flat_early_season"}
+    return {"headline": "Finding Your XI", "body": "Too soon for a verdict, not too soon for a plan.", "key": "flat_early_season"}
