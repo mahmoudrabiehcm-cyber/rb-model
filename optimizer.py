@@ -20,27 +20,46 @@ except ImportError:  # pragma: no cover
 
 def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
                  must_include_codes: list | None = None,
-                 exclude_codes: list | None = None) -> dict | None:
+                 exclude_codes: list | None = None,
+                 retain_pool_codes: list | None = None,
+                 min_retain: int = 0,
+                 objective_col: str = "xpts_horizon_sum") -> dict | None:
     """players needs columns: code, web_name, team, position, price,
-    xpts_horizon_sum, status. Returns dict with squad picks, total_xpts, cost.
-    Only picks status=='a' (available) players unless explicitly must_include."""
+    <objective_col>, status. Returns dict with squad picks, total_xpts, cost.
+    Only picks status=='a' (available) players unless explicitly must_include.
+
+    objective_col lets the same solver serve two different Team Rating /
+    Chip Advisor needs without duplicating the MILP: the default
+    "xpts_horizon_sum" for a multi-GW ceiling, or a single "xpts_gw{n}"
+    column for a Free Hit rebuild (Step 8b / Rule #25 — a Free Hit's squad
+    reverts after one week, so it should never be optimized against a
+    multi-GW horizon sum).
+
+    retain_pool_codes + min_retain add a "keep at least N of these codes"
+    constraint (>= not ==, so the solver can still improve on the retained
+    core with its remaining slots) — this is what turns an unconstrained
+    Ceiling into a reachable one: pass the current squad's codes and
+    min_retain = 15 - available free transfers, and the solve becomes "the
+    best squad actually reachable this week," not a fantasy ideal that
+    ignores you already own 15 players and only have N free moves."""
     if pulp is None:
         return None
 
-    df = players.dropna(subset=["price", "xpts_horizon_sum", "position"]).copy()
+    df = players.dropna(subset=["price", objective_col, "position"]).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     must_include_codes = must_include_codes or []
     exclude_codes = exclude_codes or []
     if exclude_codes:
         df = df[~df["code"].isin(exclude_codes)]
-    df = df[(df["status"] == "a") | (df["code"].isin(must_include_codes))]
+    df = df[(df["status"] == "a") | (df["code"].isin(must_include_codes)) |
+            (df["code"].isin(retain_pool_codes or []))]
     if df.empty:
         return None
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
     x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in df.index}
 
-    prob += pulp.lpSum(x[i] * df.loc[i, "xpts_horizon_sum"] for i in df.index)
+    prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
 
     prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= budget
     prob += pulp.lpSum(x[i] for i in df.index) == cfg["squad_rules"]["squad_size"]
@@ -58,16 +77,21 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         for i in idxs:
             prob += x[i] == 1
 
+    if retain_pool_codes and min_retain > 0:
+        idxs = df[df["code"].isin(retain_pool_codes)].index
+        if len(idxs) > 0:
+            prob += pulp.lpSum(x[i] for i in idxs) >= min(min_retain, len(idxs))
+
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
     if pulp.LpStatus[prob.status] != "Optimal":
         return None
 
     chosen = [i for i in df.index if x[i].value() == 1]
-    squad = df.loc[chosen].sort_values(["position", "xpts_horizon_sum"], ascending=[True, False])
+    squad = df.loc[chosen].sort_values(["position", objective_col], ascending=[True, False])
     return {
         "squad": squad,
-        "total_xpts": round(squad["xpts_horizon_sum"].sum(), 2),
+        "total_xpts": round(squad[objective_col].sum(), 2),
         "cost": round(squad["price"].sum(), 1),
     }
 

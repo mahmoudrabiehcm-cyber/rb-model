@@ -1,5 +1,7 @@
 # =============================================================================
-# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v4.0")
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v5.0" +
+# app-side Patch 1: reachable-ceiling Team Rating %, Chip Advisor, dynamic
+# alt-captain, Rule #34 margin-of-error)
 # =============================================================================
 # This file is the ONLY place model logic/weights should be tuned.
 # fpl_engine.py / setpiece.py / chip_protocol.py read this file at runtime and
@@ -8,10 +10,10 @@
 # =============================================================================
 
 meta:
-  model_version: "4.0"
+  model_version: "5.0"
   base_version: "3.3"    # Core Formula, Decay Schedule, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
-                          # v3.3 -- see FPL_Model_v4.0_Changelog.md for the deltas.
+                          # v3.3 -- see the model doc's changelog (v4.0 -> v5.0) for the deltas.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -220,3 +222,16 @@ chip_timing:
   free_hit_min_blank_exposure_frac: 0.35        # >= this fraction of your 15 in a blank
   wildcard_flag_rank_decline_gws: 2             # consecutive worsening GWs to flag
   wildcard_flag_min_flagged_players: 3          # squad players with a status/data flag
+
+# -----------------------------------------------------------------------------
+# Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
+# cumulative xPts difference smaller than max(floor_points, pct_of_total *
+# the compared total) is reported as a statistical tie, not a clear winner —
+# based on demonstrated single-player weekly correction noise of 3-9 points.
+# Shared by the Team Rating % headline, the Chip Advisor's Bench Boost/
+# Triple Captain/Free Hit play-vs-hold verdicts, and (Patch 2) the
+# captaincy shortlist window.
+# -----------------------------------------------------------------------------
+margin_of_error:
+  floor_points: 2.0
+  pct_of_total: 0.02

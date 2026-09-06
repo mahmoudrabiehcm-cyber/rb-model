@@ -196,4 +196,44 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
 
 
 def solve_ceiling(cfg: dict, proj: pd.DataFrame):
+    """§1a's unconstrained Ceiling_xPts — the best possible £100m/2-5-5-3/
+    max-3-per-club squad from the FULL pool, ignoring what you currently own
+    or how many transfers you have. Kept as the "theoretical" reference
+    number (Standing Rules #16/#18 disclosure) alongside the reachable
+    ceiling below, which is what the Team Rating % headline now uses."""
     return opt.solve_squad(proj, cfg, budget=cfg["squad_rules"]["budget"])
+
+
+def solve_reachable_ceiling(cfg: dict, proj: pd.DataFrame, current_squad_codes: list,
+                             free_transfers: int):
+    """The constrained counterpart to solve_ceiling(): the best squad
+    actually reachable FROM the current squad using only the free transfers
+    available right now (min_retain = 15 - free transfers, so up to that
+    many transfers can freely change; the rest of the 15 must be kept).
+    This is what makes Team Rating % answer "how close am I to the best
+    *reachable* squad this week", not "how close am I to a fantasy ideal
+    that assumes I own nobody and have unlimited transfers" — the latter is
+    structurally near-impossible to score well on regardless of squad
+    quality, which is why it read as permanently low no matter how much
+    manual_overrides.csv research went into the pool.
+    Same £100m budget proxy as solve_ceiling — real budget is bank + each
+    player's individual sell price, which isn't tracked per-player here, so
+    current price stands in for it (disclosed simplification, same standard
+    as the Bench Value Rule's autosub discount in model_config.yaml)."""
+    min_retain = max(0, min(15, 15 - max(0, free_transfers)))
+    return opt.solve_squad(proj, cfg, budget=cfg["squad_rules"]["budget"],
+                            retain_pool_codes=current_squad_codes, min_retain=min_retain)
+
+
+def solve_free_hit_rebuild(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
+    """Step 8b Free Hit Evaluation (Standing Rule #25): a full 15-man
+    rebuild against the manager's TOTAL team value (bank + current squad's
+    sell-value proxy — see solve_reachable_ceiling's note on that proxy),
+    optimized for the single target gameweek only, never the multi-GW
+    horizon sum, since a Free Hit's squad reverts after that one week
+    (Horizon-Matching Rule). Never a marginal swap-budget check — always the
+    full rebuild, per Rule #25."""
+    col = f"xpts_gw{gw}"
+    if col not in proj.columns:
+        return None
+    return opt.solve_squad(proj, cfg, budget=total_value, objective_col=col)

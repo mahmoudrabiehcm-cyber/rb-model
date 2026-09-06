@@ -286,22 +286,6 @@ with st.spinner("Fetching live data and computing xPts..."):
     starters_df = squad_df[~squad_df["code"].isin(bench_codes)]
     pool_df = proj[~proj["code"].isin(squad_codes)].copy()
 
-    # Team Rating % (§1a)
-    ceiling = data_pipeline.solve_ceiling(cfg, proj)
-    squad_total = squad_df["xpts_horizon_sum"].sum() if not squad_df.empty else 0.0
-    ceiling_total = ceiling["total_xpts"] if ceiling else 0.0
-    rating = eng.team_rating_pct(squad_total, ceiling_total,
-                                  "MECHANICAL-TIER (default) — MODEL_POISSON CS%, xM Floor Rule only. "
-                                  "Steps 4 (full Role Multiplier table), 4a (Manager Tenure Split), "
-                                  "5 (Pre-Season Evidence) and 6 (Manager System Fit) need web research/"
-                                  "judgment, so this run stays at MECHANICAL-TIER unless manual_overrides.csv "
-                                  "has entries for the players involved. Those entries carry real weight once "
-                                  "present — xm_override applies Steps 4/4a/5's researched xM directly, "
-                                  "cs_pct_override applies Step 6's blended CS%, and tenure_discount applies "
-                                  "Step 4a's 0.40-1.00 scale — this is repo-wide, so every visitor to this "
-                                  "app's URL sees the upgraded numbers for any player that's been researched, "
-                                  "not just the manager who requested it. Standing Rules #16/#18 disclosure.")
-
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []
     rank_history = [r.get("overall_rank") for r in cur_hist if r.get("overall_rank") is not None]
@@ -310,21 +294,65 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     verdict = recommend.chess_verdict(rank_history, hits_last_3, squad_gw)
 
-    # free transfers + bank
+    # free transfers + bank — moved ahead of Team Rating % (below) because the
+    # reachable-ceiling solve needs free_transfers to set its min-retain constraint.
     ft = transfers.derive_free_transfers(cur_hist, history.get("chips", []) if history else [])
     bank = (entry.get("last_deadline_bank", 0) or 0) / 10.0 if entry else 0.0
 
+    # Team Rating % (§1a) — reworked (Patch 1): the headline number is now the
+    # RESEARCHED-TIER ratio against a REACHABLE ceiling (best squad actually
+    # gettable this week using only the free transfers on hand), not an
+    # unconstrained fantasy-ideal squad nobody could reach in one week
+    # regardless of research quality. The old unconstrained ceiling is kept
+    # as a secondary "theoretical" reference. Standing Rule #34's
+    # margin-of-error band is applied to the headline so a gap inside
+    # demonstrated weekly noise reads as "at ceiling," not a misleadingly
+    # precise decimal.
+    team_value = round(bank + (squad_df["price"].sum() if not squad_df.empty else 0.0), 1)
+    reachable = data_pipeline.solve_reachable_ceiling(cfg, proj, squad_codes, ft["free_transfers"])
+    theoretical_ceiling = data_pipeline.solve_ceiling(cfg, proj)
+    squad_total = squad_df["xpts_horizon_sum"].sum() if not squad_df.empty else 0.0
+    reachable_total = reachable["total_xpts"] if reachable else 0.0
+    theoretical_total = theoretical_ceiling["total_xpts"] if theoretical_ceiling else 0.0
+    moe = eng.margin_of_error_threshold(reachable_total, cfg)
+    rating_gap = round(reachable_total - squad_total, 2)
+    at_ceiling = reachable_total > 0 and rating_gap < moe
+
+    # Researched-tier coverage — live count of how much of manual_overrides.csv's
+    # qualitative layer (xm_override / cs_pct_override / bps_profile /
+    # tenure_discount — anything that promotes a player past the free
+    # MECHANICAL-TIER default) actually applies to THIS squad and to the pool
+    # at large, replacing the old static disclosure string with a real number
+    # that moves as manual_overrides.csv is researched further.
+    override_cols = ["xm_override", "cs_pct_override", "bps_profile", "tenure_discount"]
+    if not overrides.empty:
+        researched_codes = set(overrides.dropna(subset=override_cols, how="all")["player_code"])
+    else:
+        researched_codes = set()
+    squad_researched = len(set(squad_codes) & researched_codes)
+    pool_all_codes = set(proj["code"]) if "code" in proj.columns else set()
+    pool_researched = len(pool_all_codes & researched_codes)
+
+    tier_label = (f"Squad researched-tier coverage: **{squad_researched}/{len(squad_codes) or 15}** players have at "
+                  f"least one manual_overrides.csv entry (xm_override / cs_pct_override / bps_profile / "
+                  f"tenure_discount) promoting them past the free MECHANICAL-TIER default (MODEL_POISSON CS%, "
+                  f"xM Floor Rule only). Pool-wide coverage: **{pool_researched}/{len(pool_all_codes)}**. "
+                  f"Steps 4 (full Role Multiplier table), 4a (Manager Tenure Split), 5 (Pre-Season Evidence) and "
+                  f"6 (Manager System Fit) need web research/judgment to promote a player past MECHANICAL-TIER — "
+                  f"this coverage count is repo-wide, so every visitor to this app's URL sees the same upgraded "
+                  f"numbers for any player that's been researched, not just the manager who requested it. "
+                  f"Standing Rules #16/#18 disclosure.")
+    rating = eng.team_rating_pct(squad_total, reachable_total, tier_label)
+
     # captaincy — starting XI only, never the bench
-    cap_pick_row, cap_alt_row = None, None
+    cap_pick_row, cap_alt_row, cap_alt_label = None, None, "Alternative"
     if not starters_df.empty:
         cap_col = f"xpts_gw{gw_list[0]}"
         cap_candidates = starters_df.rename(columns={cap_col: "xpts_this_gw"})[
             ["web_name", "team", "xpts_this_gw", "selected_by_percent"]]
         cap_result = eng.captaincy_protocol(cap_candidates, cfg)
         cap_pick = style_profiles.captaincy_pick(cap_result, style_name)
-        shortlist = cap_result[cap_result["shortlisted"]]
-        alt_pool = shortlist[shortlist["web_name"] != cap_pick["web_name"]]
-        cap_alt_row = alt_pool.sort_values("eo", ascending=True).iloc[0] if not alt_pool.empty else None
+        cap_alt_row, cap_alt_label = style_profiles.captain_alt_pick(cap_result, cap_pick["web_name"], style_name)
         cap_pick_row = cap_pick
 
     # chip status + timing — computed before transfer suggestions so the
@@ -338,7 +366,31 @@ with st.spinner("Fetching live data and computing xPts..."):
     squad_team_ids = squad_df["team_id"].tolist() if "team_id" in squad_df.columns else []
     chip_notes = chip_protocol.chip_recommendations(chip_rows, dgw_bgw, squad_team_ids, max(len(squad_df), 1))
     flagged_players = squad_df[(squad_df["status"] != "a") | (squad_df["est_rescue_needed"])]
-    wc_flag = chip_protocol.wildcard_flag(rank_history, len(flagged_players))
+    wc_flag = chip_protocol.wildcard_flag(rank_history, len(flagged_players),
+                                           squad_xpts_total=squad_total,
+                                           reachable_ceiling_total=reachable_total,
+                                           moe_threshold=moe)
+
+    # Chip Advisor (v5.0 / Patch 1) — quantified play/hold verdicts within the
+    # chosen horizon for the three chips that actually have a "which GW"
+    # question (Bench Boost, Triple Captain, Free Hit). Only solved for chips
+    # that are actually still available this season — each Free Hit check is
+    # a fresh MILP solve per horizon GW, so it's skipped entirely once that
+    # chip is used, rather than burning compute on a verdict nobody can act on.
+    available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
+    moe_fn = lambda total: eng.margin_of_error_threshold(total, cfg)
+    bb_advisor = None
+    if any(c.startswith("Bench Boost") for c in available_chip_names):
+        bb_advisor = chip_protocol.evaluate_bench_boost(bench_df, gw_list, moe_fn)
+    tc_advisor = None
+    if any(c.startswith("Triple Captain") for c in available_chip_names):
+        tc_advisor = chip_protocol.evaluate_triple_captain(starters_df, gw_list, moe_fn)
+    fh_advisor = None
+    if any(c.startswith("Free Hit") for c in available_chip_names) and not squad_df.empty:
+        fh_advisor = chip_protocol.evaluate_free_hit(
+            squad_df, gw_list,
+            lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, proj, team_value, gw),
+            moe_fn)
 
     # Chip-aware transfer advisory (Standing Rule #24: only from signals
     # already computed mechanically above — never a guess at the manager's
@@ -395,10 +447,18 @@ st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squ
             f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
 if rating["rating_pct"] is not None:
+    if at_ceiling:
+        st.caption(f"✓ Within margin-of-error (Rule #34) of your own reachable ceiling — "
+                   f"{rating_gap:.1f} xPts gap, threshold {moe:.1f} xPts. This is a statistical tie, "
+                   f"not room left on the table.")
     with st.expander("Team Rating % — data-source tier disclosure (Standing Rules #16/#18)"):
-        st.markdown(rating["tier"])
-        st.caption(f"Squad horizon xPts: {squad_total:.1f} · Ceiling horizon xPts: {ceiling_total:.1f} "
-                   f"(unconstrained £{cfg['squad_rules']['budget']}m, {horizon}-GW horizon)")
+        st.markdown(tier_label)
+        st.caption(f"Squad horizon xPts: {squad_total:.1f} · Reachable ceiling: {reachable_total:.1f} "
+                   f"(best squad gettable using your {ft['free_transfers']} free transfer(s) right now, "
+                   f"£{cfg['squad_rules']['budget']}m proxy budget, {horizon}-GW horizon) · "
+                   f"gap to reachable ceiling: {rating_gap:.1f} xPts (margin-of-error threshold: {moe:.1f} xPts)")
+        st.caption(f"Theoretical ceiling (secondary reference, unconstrained — ignores what you currently own or "
+                   f"how many transfers you have): {theoretical_total:.1f} xPts")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
 
@@ -420,6 +480,31 @@ if wc_flag:
     st.markdown(f'<p class="side-note">{wc_flag}</p>', unsafe_allow_html=True)
 for note in chip_notes:
     st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
+
+# Chip Advisor — quantified verdicts (Standing Rule #34 margin-of-error gated)
+def _advisor_line(label: str, adv: dict | None) -> str | None:
+    if adv is None or adv.get("best_gw") is None:
+        return None
+    if adv["verdict"].startswith("play_gw"):
+        gw = adv["verdict"].split("gw")[1]
+        return (f"**{label}: play in GW{gw}** — clears margin-of-error by "
+                f"{adv.get('margin', adv.get('threshold', 0)):.1f} xPts over the next-best GW in your horizon "
+                f"(threshold {adv['threshold']:.1f} xPts).")
+    return (f"{label}: hold — no GW in your horizon clears margin-of-error over the others "
+            f"(best candidate GW{adv['best_gw']}, threshold {adv['threshold']:.1f} xPts). Statistical tie, not a "
+            f"reason to rule it out later.")
+
+advisor_lines = [l for l in (
+    _advisor_line("Bench Boost", bb_advisor),
+    _advisor_line("Triple Captain", tc_advisor),
+    _advisor_line("Free Hit", fh_advisor),
+) if l]
+if advisor_lines:
+    with st.expander("Chip Advisor — quantified play/hold verdicts for this horizon"):
+        for line in advisor_lines:
+            st.markdown(line)
+        st.caption("Wildcard has no verdict here by design (Standing Rule #24) — see the flag above instead. "
+                   "Verdicts only compute for chips you haven't already played this season.")
 
 # ---------------------------------------------------------------------------
 # Pitch view
@@ -487,10 +572,11 @@ if cap_pick_row is not None:
                    help=f"EO {cap_pick_row['eo']:.1f}% · tier: {cap_pick_row['eo_tier']}")
     with c2:
         if cap_alt_row is not None:
-            st.metric(f"Differential: {cap_alt_row['web_name']} ({cap_alt_row['team']})", f"{cap_alt_row['xpts_this_gw']:.1f} xPts",
-                       help=f"EO {cap_alt_row['eo']:.1f}% · tier: {cap_alt_row['eo_tier']}")
+            st.metric(f"{cap_alt_label}: {cap_alt_row['web_name']} ({cap_alt_row['team']})", f"{cap_alt_row['xpts_this_gw']:.1f} xPts",
+                       help=f"EO {cap_alt_row['eo']:.1f}% · tier: {cap_alt_row['eo_tier']} · "
+                            f"alt-pick direction set by style profile: **{style_name}**")
         else:
-            st.caption("No lower-EO alternative inside the shortlist window this week.")
+            st.caption("No alternative inside the shortlist window this week.")
 else:
     st.info("No squad data to run the captaincy protocol against this run.")
 

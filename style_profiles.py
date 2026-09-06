@@ -81,3 +81,28 @@ def captaincy_pick(cap_result: pd.DataFrame, profile_name: str) -> pd.Series:
     # rule per the v4.0 doc; fall back to highest raw xPts as the objective
     # anchor, flagged in the UI as a case-by-case call rather than a solver verdict.
     return shortlist.sort_values("xpts_this_gw", ascending=False).iloc[0]
+
+
+def captain_alt_pick(cap_result: pd.DataFrame, primary_web_name: str, profile_name: str):
+    """The captaincy panel's second slot — was hardcoded to always show the
+    lowest-EO shortlisted player regardless of style profile, which made no
+    sense for "Template Hugger / Rank Protector" (whose whole point is
+    avoiding risk, not surfacing one). Now follows the same eo_pull dial as
+    everything else in this file: low-EO profiles get a genuine differential
+    alternative, the high-EO profile gets its next-safest pick, and the
+    no-EO-weighting profile gets its next-best pick on raw projection —
+    consistent with each profile's own stated logic (Standing Rule #23).
+    Returns (row_or_None, label) — label describes what the slot actually is
+    this time, since it isn't always "Differential" any more."""
+    shortlist = cap_result[cap_result["shortlisted"]]
+    pool = shortlist[shortlist["web_name"] != primary_web_name]
+    if pool.empty:
+        return None, "Alternative"
+
+    eo_pull = get_profile(profile_name).get("eo_pull", "mild_low_eo")
+    if eo_pull == "strong_high_eo":
+        return pool.sort_values("eo", ascending=False).iloc[0], "Next-safest"
+    if eo_pull == "none":
+        return pool.sort_values("xpts_this_gw", ascending=False).iloc[0], "Next-best"
+    # "mild_low_eo" / "strong_low_eo" — a genuine differential alternative
+    return pool.sort_values("eo", ascending=True).iloc[0], "Differential"
