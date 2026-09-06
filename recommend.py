@@ -200,9 +200,9 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     horizon_n = len(gw_list)
 
     empty_result = {
-        "moves": [], "plan": [], "summary": [], "profile_used": profile_name, "hit_cost_threshold": threshold,
-        "minimum_meaningful_gain_free": meaningful_bar, "bench_autosub_discount": bench_discount,
-        "hit_stance": hit_stance, "free_transfers": free_transfers,
+        "moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": profile_name,
+        "hit_cost_threshold": threshold, "minimum_meaningful_gain_free": meaningful_bar,
+        "bench_autosub_discount": bench_discount, "hit_stance": hit_stance, "free_transfers": free_transfers,
     }
 
     if squad_df is None or squad_df.empty or "code" not in squad_df.columns:
@@ -279,6 +279,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     plan = []
     summary = []
     moves = []
+    chosen_net_gain = 0.0  # exposed on the return dict (Patch 6) so a manager
+    # what-if evaluation can state how it compares to the model's own pick
 
     if hit_stance == "Force":
         chosen_k = k_wanted if k_wanted in candidates else max(candidates, key=lambda k: 0 if k != k_wanted else 1)
@@ -288,6 +290,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             smaller = [k for k in candidates if k <= k_wanted]
             chosen_k = max(smaller) if smaller else 0
         chosen = candidates[chosen_k]
+        chosen_net_gain = chosen["net_gain"]
         if chosen["actual_k"] == 0:
             summary.append("No legal improving swap found at the forced transfer count — squad unchanged.")
             plan.append(f"GW{current_gw}: Forced transfer requested, but no legal improving swap was found in "
@@ -316,18 +319,34 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         viable = [k for k in tied_ks if clears_bar(candidates[k])]
         chosen_k = min(viable) if viable else 0
         chosen = candidates[chosen_k]
+        chosen_net_gain = chosen["net_gain"]
 
         if chosen["actual_k"] == 0:
             best_alt_k = max((k for k in candidates if k != 0), key=lambda k: candidates[k]["net_gain"], default=None)
             if best_alt_k is not None and candidates[best_alt_k]["actual_k"] > 0:
                 alt = candidates[best_alt_k]
                 bar = threshold if alt["hit_cost"] > 0 else meaningful_bar
-                summary.append(f"Roll your transfer(s) — the best available move only nets "
-                                f"{alt['net_gain']:+.1f} xPts, not enough to be worth it yet.")
+                # Two genuinely different reasons can land on Roll here, and
+                # the message must name the one that actually applied — a
+                # real bug this fixes: the old text always cited `bar`
+                # regardless of cause, which could print "below the 1.5 xPts
+                # bar" for a move that nets +1.85 (i.e. NOT below it) when
+                # the real reason was Rule #34's margin-of-error tie against
+                # doing nothing at all, not the materiality/hit-cost bar.
+                zero_tied = (best_net - candidates[0]["net_gain"]) < moe
+                if zero_tied:
+                    reason = (f"within this model's own margin-of-error ({moe:.1f} xPts) of making no change at "
+                              f"all — not a confident enough edge over doing nothing to call it a genuine "
+                              f"improvement (Standing Rule #34)")
+                    summary_reason = f"within margin-of-error of no change ({moe:.1f} xPts)"
+                else:
+                    reason = f"below the {bar} xPts bar this move needs to clear"
+                    summary_reason = "not enough to be worth it yet"
+                summary.append(f"Roll your transfer(s) — the best available move nets "
+                                f"{alt['net_gain']:+.1f} xPts, {summary_reason}.")
                 plan.append(f"GW{current_gw}: Roll — best alternative found ({alt['actual_k']} move(s), jointly "
-                            f"optimized across the full pool) nets {alt['net_gain']:+.2f} xPts after cost, below "
-                            f"the {bar} xPts bar. Bank free transfer(s) (up to 5) for a move that actually "
-                            f"clears it.")
+                            f"optimized across the full pool) nets {alt['net_gain']:+.2f} xPts after cost, {reason}. "
+                            f"Bank free transfer(s) (up to 5) for a move that actually clears it.")
             else:
                 summary.append("Roll your transfer(s) — no improving swap found this run.")
                 plan.append(f"GW{current_gw}: Roll — no improving swap found in the full pool this run. "
@@ -363,6 +382,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "moves": moves,
         "plan": plan,
         "summary": summary,
+        "net_gain": chosen_net_gain,
         "profile_used": profile_name,
         "hit_cost_threshold": threshold,
         "minimum_meaningful_gain_free": meaningful_bar,
@@ -370,6 +390,124 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "hit_stance": hit_stance,
         "free_transfers": free_transfers,
     }
+
+
+def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+                              profile_name: str, hit_stance: str, free_transfers: int,
+                              bank: float, current_gw: int, gw_list: list[int],
+                              target_code, default_net_gain: float | None = None) -> dict:
+    """Manager-directed what-if (Patch 6): "if I bring THIS specific player
+    in, is it worth it?" — auto-solving the cheapest legal way to fund him
+    (`optimizer.solve_squad`'s `must_include_codes`), scored the exact same
+    Rule #12-compliant realized-value way as `suggest_transfers()`, and
+    checked against the exact same materiality/hit-cost/margin-of-error bars
+    (Rules #13/#34). This is a SCOPE-RESTRICTED comparison — Standing Rule
+    #30 requires that be stated, not silently treated as the model's own
+    pick — so the caller must show this ALONGSIDE `suggest_transfers()`'s
+    own full-pool recommendation, never in place of it. Equal-Scrutiny Rule
+    #8 still applies to the target the same as any candidate: this function
+    doesn't run the role-evidence check itself (that's Step 4/4a, upstream
+    in the data pipeline) — it assumes the projection fed in already cleared
+    it, same as every other player in `pool_df`.
+
+    `default_net_gain`: optionally pass `suggest_transfers()`'s own chosen
+    net_gain for the same run, purely so the result can state how this
+    scenario compares to the model's own pick — informational only, never
+    used to gate this function's own verdict.
+
+    Returns a dict: `feasible`, `already_owned`, `summary` (plain-language
+    lines), `moves`, `net_gain`, `hit_cost`, `clears_bar`, `chosen_k`."""
+    profile = style_profiles.get_profile(profile_name)
+    hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
+    threshold = profile["hit_cost_threshold"]
+    meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 1.5)
+    this_gw_col = f"xpts_gw{current_gw}"
+    horizon_n = len(gw_list)
+
+    empty = {"feasible": False, "already_owned": False, "summary": [], "moves": [],
+             "net_gain": None, "hit_cost": None, "clears_bar": False, "chosen_k": None}
+
+    if squad_df is None or squad_df.empty or "code" not in squad_df.columns:
+        return empty
+    if target_code in set(squad_df["code"]):
+        return {**empty, "already_owned": True,
+                "summary": ["That player is already in your squad — nothing to evaluate."]}
+
+    squad_df = squad_df.copy()
+    pool_df = pool_df.copy() if pool_df is not None else pd.DataFrame(columns=squad_df.columns)
+    for df in (squad_df, pool_df):
+        for col in ("price", "xpts_horizon_sum", this_gw_col):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+    bank = 0.0 if bank is None or pd.isna(bank) else float(bank)
+
+    full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
+    if "code" in full_pool.columns:
+        full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
+    if target_code not in set(full_pool["code"]):
+        return {**empty, "summary": ["That player isn't in the current projection pool — can't evaluate this GW."]}
+
+    current_codes = list(squad_df["code"])
+    out_codes_all = set(current_codes)
+    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg)
+    team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
+    moe = eng.margin_of_error_threshold(old_total, cfg)
+
+    k_max = 5 if hit_stance != "No hits" else free_transfers
+    k_max = max(1, k_max)
+    candidates = {}
+    for k in range(1, k_max + 1):
+        min_retain = max(0, 15 - k)
+        result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
+                                  min_retain=min_retain, must_include_codes=[target_code],
+                                  objective_col="xpts_horizon_sum")
+        if result is None:
+            continue
+        new_squad = result["squad"]
+        actual_k = len(out_codes_all - set(new_squad["code"]))
+        if actual_k == 0 or target_code not in set(new_squad["code"]):
+            continue  # solver couldn't actually fit the target in at this k
+        hit_cost = hit_cost_per * max(0, actual_k - free_transfers)
+        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg)
+        net_gain = round(new_total - old_total - hit_cost, 2)
+        if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
+            candidates[actual_k] = {"squad": new_squad, "total": new_total,
+                                     "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k}
+
+    if not candidates:
+        return {**empty, "summary": ["No legal way to fit that player into your squad within budget/transfer "
+                                      "limits this run — try a higher hit stance or check the budget."]}
+
+    # Cheapest legal way in that also maximizes net gain: same fewest-
+    # transfers-within-margin-of-error tie-break as suggest_transfers().
+    best_net = max(c["net_gain"] for c in candidates.values())
+    tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
+    chosen_k = min(tied_ks) if tied_ks else min(candidates, key=lambda k: candidates[k]["net_gain"])
+    chosen = candidates[chosen_k]
+    bar = threshold if chosen["hit_cost"] > 0 else meaningful_bar
+    clears = chosen["net_gain"] >= bar
+
+    pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
+    moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], clears) for p in pairs]
+    move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+    hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
+    verdict_note = ("clears its bar — a genuine improvement" if clears else
+                     f"doesn't clear the {bar} xPts bar this move needs — not worth it as evaluated")
+    summary = [f"Your scenario — {move_bits}{hit_note}: net {chosen['net_gain']:+.1f} xPts over "
+               f"{horizon_n} GW(s), {verdict_note}."]
+    if default_net_gain is not None:
+        diff = round(chosen["net_gain"] - default_net_gain, 2)
+        if abs(diff) < moe:
+            summary.append(f"Statistically tied with the model's own pick this run (within the {moe:.1f} xPts "
+                            f"margin-of-error).")
+        elif diff > 0:
+            summary.append(f"This nets {diff:+.1f} xPts more than the model's own recommendation this run.")
+        else:
+            summary.append(f"This nets {diff:.1f} xPts less than the model's own recommendation this run.")
+
+    return {"feasible": True, "already_owned": False, "summary": summary, "moves": moves,
+            "net_gain": chosen["net_gain"], "hit_cost": chosen["hit_cost"], "clears_bar": clears,
+            "chosen_k": chosen["actual_k"]}
 
 
 def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dict:

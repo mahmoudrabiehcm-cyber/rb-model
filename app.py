@@ -609,7 +609,7 @@ with st.spinner("Fetching live data and computing xPts..."):
                                            meaningful_bar_override, set(bench_df["code"]), chip_advisory)
     except Exception as e:
         transfer_error = str(e)
-        rec = {"moves": [], "plan": [], "summary": [], "profile_used": style_name,
+        rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,
                "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
                "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 1.5),
                "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
@@ -802,6 +802,67 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
         show_cols = [c for c in ["out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
                                   "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
         st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Evaluate your own scenario (Patch 6) — manager-directed what-ifs, always
+# shown ALONGSIDE the model's own default recommendation above, never in
+# place of it (Standing Rule #30: a scope-restricted comparison must be
+# stated as one, not presented as if it were the model's own full-pool
+# pick). Nothing chosen here changes anything above — this section is
+# purely additive. Gated behind an explicit button rather than re-running
+# on every widget change, since each evaluation is a fresh MILP solve.
+# ---------------------------------------------------------------------------
+with st.expander("Evaluate your own scenario — a specific target, or a candidate Wildcard date"):
+    st.caption("Optional. Pick a target player and/or a candidate Wildcard gameweek below, then click Evaluate. "
+               "Leave both on \"— none —\" and nothing changes — the recommendation above stays the model's own "
+               "default full-pool pick.")
+    scen_col1, scen_col2 = st.columns(2)
+    with scen_col1:
+        pool_options = [(None, "— none —")]
+        if not pool_df.empty:
+            pool_sorted = pool_df.sort_values("web_name")
+            pool_options += [(r["code"], f"{r['web_name']} ({r.get('team','')}) · £{r.get('price','?')}m")
+                              for _, r in pool_sorted.iterrows()]
+        target_choice = st.selectbox("Target player to bring in", options=pool_options,
+                                      format_func=lambda t: t[1], key="scenario_target")
+    with scen_col2:
+        wc_gw_options = [None] + list(range(planning_gw, 39))
+        wc_gw_choice = st.selectbox("Candidate Wildcard gameweek", options=wc_gw_options,
+                                     format_func=lambda g: "— none —" if g is None else f"GW{g}",
+                                     key="scenario_wc_gw")
+    if st.button("Evaluate scenario"):
+        if target_choice[0] is None and wc_gw_choice is None:
+            st.info("Nothing selected — pick a target player and/or a Wildcard gameweek above first.")
+        if target_choice[0] is not None:
+            target_eval = recommend.evaluate_target_transfer(
+                squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
+                planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"))
+            st.markdown("**Target player scenario**")
+            if target_eval["summary"]:
+                for line in target_eval["summary"]:
+                    st.markdown(f'<div class="tx-reco">🧪 {line}</div>', unsafe_allow_html=True)
+            if target_eval["moves"]:
+                st.dataframe(pd.DataFrame(target_eval["moves"])[
+                    [c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
+                     if c in pd.DataFrame(target_eval["moves"]).columns]], hide_index=True, use_container_width=True)
+        if wc_gw_choice is not None:
+            future_gw_list = list(range(wc_gw_choice, wc_gw_choice + horizon))
+            future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list)
+            future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
+            future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
+            wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
+                                                              team_value, future_gw_list)
+            st.markdown(f"**Wildcard what-if — GW{wc_gw_choice}**")
+            if not wc_eval["feasible"]:
+                st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
+                        f"reach that far yet).")
+            else:
+                gap = wc_eval["gap"]
+                st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
+                            f'{wc_eval["rebuild_total"]:.1f} xPts vs {wc_eval["hold_total"]:.1f} xPts holding your '
+                            f'current squad, over the same {len(future_gw_list)}-GW window ({gap:+.1f} xPts). '
+                            f'Informational only — Wildcard timing stays your own call (Standing Rule #24), '
+                            f'never a play/hold verdict from this model.</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric

@@ -192,6 +192,52 @@ def evaluate_triple_captain(starters_df: pd.DataFrame, gw_list: list[int], moe_f
     return {"verdict": verdict, "best_gw": best_gw, "by_gw": by_gw, "margin": margin, "threshold": threshold}
 
 
+def evaluate_wildcard_whatif(current_squad_future_proj: pd.DataFrame, future_pool_proj: pd.DataFrame,
+                              cfg: dict, team_value: float, future_gw_list: list[int]) -> dict:
+    """Manager-directed what-if (Patch 6): "what if I played my Wildcard at
+    GW{n}?" — on-demand version of Step 8c's own reactive-layer mechanic
+    (recompute the gap between the current squad's trajectory and a
+    freshly-solved rebuild at a candidate date), run against a manager-
+    chosen date instead of only the model's currently-planned one.
+
+    Standing Rule #24 applies in full: this is INFORMATION, never a
+    mechanical go/no-go verdict — the caller must present the gap as a
+    disclosed number for the manager's own judgment, exactly like
+    `wildcard_flag()` above, never as "play"/"hold" wording (that framing
+    is reserved for the Chip Advisor's Bench Boost/Triple Captain/Free Hit
+    verdicts, which are genuinely mechanical per Rule #34; Wildcard timing
+    is deliberately excluded from that treatment by Rule #24).
+
+    Unlike Free Hit (Standing Rule #25), a Wildcard squad does NOT revert —
+    so the rebuild is optimized on the full `future_gw_list` horizon sum,
+    never a single GW, and compared against the CURRENT squad's own
+    realized value (Rule #12) over that identical window (i.e. "if you
+    changed nothing between now and then and just held").
+
+    `current_squad_future_proj`/`future_pool_proj`: the current squad and
+    remaining pool re-projected onto `future_gw_list` (a different window
+    than the manager's default horizon) — the caller must re-run the
+    projection pipeline for that window first; this function only solves
+    and compares, it doesn't re-project.
+    `team_value`: bank + current squad's sell-value proxy — Rule #25's full-
+    rebuild mechanic, same total-value basis as Free Hit, just non-
+    reverting."""
+    empty = {"feasible": False, "hold_total": 0.0, "rebuild_total": 0.0, "gap": 0.0}
+    if current_squad_future_proj is None or current_squad_future_proj.empty or not future_gw_list:
+        return empty
+    hold_total = opt.realized_horizon_value(current_squad_future_proj, future_gw_list, cfg)
+    full_pool = pd.concat([current_squad_future_proj, future_pool_proj], ignore_index=True, sort=False)
+    if "code" in full_pool.columns:
+        full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
+    rebuild = opt.solve_squad(full_pool, cfg, budget=team_value, objective_col="xpts_horizon_sum")
+    if rebuild is None or rebuild.get("squad") is None or rebuild["squad"].empty:
+        return {**empty, "hold_total": round(hold_total, 2)}
+    rebuild_total = opt.realized_horizon_value(rebuild["squad"], future_gw_list, cfg)
+    gap = round(rebuild_total - hold_total, 2)
+    return {"feasible": True, "hold_total": round(hold_total, 2), "rebuild_total": round(rebuild_total, 2),
+            "gap": gap, "rebuild_squad": rebuild["squad"]}
+
+
 def evaluate_free_hit(squad_df: pd.DataFrame, gw_list: list[int], rebuild_fn, moe_fn) -> dict:
     """Standing Rule #25: Free Hit is only ever evaluated as a full 15-man
     rebuild against total team value, compared against the manager's OWN
