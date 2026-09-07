@@ -48,7 +48,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     must_include_codes = must_include_codes or []
     exclude_codes = exclude_codes or []
 
-    # Patch 10 — a real bug this closes: dropping a row for a missing
+    # Patch 10 (original bug) — dropping a row for a missing
     # objective_col/price BEFORE the retain-pool constraint is built means a
     # currently-owned player with an incomplete projection this run (a
     # sparse-minutes bench player is the classic case) silently vanishes
@@ -58,31 +58,54 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     # That can use up the one transfer slot a k=1 request was supposed to
     # give the manager on a player they never asked to touch, then force an
     # unrelated second swap (and its hit cost) just to also fit in the swap
-    # they actually wanted. Confirmed failure pattern: a backup GK with a
-    # data gap got silently forced out, eating the only free swap at k=1,
-    # so a same-position, budget-legal 1-for-1 elsewhere in the squad
-    # couldn't be reached until k=2 — reported as needing 2 transfers when
-    # 1 was genuinely enough.
+    # they actually wanted.
     #
-    # Fix: a currently-owned or must-include player is never silently
-    # dropped from candidacy for a missing objective_col/price — instead
-    # their value is filled with 0.0 so they remain a real, normal
-    # candidate the solver can choose to keep OR drop on the merits, and the
-    # retain-pool's true size (15, not "however many survived a drop") is
-    # preserved. `data_gap_codes` in the return dict discloses which codes
-    # were patched (Standing Rule #4 — show the inputs, never silently
-    # estimate) so a caller can surface this to the manager.
+    # Patch 10's first fix (filling the gap with 0.0 and leaving the player
+    # freely tradeable) was ITSELF a real bug, confirmed live: a 0.0 reads to
+    # the solver as "the single worst player in the entire pool," which is
+    # an active INCENTIVE to swap him out — not neutral. That produced two
+    # confirmed bad outputs: under "Hit if worth it," the solver happily
+    # paid a hit to drop him alongside an unrelated, genuinely-wanted swap
+    # (dropping a "0 xPts" player looks free); under "No hits" multi-week
+    # pacing, it spent GW-now's free transfer swapping him out first,
+    # pushing the manager's actual target to a later week for no reason.
+    # Neither is a real judgment about him — both are an artifact of a
+    # fabricated placeholder number silently driving a real decision, which
+    # is exactly what Standing Rule #4 warns against (disclosing the gap via
+    # `data_gap_codes` was not enough — the estimate itself still shaped the
+    # recommendation).
+    #
+    # Fix (Patch 15): a currently-owned or must-include player with a
+    # missing objective_col/price is never dropped AND never left freely
+    # tradeable on a fabricated value — he is PINNED (forced to stay, same
+    # mechanism as an explicit must_include) so the solver cannot select him
+    # out for any reason this run, while remaining a normal, present row so
+    # the retain-pool's true size (15, not "however many survived a drop")
+    # is preserved. His price/objective are still filled with 0.0 purely so
+    # the LP has a real number to work with — that number can no longer
+    # influence whether he stays, only slightly understate the squad's
+    # reported total (already covered by the `data_gap_codes` disclosure).
+    # Net effect: the model simply declines to make any decision about a
+    # player it can't currently project, in either direction, until his data
+    # is actually available — never silently estimates one.
     players = players.copy()
     protected_codes = set(must_include_codes) | set(retain_pool_codes or [])
     data_gap_codes = []
+    pinned_gap_codes = []
     if protected_codes and "code" in players.columns:
         protected_mask = players["code"].isin(protected_codes)
+        gap_mask_any = pd.Series(False, index=players.index)
         for col in (objective_col, "price"):
             if col in players.columns:
-                gap_mask = protected_mask & players[col].isna()
-                if gap_mask.any():
-                    data_gap_codes.extend(players.loc[gap_mask, "code"].tolist())
-                    players.loc[gap_mask, col] = 0.0
+                gap_mask_any = gap_mask_any | (protected_mask & players[col].isna())
+        if gap_mask_any.any():
+            gap_codes = players.loc[gap_mask_any, "code"].tolist()
+            data_gap_codes.extend(gap_codes)
+            pinned_gap_codes.extend(gap_codes)
+            gap_rows_mask = players["code"].isin(gap_codes)
+            for col in (objective_col, "price"):
+                if col in players.columns:
+                    players.loc[gap_rows_mask & players[col].isna(), col] = 0.0
 
     df = players.dropna(subset=["price", objective_col, "position"]).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
@@ -110,6 +133,15 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
 
     for code in must_include_codes:
+        idxs = df[df["code"] == code].index
+        for i in idxs:
+            prob += x[i] == 1
+
+    # Patch 15 — pin data-gap protected players too (see comment above):
+    # forced to stay exactly as they are this run, the same as an explicit
+    # must_include, so their fabricated 0.0 placeholder can never be read by
+    # the solver as "safe/attractive to drop."
+    for code in pinned_gap_codes:
         idxs = df[df["code"] == code].index
         for i in idxs:
             prob += x[i] == 1

@@ -974,8 +974,21 @@ if cur_hist:
         n = r.get("event_transfers", 0) or 0
         move = chip_protocol.CHIP_LABELS.get(chip, chip) + " played" if chip else \
             (f"{n} transfer(s) (−{cost}pt)" if cost else (f"{n} transfer(s)" if n else "—"))
-        ledger_rows.append({"GW": gw, "Move": move, "Points": r.get("points"), "Overall rank": r.get("overall_rank")})
+        # Patch 15 — same fix as the header stat (Patch 12), applied here
+        # too: this table was still reading `history["current"]`'s own
+        # per-row `overall_rank`, which is a DIFFERENT official-API field
+        # from `entry["summary_overall_rank"]` and can disagree with it for
+        # the CURRENT (not-yet-finalized) gameweek — showing two different
+        # numbers for "GW3 rank" on the same page. Only the current squad_gw
+        # row is corrected to the live field; already-finalized past rows
+        # keep their own historical value (both fields should already agree
+        # once FPL finalizes a gameweek).
+        rank_val = live_overall_rank if (gw == squad_gw and live_overall_rank is not None) else r.get("overall_rank")
+        ledger_rows.append({"GW": gw, "Move": move, "Points": r.get("points"), "Overall rank": rank_val})
     st.dataframe(pd.DataFrame(ledger_rows), hide_index=True, use_container_width=True)
+    if not gw_final:
+        st.caption(f"GW{squad_gw}'s rank above uses the same live figure as the header stat (provisional until "
+                   f"FPL finalizes the gameweek) — past rows are each GW's own confirmed historical value.")
 else:
     st.caption("No season history yet — nothing finished before GW1.")
 
