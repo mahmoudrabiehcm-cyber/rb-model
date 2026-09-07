@@ -221,12 +221,18 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                 else:
                     cs_pct = eng.cs_pct_poisson(trow, opp_row, is_home)
 
+                # v6.0 / Standing Rule #38 (Patch 18): each rate now blends on its
+                # own curve -- metric= selects decay_schedule_npxg / _xa / _dc from
+                # model_config.yaml instead of one shared schedule.
                 npxg = eng.blend_rate(p.get("npxg90_hist"), p.get("npxg90_cur"), gw, cfg,
+                                       metric="npxg",
                                        current_sample_matches=int(p.get("starts", 0) or 0))
                 npxg, sp_mult_last = setpiece.apply_to_npxg(npxg, p, gw, cfg)
                 xa = eng.blend_rate(p.get("xa90_hist"), p.get("xa90_cur"), gw, cfg,
+                                     metric="xa",
                                      current_sample_matches=int(p.get("starts", 0) or 0))
                 dc90 = eng.blend_rate(p.get("dc90_hist"), p.get("dc90_cur"), gw, cfg,
+                                       metric="dc",
                                        current_sample_matches=int(p.get("starts", 0) or 0))
                 p_for_bonus = p.copy()
                 p_for_bonus["bonus_per_start_hist"] = (

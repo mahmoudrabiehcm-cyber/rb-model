@@ -42,8 +42,13 @@ def setpiece_multiplier(player_row: pd.Series, gw: int, cfg: dict) -> float:
     if not is_primary_pen and not is_primary_dead_ball:
         return 1.0
 
-    h_w, c_w = eng.decay_weights(gw, cfg)  # current_weight rises across the season
-    fade = max(0.0, 1.0 - c_w)  # ~1.0 early, ~0.15 by GW13+ — see module docstring
+    # v6.0 / Standing Rule #38 (Patch 18): this fade decorates npxg_blend
+    # specifically (shot-taking role confirmation), so it now follows the
+    # npxG-specific curve rather than the old shared schedule -- it fades to
+    # its floor faster than pre-Patch-18 (npxG's curve is now accelerated
+    # relative to the old shared one). current_weight rises across the season.
+    h_w, c_w = eng.decay_weights(gw, cfg, metric="npxg")
+    fade = max(0.0, 1.0 - c_w)  # ~1.0 early, ~0.12 by GW13+ per the npxG curve
 
     if is_primary_pen:
         band = sp_cfg.get("penalty_multiplier_max", 1.20)

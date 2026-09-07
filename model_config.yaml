@@ -1,5 +1,5 @@
 # =============================================================================
-# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v5.0" +
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.0" +
 # app-side Patch 1: reachable-ceiling Team Rating %, Chip Advisor, dynamic
 # alt-captain, Rule #34 margin-of-error)
 # =============================================================================
@@ -10,10 +10,13 @@
 # =============================================================================
 
 meta:
-  model_version: "5.0"
-  base_version: "3.3"    # Core Formula, Decay Schedule, DEFCON calibration, Data
+  model_version: "6.0"
+  base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
-                          # v3.3 -- see the model doc's changelog (v4.0 -> v5.0) for the deltas.
+                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.0) for the deltas.
+                          # v6.0 (Patch 18): Standing Rule #38 splits the Decay Schedule below
+                          # into three metric-specific curves (npxG/90, xA/90, DEFCON/90) --
+                          # see decay_schedule_npxg / decay_schedule_xa / decay_schedule_dc.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -104,11 +107,45 @@ european_competition_teams:
   conference_league: []     # e.g. ["CRY"]
 
 # -----------------------------------------------------------------------------
-# 5. Decay Schedule -- applies to BOTH xM confidence and output-rate blend
-# (npxG/90, xA/90, DEFCON/90) per Step 3's v3.0 fix.
+# 5. Decay Schedule (v6.0 / Standing Rule #38 -- METRIC-SPECIFIC, replaces the
+# single shared curve used through v5.0). Each output rate now has its own
+# historical/current blend curve, keyed off how fast that rate's YoY signal
+# actually stabilizes:
+#   - npxg: accelerated. Sourced to StatsBomb's Pugsley repeatability study
+#     (shots/90 YoY R^2=0.435 vs goals/90 R^2=0.048) and American Soccer
+#     Analysis (team xG signal significant from ~4 matches).
+#   - xa: moderately accelerated -- one step more conservative than npxg.
+#   - dc: UNCHANGED from the pre-v6.0 shared curve. No published
+#     stabilization research exists for defensive-action counting stats, so
+#     Rule #4 (EST/VERIFIED discipline) blocks accelerating it without
+#     evidence. Still tagged EST/unresolved per the doc.
+# Rule #38 also specifies: a future metric added WITHOUT its own sourced
+# curve must default to the MOST conservative (slowest) of these three, never
+# the fastest, until evidenced -- keep that in mind before adding a 4th table.
+# NOTE: DEFCON's per-band "manager-fit cap" (+/-20% -> 0%, per the doc) is
+# NOT implemented here or anywhere in the engine yet -- pre-existing gap,
+# explicitly out of scope for Patch 18, tracked as a separate follow-up.
 # -----------------------------------------------------------------------------
-decay_schedule:
+decay_schedule_npxg:
   # gw_from, gw_to (inclusive), historical_weight, current_weight
+  - {gw_from: 1,  gw_to: 1,  historical: 0.90, current: 0.10}
+  - {gw_from: 2,  gw_to: 3,  historical: 0.70, current: 0.30}
+  - {gw_from: 4,  gw_to: 5,  historical: 0.50, current: 0.50}
+  - {gw_from: 6,  gw_to: 8,  historical: 0.35, current: 0.65}
+  - {gw_from: 9,  gw_to: 12, historical: 0.20, current: 0.80}
+  - {gw_from: 13, gw_to: 38, historical: 0.12, current: 0.88}
+
+decay_schedule_xa:
+  - {gw_from: 1,  gw_to: 1,  historical: 1.00, current: 0.00}
+  - {gw_from: 2,  gw_to: 3,  historical: 0.80, current: 0.20}
+  - {gw_from: 4,  gw_to: 5,  historical: 0.60, current: 0.40}
+  - {gw_from: 6,  gw_to: 8,  historical: 0.45, current: 0.55}
+  - {gw_from: 9,  gw_to: 12, historical: 0.30, current: 0.70}
+  - {gw_from: 13, gw_to: 38, historical: 0.15, current: 0.85}
+
+decay_schedule_dc:
+  # Unchanged from the pre-v6.0 shared curve (Standing Rule #38 leaves
+  # DEFCON un-accelerated -- see note above).
   - {gw_from: 1,  gw_to: 1,  historical: 1.00, current: 0.00}
   - {gw_from: 2,  gw_to: 3,  historical: 0.85, current: 0.15}
   - {gw_from: 4,  gw_to: 5,  historical: 0.70, current: 0.30}

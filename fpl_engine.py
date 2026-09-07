@@ -48,23 +48,38 @@ def load_overrides(path: Path = OVERRIDES_PATH) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Decay Schedule (§5)
+# Decay Schedule (§5, v6.0 / Standing Rule #38 -- METRIC-SPECIFIC)
 # ---------------------------------------------------------------------------
-def decay_weights(gw: int, cfg: dict) -> tuple[float, float]:
-    for row in cfg["decay_schedule"]:
+_DECAY_CONFIG_KEYS = {
+    "npxg": "decay_schedule_npxg",
+    "xa": "decay_schedule_xa",
+    "dc": "decay_schedule_dc",
+}
+
+
+def decay_weights(gw: int, cfg: dict, metric: str) -> tuple[float, float]:
+    """metric must be one of "npxg" / "xa" / "dc" (Standing Rule #38 -- each
+    output rate has its own historical/current blend curve as of v6.0; there
+    is no longer a single shared schedule). Raises KeyError on an unknown
+    metric rather than silently falling back, so a typo/new-metric call site
+    fails loudly instead of quietly reusing the wrong curve."""
+    cfg_key = _DECAY_CONFIG_KEYS[metric]
+    schedule = cfg[cfg_key]
+    for row in schedule:
         if row["gw_from"] <= gw <= row["gw_to"]:
             return row["historical"], row["current"]
-    last = cfg["decay_schedule"][-1]
+    last = schedule[-1]
     return last["historical"], last["current"]
 
 
-def blend_rate(historical: float, current: float, gw: int, cfg: dict,
+def blend_rate(historical: float, current: float, gw: int, cfg: dict, metric: str,
                current_sample_matches: int = 0) -> float:
-    """Blend a per-90 output rate (npxG/90, xA/90, DEFCON/90) per the Decay
-    Schedule. If there's literally no current-season sample yet, current
-    weight collapses to the historical leg regardless of schedule (nothing
-    to blend)."""
-    h_w, c_w = decay_weights(gw, cfg)
+    """Blend a per-90 output rate (npxG/90, xA/90, or DEFCON/90 -- pass the
+    matching `metric`) per that metric's own Decay Schedule curve (v6.0,
+    Standing Rule #38). If there's literally no current-season sample yet,
+    current weight collapses to the historical leg regardless of schedule
+    (nothing to blend)."""
+    h_w, c_w = decay_weights(gw, cfg, metric)
     if current_sample_matches == 0 or pd.isna(current):
         return historical if not pd.isna(historical) else 0.0
     historical = 0.0 if pd.isna(historical) else historical
