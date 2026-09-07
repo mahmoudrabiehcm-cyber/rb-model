@@ -987,8 +987,10 @@ if cur_hist:
         ledger_rows.append({"GW": gw, "Move": move, "Points": r.get("points"), "Overall rank": rank_val})
     st.dataframe(pd.DataFrame(ledger_rows), hide_index=True, use_container_width=True)
     if not gw_final:
-        st.caption(f"GW{squad_gw}'s rank above uses the same live figure as the header stat (provisional until "
-                   f"FPL finalizes the gameweek) — past rows are each GW's own confirmed historical value.")
+        st.caption(f"GW{squad_gw}'s Points and Overall rank above are both live, provisional FPL figures "
+                   f"(rank uses the same corrected field as the header stat) — bonus points for this gameweek "
+                   f"aren't finalized yet, so both can still move. Past rows are each GW's own confirmed, "
+                   f"finalized value and won't change.")
 else:
     st.caption("No season history yet — nothing finished before GW1.")
 

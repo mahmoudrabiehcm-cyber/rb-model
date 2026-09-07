@@ -752,12 +752,47 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
                     f"your total team value this run is £{team_value}m."]
         return {**empty, "summary": diagnostic + fallback}
 
+    # Patch 16 — a real inconsistency this closes: this scenario tool always
+    # searched k=1..5 regardless of hit_stance (Patch 6b, so a target
+    # genuinely needing 2 legal swaps was still found instead of a false
+    # "no legal way"), but it then picked its headline answer from ALL of
+    # those candidates even under "No hits" — so it could hand back a
+    # hit-costing plan as "Your scenario" while the sidebar said "No hits,"
+    # with nothing telling the manager the two had diverged. Confirmed live:
+    # a Palmer evaluation returned a −4 hit while "No hits" was selected.
+    # Fix: still SEARCH every k (so a legitimate multi-swap free route is
+    # never missed), but under "No hits" only let a hit-free candidate
+    # (hit_cost == 0) win the headline "Your scenario" slot — same rule
+    # `suggest_transfers()` already applies to its own default pick. If no
+    # hit-free route exists at all, say so plainly and show the cheapest
+    # hit-requiring route ONLY as clearly-labeled informational context, not
+    # as a recommendation.
+    free_candidates = {k: c for k, c in candidates.items() if c["hit_cost"] == 0}
+    if hit_stance == "No hits" and not free_candidates:
+        cheapest_k = min(candidates, key=lambda k: (candidates[k]["hit_cost"], -candidates[k]["net_gain"]))
+        cheapest = candidates[cheapest_k]
+        pairs = _pair_moves(squad_df, cheapest["squad"], this_gw_col)
+        moves = [_move_row(p, cheapest["hit_cost"], cheapest["net_gain"], False) for p in pairs]
+        move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+        summary = [f"No hit-free way to add this player this run — your sidebar stance is 'No hits', and every "
+                    f"legal route found needs at least a {cheapest['hit_cost']:.0f}-pt hit.",
+                   f"Informational only, not recommended under 'No hits': the cheapest hit-requiring route — "
+                    f"{move_bits} ({cheapest['actual_k']} transfer(s), −{cheapest['hit_cost']:.0f} pts) — "
+                    f"nets {cheapest['net_gain']:+.1f} xPts over {horizon_n} GW(s)."]
+        if default_net_gain is not None:
+            summary.append("Switch to 'Hit if worth it' or 'Force' in the sidebar to let this scenario actually "
+                            "recommend a hit-costing route.")
+        return {"feasible": True, "already_owned": False, "summary": summary, "moves": moves,
+                "net_gain": None, "hit_cost": cheapest["hit_cost"], "clears_bar": False, "chosen_k": None}
+
+    working = free_candidates if hit_stance == "No hits" else candidates
+
     # Cheapest legal way in that also maximizes net gain: same fewest-
     # transfers-within-margin-of-error tie-break as suggest_transfers().
-    best_net = max(c["net_gain"] for c in candidates.values())
-    tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
-    chosen_k = min(tied_ks) if tied_ks else min(candidates, key=lambda k: candidates[k]["net_gain"])
-    chosen = candidates[chosen_k]
+    best_net = max(c["net_gain"] for c in working.values())
+    tied_ks = sorted(k for k, c in working.items() if (best_net - c["net_gain"]) < moe)
+    chosen_k = min(tied_ks) if tied_ks else min(working, key=lambda k: working[k]["net_gain"])
+    chosen = working[chosen_k]
     bar = threshold if chosen["hit_cost"] > 0 else meaningful_bar
     clears = chosen["net_gain"] >= bar
 
