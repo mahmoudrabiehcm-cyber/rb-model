@@ -305,8 +305,31 @@ def solve_free_hit_rebuild(cfg: dict, proj: pd.DataFrame, total_value: float, gw
     optimized for the single target gameweek only, never the multi-GW
     horizon sum, since a Free Hit's squad reverts after that one week
     (Horizon-Matching Rule). Never a marginal swap-budget check — always the
-    full rebuild, per Rule #25."""
+    full rebuild, per Rule #25.
+
+    NOTE: this is the play/hold VERDICT solve (Chip Advisor) — it maximizes
+    the raw 15-man sum, same as solve_squad() always has, because that's
+    all a play-vs-hold comparison needs. For the "what would the optimal
+    squad actually look like" display feature, see
+    solve_free_hit_optimal_squad() below, which deliberately optimizes
+    differently (highest 11 starters, light bench)."""
     col = f"xpts_gw{gw}"
     if col not in proj.columns:
         return None
     return opt.solve_squad(proj, cfg, budget=total_value, objective_col=col)
+
+
+def solve_free_hit_optimal_squad(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
+    """Free Hit "optimal team for this GW" display feature (2026-09-07
+    discussion, Patch 19). Unlike solve_free_hit_rebuild() above (which
+    answers "is playing Free Hit this GW worth it at all," maximizing the
+    raw 15-man sum for that comparison), this answers "if I play it, what's
+    the actual best squad" — highest-scoring legal Starting XI plus the
+    cheapest legal bench, via optimizer.solve_xi_first_squad(). Same
+    Horizon-Matching Rule basis (single target GW only, never a multi-GW
+    sum, since a Free Hit squad reverts after one week) and same total-value
+    budget basis (Rule #25) as the play/hold solve."""
+    col = f"xpts_gw{gw}"
+    if col not in proj.columns:
+        return None
+    return opt.solve_xi_first_squad(proj, cfg, budget=total_value, gw_col=col)

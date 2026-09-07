@@ -166,6 +166,151 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     }
 
 
+def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str) -> dict | None:
+    """Free Hit "optimal team for this GW" feature (2026-09-07 discussion,
+    Patch 19) — Option A (two-stage, manager-confirmed): unlike solve_squad()
+    (which maximizes the raw sum of all 15 players' projections and has no
+    concept of starter vs. bench at solve time, so it has no actual incentive
+    to keep a bench cheap), this deliberately solves for "highest 11
+    starters, light bench" as two separate stages:
+
+    Stage 1 — best legal Starting XI. For each of the 8 valid outfield
+    shapes (same VALID_SHAPES as best_starting_xi(), since the XI must be a
+    real, playable formation), solve a MILP picking exactly 1 GK + that
+    shape's DEF/MID/FWD counts maximizing this single GW's projection,
+    under a reserved sub-budget (total budget minus a cheap-bench estimate)
+    and the max-per-club limit. Take whichever shape scores highest.
+
+    Stage 2 — cheapest legal bench. With the XI fixed, solve a second, small
+    MILP: fill the remaining squad slots needed to reach the full 2-5-5-3
+    (1 more GK + whatever DEF/MID/FWD the chosen shape didn't use) by
+    MINIMIZING total price from whatever's left in the pool, respecting the
+    combined max-per-club limit (XI's club counts + bench's) and whatever
+    budget the XI didn't spend.
+
+    This is deliberately two solves rather than one combined MILP: the
+    "cheapest bench" objective only makes sense once the XI (and therefore
+    which position-counts still need filling, and how much budget is left)
+    is already fixed — a single-pass objective can't express "maximize
+    these 11, minimize these 4" without a made-up relative weighting between
+    the two goals, which is exactly the kind of guessed number this project
+    avoids (see model_config.yaml's legacy, superseded flat
+    `bench_autosub_discount`).
+
+    Returns None if either stage can't find a feasible solution (e.g. the
+    reserved bench budget estimate turns out too tight for the club mix the
+    best XI happened to pick) — caller should treat that as "couldn't solve
+    a Free Hit squad for this GW this run," same as solve_squad() returning
+    None."""
+    if pulp is None:
+        return None
+
+    VALID_SHAPES = [(3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3)]
+    max_per_club = cfg["squad_rules"]["max_per_club"]
+    formation = cfg["squad_rules"]["formation"]  # {GK: 2, DEF: 5, MID: 5, FWD: 3}
+
+    df = players.dropna(subset=["price", gw_col, "position"]).copy()
+    df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
+    df = df[df["status"] == "a"]
+    if df.empty:
+        return None
+
+    # Cheap-bench budget reserve estimate for Stage 1: the 4 lowest prices
+    # available across GK/DEF/MID/FWD that a bench (1 GK + 3 outfield, in
+    # some position mix) could possibly need — a lower bound, not a real
+    # allocation (Stage 2 computes the real one once the XI/shape is fixed).
+    cheapest_by_pos = {pos: sorted(df[df["position"] == pos]["price"].tolist())
+                        for pos in ["GK", "DEF", "MID", "FWD"]}
+    if any(len(v) == 0 for v in cheapest_by_pos.values()):
+        return None
+    bench_reserve_estimate = (cheapest_by_pos["GK"][0] +
+                               sum(sorted(cheapest_by_pos["DEF"] + cheapest_by_pos["MID"] +
+                                          cheapest_by_pos["FWD"])[:3]))
+    xi_budget_cap = max(0.0, budget - bench_reserve_estimate)
+
+    def _solve_xi_for_shape(d: int, m: int, f: int) -> dict | None:
+        prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
+        x = {i: pulp.LpVariable(f"xi_{i}", cat="Binary") for i in df.index}
+        prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
+        prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
+        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
+        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "DEF") == d
+        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "MID") == m
+        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
+        for team in df["team"].unique():
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        if pulp.LpStatus[prob.status] != "Optimal":
+            return None
+        chosen = [i for i in df.index if x[i].value() == 1]
+        xi = df.loc[chosen]
+        return {"xi": xi, "total": round(xi[gw_col].sum(), 2), "shape": (d, m, f)}
+
+    def _solve_bench_for_xi(xi_result: dict) -> dict | None:
+        xi_df = xi_result["xi"]
+        xi_codes = set(xi_df["code"])
+        xi_cost = float(xi_df["price"].sum())
+        xi_club_counts = xi_df["team"].value_counts().to_dict()
+        need = {
+            "GK": formation["GK"] - 1,
+            "DEF": formation["DEF"] - xi_result["shape"][0],
+            "MID": formation["MID"] - xi_result["shape"][1],
+            "FWD": formation["FWD"] - xi_result["shape"][2],
+        }
+        remaining_budget = max(0.0, budget - xi_cost)
+        bench_pool = df[~df["code"].isin(xi_codes)]
+
+        prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
+        y = {i: pulp.LpVariable(f"bn_{i}", cat="Binary") for i in bench_pool.index}
+        prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
+        prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
+        for pos, n in need.items():
+            prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "position"] == pos) == n
+        for team in bench_pool["team"].unique():
+            already = xi_club_counts.get(team, 0)
+            prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
+                <= max(0, max_per_club - already)
+        prob2.solve(pulp.PULP_CBC_CMD(msg=0))
+        if pulp.LpStatus[prob2.status] != "Optimal":
+            return None
+
+        bench_chosen = [i for i in bench_pool.index if y[i].value() == 1]
+        bench_df = bench_pool.loc[bench_chosen]
+        squad = pd.concat([xi_df, bench_df], ignore_index=False, sort=False) \
+            .sort_values(["position", gw_col], ascending=[True, False])
+        return {
+            "squad": squad,
+            "xi_codes": xi_codes,
+            "shape": xi_result["shape"],
+            "xi_total": xi_result["total"],
+            "bench_cost": round(float(bench_df["price"].sum()), 1),
+            "total_cost": round(xi_cost + float(bench_df["price"].sum()), 1),
+        }
+
+    # Solve every shape's XI, then try Stage 2 against them in descending
+    # XI-score order — the single best-scoring XI can still leave Stage 2
+    # infeasible (its particular club mix can exhaust the max-3-per-club
+    # limit at a club whose players happen to be the cheapest available for
+    # a still-needed bench position, with no budget room left to go
+    # elsewhere). Falling back to the next-best XI whenever that happens is
+    # what makes this genuinely "the optimal team," not just "the optimal
+    # XI, if we got lucky on the bench" — confirmed necessary by testing:
+    # a synthetic pool reproduced exactly this failure on the single-best-
+    # XI-only version of this function.
+    xi_candidates = []
+    for d, m, f in VALID_SHAPES:
+        result = _solve_xi_for_shape(d, m, f)
+        if result:
+            xi_candidates.append(result)
+    xi_candidates.sort(key=lambda r: r["total"], reverse=True)
+
+    for xi_result in xi_candidates:
+        solved = _solve_bench_for_xi(xi_result)
+        if solved:
+            return solved
+    return None
+
+
 def bench_autosub_prob(position: str, bench_rank: int, starters_xi: pd.DataFrame,
                         xm_col: str, cfg: dict) -> float:
     """Standing Rule #12 (Bench Value Rule) heuristic. Disclosed EST, not a

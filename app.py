@@ -633,9 +633,12 @@ with st.spinner("Fetching live data and computing xPts..."):
     # exposure — reuses that evidence rather than re-deriving it.
     advisory_bits = []
     if wc_flag and any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows):
-        advisory_bits.append("a Wildcard flag is active (see Chip Rack) and a Wildcard is available — if "
-                             "you're leaning toward playing it soon, banking this transfer costs nothing "
-                             "since the Wildcard resets your squad anyway")
+        advisory_bits.append("a Wildcard review condition was triggered (see Chip Rack — rank decline / "
+                             "flagged players) and the chip is unused. This does NOT mean a Wildcard is being "
+                             "played now or is recommended — it's informational only, per the model's own rule "
+                             "that Wildcard timing is always your call. If you're separately already planning "
+                             "to play it soon, banking this transfer costs nothing since a Wildcard resets "
+                             "your squad anyway")
     if any("Free Hit" in n for n in chip_notes):
         advisory_bits.append("a Free Hit has genuine exposure against a confirmed blank in your horizon "
                              "(see Chip Rack) — weigh banking against spending here too")
@@ -899,11 +902,11 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
 # purely additive. Gated behind an explicit button rather than re-running
 # on every widget change, since each evaluation is a fresh MILP solve.
 # ---------------------------------------------------------------------------
-with st.expander("Evaluate your own scenario — a specific target, or a candidate Wildcard date"):
-    st.caption("Optional. Pick a target player and/or a candidate Wildcard gameweek below, then click Evaluate. "
-               "Leave both on \"— none —\" and nothing changes — the recommendation above stays the model's own "
-               "default full-pool pick.")
-    scen_col1, scen_col2 = st.columns(2)
+with st.expander("Evaluate your own scenario — a specific target, a candidate Wildcard date, or a Free Hit GW"):
+    st.caption("Optional. Pick a target player, a candidate Wildcard gameweek, and/or a candidate Free Hit "
+               "gameweek below, then click Evaluate. Leave all on \"— none —\" and nothing changes — the "
+               "recommendation above stays the model's own default full-pool pick.")
+    scen_col1, scen_col2, scen_col3 = st.columns(3)
     with scen_col1:
         pool_options = [(None, "— none —")]
         if not pool_df.empty:
@@ -917,9 +920,15 @@ with st.expander("Evaluate your own scenario — a specific target, or a candida
         wc_gw_choice = st.selectbox("Candidate Wildcard gameweek", options=wc_gw_options,
                                      format_func=lambda g: "— none —" if g is None else f"GW{g}",
                                      key="scenario_wc_gw")
+    with scen_col3:
+        fh_gw_options = [None] + list(range(planning_gw, 39))
+        fh_gw_choice = st.selectbox("Candidate Free Hit gameweek", options=fh_gw_options,
+                                     format_func=lambda g: "— none —" if g is None else f"GW{g}",
+                                     key="scenario_fh_gw")
     if st.button("Evaluate scenario"):
-        if target_choice[0] is None and wc_gw_choice is None:
-            st.info("Nothing selected — pick a target player and/or a Wildcard gameweek above first.")
+        if target_choice[0] is None and wc_gw_choice is None and fh_gw_choice is None:
+            st.info("Nothing selected — pick a target player, a Wildcard gameweek, and/or a Free Hit "
+                    "gameweek above first.")
         if target_choice[0] is not None:
             target_eval = recommend.evaluate_target_transfer(
                 squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
@@ -999,6 +1008,65 @@ with st.expander("Evaluate your own scenario — a specific target, or a candida
                 st.caption(f"Style profile **{style_name}** applied to this rebuild (same EO-pull tie-break as "
                            f"ordinary transfers). Prices, injuries and fixtures can move before GW{wc_gw_choice} "
                            f"— re-run this closer to the date rather than treating it as locked in.")
+
+        if fh_gw_choice is not None:
+            # Free Hit "optimal team for this GW" feature (2026-09-07
+            # discussion, Patch 19). Unlike the Wildcard what-if above (a
+            # non-reverting rebuild evaluated over a 3-GW-minimum horizon,
+            # Rule #24 flag-only), a Free Hit squad reverts after one week
+            # (Standing Rule #25 / Horizon-Matching Rule) — so this is
+            # single-GW only, and it deliberately optimizes differently:
+            # highest-scoring legal Starting XI + cheapest legal bench
+            # (optimizer.solve_xi_first_squad via
+            # data_pipeline.solve_free_hit_optimal_squad), not a raw
+            # 15-man-sum rebuild like the Chip Advisor's own play/hold
+            # verdict solve uses. No Style Profile EO-pull is applied here
+            # (unlike the Wildcard squad above) — this shows the model's
+            # single best squad for one specific week, not a season-shaping
+            # decision the manager's differential-risk profile should bend.
+            # proj only covers the sidebar horizon's gw_list — fh_gw_choice can
+            # be well beyond that (same reason the Wildcard block above
+            # re-projects onto its own future_gw_list rather than reusing
+            # proj), so re-project fresh for just this one target GW.
+            fh_col = f"xpts_gw{fh_gw_choice}"
+            fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice])
+            if fh_col not in fh_proj.columns:
+                st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
+            else:
+                fh_result = data_pipeline.solve_free_hit_optimal_squad(cfg, fh_proj, team_value, fh_gw_choice)
+                st.markdown(f"**Free Hit optimal squad — GW{fh_gw_choice}**")
+                if fh_result is None:
+                    st.info(f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
+                            f"(projection data may not reach that far yet, or no feasible squad fit the "
+                            f"budget/club constraints).")
+                else:
+                    fh_squad = fh_result["squad"]
+                    fh_xi = fh_squad[fh_squad["code"].isin(fh_result["xi_codes"])]
+                    fh_bench = fh_squad[~fh_squad["code"].isin(fh_result["xi_codes"])]
+                    d, m, f = fh_result["shape"]
+                    fh_show_cols = ["web_name", "team", "position", "price", fh_col]
+                    fh_col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
+                                      "price": "£m", fh_col: f"xPts GW{fh_gw_choice}"}
+                    st.markdown(f"Starting XI (formation 1-{d}-{m}-{f}, XI cost "
+                                f"£{fh_xi['price'].sum():.1f}m, bench cost £{fh_result['bench_cost']:.1f}m, "
+                                f"total £{fh_result['total_cost']:.1f}m of £{team_value:.1f}m available)")
+                    fh_xi_show = fh_xi.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
+                        .rename(columns=fh_col_rename)
+                    st.dataframe(fh_xi_show, hide_index=True, use_container_width=True)
+                    if not fh_xi.empty:
+                        fh_cap_row = fh_xi.sort_values(fh_col, ascending=False).iloc[0]
+                        st.caption(f"Suggested captain for GW{fh_gw_choice}: **{fh_cap_row['web_name']}** "
+                                   f"({fh_cap_row[fh_col]:.1f} projected xPts that week).")
+                    st.markdown("**Bench** (deliberately cheap — a Free Hit's bench only matters if an "
+                                "autosub fires, so budget is routed to the XI above instead)")
+                    fh_bench_show = fh_bench.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
+                        .rename(columns=fh_col_rename)
+                    st.dataframe(fh_bench_show, hide_index=True, use_container_width=True)
+                    st.caption(f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
+                               f"gameweek, per Rule #25) — this is the model's single best squad for that week, "
+                               f"not season-shaping, so no Style Profile differential pull is applied. Prices, "
+                               f"injuries and fixtures can move before GW{fh_gw_choice} — re-run this closer to "
+                               f"the date rather than treating it as locked in.")
 
 # ---------------------------------------------------------------------------
 # Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric
