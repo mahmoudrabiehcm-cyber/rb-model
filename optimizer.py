@@ -388,6 +388,65 @@ def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, x
     return round(total, 2)
 
 
+def rating_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm") -> dict:
+    """§1a Team Rating % ONLY (Patch 20, 2026-09-07 discussion) — a single
+    GW's contribution to Squad_xPts/Ceiling_xPts, "with captaincy applied
+    per Step 7's joint per-week XI+captain evaluation" as §1a's own text
+    requires: best legal XI for this GW, PLUS the captain bonus (the XI's
+    own top scorer counted a second time — the actual doubling effect,
+    never a separate/different player), PLUS the 4 bench slots valued at
+    their Rule #12 autosub-discounted rate (never full raw value — a
+    benched player only scores if an autosub actually fires).
+
+    DELIBERATELY SEPARATE from realized_gw_value()/realized_horizon_value()
+    above, which transfer-path comparisons and the Wildcard what-if reuse —
+    those are barred from including captaincy in their primary ranking by
+    Standing Rule #31 ("this information is disclosure, never a scoring
+    input... the primary path ranking... remains anchored purely to squad
+    xPts and Team Rating %"). §1a's captaincy-inclusion is a named exception
+    specific to Team Rating % itself; folding it into the shared function
+    would either break §1a's formula or violate Rule #31 for every other
+    caller of realized_gw_value(). Keeping two functions is what lets both
+    rules hold at once.
+
+    Call this identically for the candidate/current squad AND for whichever
+    squad a Ceiling/Reachable-Ceiling solve produced (Rule #22 Systematic
+    Application) — never one side via this function and the other via a
+    raw sum."""
+    empty = {"xi_total": 0.0, "captain_bonus": 0.0, "bench_total": 0.0, "total_realized": 0.0}
+    if squad is None or squad.empty or gw_col not in squad.columns:
+        return empty
+    xi_result = best_starting_xi(squad, gw_col)
+    if xi_result is None:
+        return empty
+    xi = xi_result["xi"]
+    xi_total = float(xi_result["total"])
+    captain_bonus = float(xi[gw_col].max()) if not xi.empty else 0.0
+    bench = squad[~squad.index.isin(xi.index)]
+    bench_total = 0.0
+    for pos in ["GK", "DEF", "MID", "FWD"]:
+        pos_bench = bench[bench["position"] == pos].sort_values(gw_col, ascending=False)
+        for rank, (_, row) in enumerate(pos_bench.iterrows()):
+            pts = row.get(gw_col, 0.0)
+            pts = 0.0 if pd.isna(pts) else float(pts)
+            prob = bench_autosub_prob(pos, rank, xi, xm_col, cfg)
+            bench_total += prob * pts
+    total = xi_total + captain_bonus + bench_total
+    return {"xi_total": round(xi_total, 2), "captain_bonus": round(captain_bonus, 2),
+            "bench_total": round(bench_total, 2), "total_realized": round(total, 2)}
+
+
+def rating_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_col: str = "xm") -> float:
+    """Sums rating_gw_value()'s total across every GW in the horizon — the
+    §1a-compliant number for Team Rating %'s Squad_xPts/Ceiling_xPts, never
+    used for transfer-path/Wildcard scoring (see rating_gw_value's own
+    docstring for why those stay on realized_horizon_value() instead)."""
+    total = 0.0
+    for gw in gw_list:
+        total += rating_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col)["total_realized"]
+    return round(total, 2)
+
+
 def best_starting_xi(squad: pd.DataFrame, gw_col: str) -> dict:
     """Pick the highest-scoring valid formation (1 GK + valid outfield shape)
     for a single gameweek from a fixed 15-man squad — Horizon-Matching Rule:

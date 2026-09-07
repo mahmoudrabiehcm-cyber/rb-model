@@ -503,9 +503,24 @@ with st.spinner("Fetching live data and computing xPts..."):
     team_value = round(bank + (squad_df["price"].sum() if not squad_df.empty else 0.0), 1)
     reachable = data_pipeline.solve_reachable_ceiling(cfg, proj, squad_codes, ft["free_transfers"])
     theoretical_ceiling = data_pipeline.solve_ceiling(cfg, proj)
-    squad_total = squad_df["xpts_horizon_sum"].sum() if not squad_df.empty else 0.0
-    reachable_total = reachable["total_xpts"] if reachable else 0.0
-    theoretical_total = theoretical_ceiling["total_xpts"] if theoretical_ceiling else 0.0
+    # Patch 20 (2026-09-07 discussion) — §1a's own formula requires
+    # Squad_xPts/Ceiling_xPts to include "captaincy applied per Step 7's
+    # joint per-week XI+captain evaluation," not a flat 15-man raw sum
+    # (which is what this used to be, despite the UI's own tooltip already
+    # claiming "your optimized XI's projected xPts" — that text was
+    # aspirational until now). opt.rating_horizon_value() picks the best
+    # legal XI per GW, doubles the XI's own top scorer (the captain bonus),
+    # and values the 4 bench slots at their Rule #12 autosub-discounted
+    # rate instead of full value — applied identically to all three totals
+    # below (Rule #22 Systematic Application), never a raw sum on one side
+    # and this calculation on the other. Deliberately NOT the same function
+    # transfer-path/Wildcard comparisons use (opt.realized_horizon_value,
+    # no captaincy) — see rating_gw_value()'s docstring for why those two
+    # must stay separate (Standing Rule #31).
+    squad_total = opt.rating_horizon_value(squad_df, gw_list, cfg) if not squad_df.empty else 0.0
+    reachable_total = opt.rating_horizon_value(reachable["squad"], gw_list, cfg) if reachable else 0.0
+    theoretical_total = opt.rating_horizon_value(theoretical_ceiling["squad"], gw_list, cfg) \
+        if theoretical_ceiling else 0.0
     moe = eng.margin_of_error_threshold(reachable_total, cfg)
     rating_gap = round(reachable_total - squad_total, 2)
     at_ceiling = reachable_total > 0 and rating_gap < moe
@@ -675,9 +690,10 @@ with col2:
         trend = '<span class="trend-up">▲</span>' if rank_history_display[-1] < rank_history_display[-2] \
             else ('<span class="trend-down">▼</span>' if rank_history_display[-1] > rank_history_display[-2] else "")
     rank_disp = f"{rank_history_display[-1]:,}" if rank_history_display else "—"
-    rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon, divided by the best "
-                       "squad actually reachable using your free transfers right now (not an unlimited-budget "
-                       "fantasy ideal). See the disclosure expander below for the full researched-tier breakdown.")
+    rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon (captain doubled, "
+                       "bench valued at its real autosub-discounted rate — Patch 20), divided by the best squad "
+                       "actually reachable using your free transfers right now (not an unlimited-budget fantasy "
+                       "ideal). See the disclosure expander below for the full researched-tier breakdown.")
     # Patch 11 — Standing Rule #4 disclosure: `points_total`/`rank_history[-1]`
     # come straight from the official API's `entry/` and `entry/.../history/`
     # endpoints for GW{squad_gw}. Those are real, live numbers, not stale
@@ -724,6 +740,15 @@ if rating["rating_pct"] is not None:
                    f"gap to reachable ceiling: {rating_gap:.1f} xPts (margin-of-error threshold: {moe:.1f} xPts)")
         st.caption(f"Theoretical ceiling (secondary reference, unconstrained — ignores what you currently own or "
                    f"how many transfers you have): {theoretical_total:.1f} xPts")
+        st.caption("Patch 20 methodology: each of the three totals above is your best legal Starting XI per GW in "
+                   "the horizon, plus a captain bonus (that XI's own top scorer counted a second time — the real "
+                   "doubling effect, per §1a's captaincy requirement), plus the 4 bench slots valued at their "
+                   "Rule #12 autosub-discounted rate rather than full raw value — computed identically for the "
+                   "squad and both ceiling sides (Rule #22 Systematic Application), never a flat 15-man sum. "
+                   "The underlying squad SELECTION for the two ceiling solves still optimizes a simpler raw-sum "
+                   "objective (a disclosed approximation — the true joint optimum across squad+XI+captain+bench "
+                   "for a multi-GW horizon is a materially harder combinatorial problem); only the reported score "
+                   "for whichever squad each solve returns uses the corrected calculation above.")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
 
