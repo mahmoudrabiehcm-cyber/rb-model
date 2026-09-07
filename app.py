@@ -363,6 +363,20 @@ with st.sidebar:
              "lower it if it's rolling too conservatively.")
 
     run_clicked = st.button("Run Model →", use_container_width=True, type="primary")
+    # Patch 11 — the data/projection caches below are keyed with ttl=900 (15
+    # min) purely to stop a sidebar-only change (style, hit stance) from
+    # re-hitting the network. That's a reasonable default the rest of the
+    # time, but during a live/still-processing gameweek 15 minutes is long
+    # enough for rank/points/bonus to have genuinely moved again. This button
+    # clears those caches so "Run Model" is guaranteed to re-fetch right now,
+    # rather than the manager wondering whether a number is wrong or just
+    # cached.
+    if st.button("↻ Refresh live data now", use_container_width=True,
+                  help="Clears the 15-minute data cache and re-fetches from the official FPL API on the next run."):
+        _load_data.clear()
+        _picks.clear()
+        st.session_state.has_run = True
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Run / render
@@ -632,18 +646,37 @@ with col2:
     rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon, divided by the best "
                        "squad actually reachable using your free transfers right now (not an unlimited-budget "
                        "fantasy ideal). See the disclosure expander below for the full researched-tier breakdown.")
+    # Patch 11 — Standing Rule #4 disclosure: `points_total`/`rank_history[-1]`
+    # come straight from the official API's `entry/` and `entry/.../history/`
+    # endpoints for GW{squad_gw}. Those are real, live numbers, not stale
+    # placeholders — but until FPL itself sets `data_checked=True` on that
+    # gameweek (bonus points manually confirmed, scores locked for good),
+    # they are PROVISIONAL and can still move, same as on the official site/
+    # app during that exact window. Silently showing them as if final is
+    # what actually produced the "not up to date" complaint: the numbers
+    # were correct-as-of-the-fetch, just not yet the final word from FPL.
+    gw_final = getattr(snap, "current_gw_data_checked", False)
+    prov_badge = ("" if gw_final else
+                  ' <span class="info-dot" title="GW' + str(squad_gw) + ' points/bonus not yet finalized by FPL — '
+                  'this number can still move (same as the official site right now).">prov.</span>')
     st.markdown(f"""<div class="stat-row">
-      <div class="stat"><div class="n">{rank_disp} {trend}</div><div class="l">Overall rank</div></div>
+      <div class="stat"><div class="n">{rank_disp} {trend}{prov_badge}</div><div class="l">Overall rank</div></div>
       <div class="stat rating">
         <div class="n">{rating['rating_pct'] if rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{rating_tooltip}">i</span></div>
         <div class="l">Team rating</div>
         <div class="rating-basis">vs. reachable ceiling</div>
       </div>
       <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
-      <div class="stat"><div class="n">{points_total if points_total is not None else '—'}</div><div class="l">Season points</div></div>
+      <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
     </div>""", unsafe_allow_html=True)
+    if not gw_final:
+        st.caption(f"⏳ GW{squad_gw} rank & points above are FPL's live provisional numbers — bonus points "
+                   f"haven't been finalized yet, so both can still shift (this matches the official app/site "
+                   f"during this same window, it isn't a bug in this tool). Use **Refresh live data** in the "
+                   f"sidebar to re-pull the latest provisional figures.")
 
-st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squad_gw} · '
+gw_status = "confirmed final" if getattr(snap, "current_gw_data_checked", False) else "provisional, not yet finalized"
+st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squad_gw} ({gw_status}) · '
             f'planning for GW{planning_gw} · '
             f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)

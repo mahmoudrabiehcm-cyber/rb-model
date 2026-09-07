@@ -58,6 +58,23 @@ class FplSnapshot:
                           # for -- see planning_gw below.
     stale_warning: Optional[str] = None
     raw_boot: Optional[dict] = None   # full bootstrap-static payload when source=="official_api" (carries .chips)
+    current_gw_finished: bool = False      # Patch 11 -- bootstrap events[current_gw].finished. False means
+                                            # some fixture in that gameweek genuinely hasn't been played yet.
+    current_gw_data_checked: bool = False  # Patch 11 -- bootstrap events[current_gw].data_checked. FPL sets
+                                            # this only once it has manually confirmed bonus points and locked
+                                            # the gameweek's final scores/prices for good. A gameweek can be
+                                            # `finished=True` (every match has a final whistle) for HOURS to a
+                                            # day+ while `data_checked` is still False -- during that window the
+                                            # entry's points/rank from `entry/{id}/` and `entry/{id}/history/`
+                                            # are real numbers pulled live from the same official API this app
+                                            # already calls, but they are PROVISIONAL: bonus points can still
+                                            # move, and overall rank keeps shifting as other managers' gameweeks
+                                            # get processed too. This is an FPL-side lag this app cannot bypass
+                                            # (the official site/app shows the exact same provisional numbers
+                                            # during this window) -- the fix here is disclosure, not a different
+                                            # data source: tell the manager which state a rank/points figure is
+                                            # in rather than silently presenting a still-moving number as final
+                                            # (Standing Rule #4).
     planning_gw: Optional[int] = None  # next gameweek whose deadline HASN'T
                                         # passed yet -- the one xPts
                                         # projections, transfer suggestions,
@@ -165,8 +182,16 @@ def load_snapshot(season: str = "2026-27") -> FplSnapshot:
         fixtures = pd.DataFrame(fixtures_json) if fixtures_json else pd.DataFrame()
         current_gw = _infer_current_gw(events)
         planning_gw = _infer_planning_gw(events, current_gw)
+        gw_finished, gw_checked = False, False
+        if "id" in events.columns:
+            cur_row = events[events["id"] == current_gw]
+            if not cur_row.empty:
+                gw_finished = bool(cur_row.iloc[0].get("finished", False))
+                gw_checked = bool(cur_row.iloc[0].get("data_checked", False))
         return FplSnapshot(players, teams, fixtures, events, "official_api",
-                            time.time(), current_gw, raw_boot=boot, planning_gw=planning_gw)
+                            time.time(), current_gw, raw_boot=boot,
+                            current_gw_finished=gw_finished, current_gw_data_checked=gw_checked,
+                            planning_gw=planning_gw)
 
     # ---- fallback: GitHub mirror ----
     players = fetch_csv_mirror(season, "players_raw.csv")
