@@ -23,6 +23,7 @@ import pandas as pd
 import fpl_engine as eng
 import optimizer as opt
 import style_profiles
+import transfers
 
 
 def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: str) -> list[dict]:
@@ -123,6 +124,172 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
     return result
 
 
+def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+                            profile_name: str, free_transfers: int, bank: float,
+                            current_gw: int, gw_list: list[int],
+                            meaningful_bar: float | None = None,
+                            chip_advisory: str | None = None) -> dict:
+    """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
+    the call site in `suggest_transfers()` for why this exists. Simulates
+    forward through every GW in `gw_list`:
+
+    - Free-transfer accrual is modeled honestly: +1 FT for a week that isn't
+      fully used, capped at `transfers.MAX_BANK` (5) — the actual 2026/27
+      rule (`transfers.derive_free_transfers` already encodes this for
+      deriving the manager's CURRENT count; this reuses the same cap for
+      projecting it FORWARD).
+    - CHAINS: each week's solve uses the squad that resulted from every
+      prior week's chosen move in this same schedule (`sim_squad`), so the
+      plan stays internally consistent — never suggests selling a player
+      twice, budget/club-limits reflect the squad as it would actually
+      stand that week if the plan were followed in order.
+    - Never proposes a hit. If no free move clears the materiality bar in a
+      given week (Rules #13/#34, same bars as `suggest_transfers()`), that
+      week is Roll and the free transfer banks forward (up to the cap).
+    - Every week in the schedule is stated with equal weight — this is not
+      hedged as "GW-now is real, later GWs are placeholders" (manager's
+      explicit choice). It is still, structurally, built from this run's
+      own projections and gets recomputed fresh the next time the model
+      runs, same as every other output in this tool.
+    - `bank` is held constant across the simulated horizon (no attempt to
+      project future price rises/sale proceeds) — the same disclosed
+      simplification `suggest_transfers()` already carries (see this
+      module's top-of-file docstring).
+
+    Returns the same top-level keys `suggest_transfers()` returns (so
+    existing callers/UI code work unchanged), plus `weekly_plan`: a list of
+    one dict per GW — {gw, moves, net_gain, ft_available, ft_used,
+    ft_banked_after, summary, data_gap_note} — and `is_weekly_schedule`:
+    True, so a caller can distinguish this shape from the single-decision
+    return if it wants to render it differently."""
+    profile = style_profiles.get_profile(profile_name)
+    if meaningful_bar is None:
+        meaningful_bar = cfg["transfer"].get("minimum_meaningful_gain_free", 2.0)
+    bench_discount = cfg["transfer"].get("bench_autosub_discount", 0.2)
+
+    empty_result = {
+        "moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": profile_name,
+        "hit_cost_threshold": profile["hit_cost_threshold"], "minimum_meaningful_gain_free": meaningful_bar,
+        "bench_autosub_discount": bench_discount, "hit_stance": "No hits", "free_transfers": free_transfers,
+        "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
+        "weekly_plan": [], "is_weekly_schedule": True,
+    }
+    if squad_df is None or squad_df.empty or "code" not in squad_df.columns:
+        return empty_result
+
+    squad_df = squad_df.copy()
+    pool_df = pool_df.copy() if pool_df is not None else pd.DataFrame(columns=squad_df.columns)
+    numeric_cols = {"price", "xpts_horizon_sum"} | {f"xpts_gw{g}" for g in gw_list}
+    for df in (squad_df, pool_df):
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+    bank = 0.0 if bank is None or pd.isna(bank) else float(bank)
+
+    full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
+    if "code" in full_pool.columns:
+        full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
+
+    sim_squad = squad_df.copy()
+    ft_bank = free_transfers
+    weekly_plan = []
+    plan = []
+    summary = []
+    total_net_gain = 0.0
+
+    for wi, gw in enumerate(gw_list):
+        remaining_gws = gw_list[wi:]
+        this_gw_col = f"xpts_gw{gw}"
+        current_codes = list(sim_squad["code"])
+        out_codes_all = set(current_codes)
+        team_value = round(bank + (sim_squad["price"].sum(skipna=True) or 0.0), 1)
+        old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg)
+        moe = eng.margin_of_error_threshold(old_total, cfg)
+
+        candidates = {0: {"squad": sim_squad, "total": old_total, "net_gain": 0.0,
+                          "actual_k": 0, "data_gap_codes": []}}
+        for k in range(1, ft_bank + 1):
+            min_retain = max(0, 15 - k)
+            result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
+                                      min_retain=min_retain, objective_col="xpts_horizon_sum")
+            if result is None:
+                continue
+            new_squad = result["squad"]
+            actual_k = len(out_codes_all - set(new_squad["code"]))
+            if actual_k == 0:
+                continue  # nothing worth swapping at this k — already covered by k=0
+            new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg)
+            net_gain = round(new_total - old_total, 2)  # never a hit cost in this no-hits path
+            if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
+                candidates[actual_k] = {"squad": new_squad, "total": new_total, "net_gain": net_gain,
+                                         "actual_k": actual_k, "data_gap_codes": result.get("data_gap_codes", [])}
+
+        best_net = max(c["net_gain"] for c in candidates.values())
+        tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
+        viable = [k for k in tied_ks if k == 0 or candidates[k]["net_gain"] >= meaningful_bar]
+        chosen_k = min(viable) if viable else 0
+        chosen = candidates[chosen_k]
+
+        ft_used = min(chosen["actual_k"], ft_bank)
+        ft_after = min(transfers.MAX_BANK, (ft_bank - ft_used) + 1)
+
+        gap_codes = chosen.get("data_gap_codes", [])
+        data_gap_note = None
+        if gap_codes:
+            gap_names = full_pool[full_pool["code"].isin(gap_codes)]["web_name"].tolist()
+            names_txt = ", ".join(gap_names) if gap_names else f"{len(gap_codes)} player(s)"
+            data_gap_note = (f"Data gap flagged: {names_txt} had a missing projection this week and was "
+                              f"treated as 0 xPts so it wouldn't be silently forced out (Standing Rule #4).")
+
+        if chosen["actual_k"] == 0:
+            week_moves = []
+            week_summary = (f"GW{gw}: Roll — no free move clears the bar this week. "
+                             f"{ft_bank} FT banked → {ft_after} for GW{gw + 1}.")
+        else:
+            pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
+            week_moves = [{**_move_row(p, 0.0, chosen["net_gain"], True), "gw": gw} for p in pairs]
+            move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+            week_summary = (f"GW{gw}: {move_bits} (free) — net {chosen['net_gain']:+.1f} xPts over the "
+                             f"remaining horizon. {ft_bank - ft_used} FT left banked → {ft_after} for GW{gw + 1}.")
+            sim_squad = chosen["squad"]
+
+        if data_gap_note:
+            week_summary += f" {data_gap_note}"
+
+        weekly_plan.append({
+            "gw": gw, "moves": week_moves, "net_gain": chosen["net_gain"],
+            "ft_available": ft_bank, "ft_used": ft_used, "ft_banked_after": ft_after,
+            "summary": week_summary, "data_gap_note": data_gap_note,
+        })
+        summary.append(week_summary)
+        plan.append(f"GW{gw}: {chosen['actual_k']} free transfer(s) this week (chained pacing plan) — "
+                    f"net {chosen['net_gain']:+.2f} xPts vs. the squad as it stood after GW{gw - 1}'s "
+                    f"suggested move. Fewest-transfers tie-break within the {moe:.1f} xPts margin-of-error "
+                    f"band (Rules #34/#35), scored on realized (bench-discounted) value (Rule #12).")
+        total_net_gain += chosen["net_gain"]
+        ft_bank = ft_after
+
+    if chip_advisory:
+        summary.append(chip_advisory)
+        plan.append(chip_advisory)
+
+    return {
+        "moves": [m for wk in weekly_plan for m in wk["moves"]],
+        "plan": plan,
+        "summary": summary,
+        "net_gain": round(total_net_gain, 2),
+        "profile_used": profile_name,
+        "hit_cost_threshold": profile["hit_cost_threshold"],
+        "minimum_meaningful_gain_free": meaningful_bar,
+        "bench_autosub_discount": bench_discount,
+        "hit_stance": "No hits",
+        "free_transfers": free_transfers,
+        "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
+        "weekly_plan": weekly_plan,
+        "is_weekly_schedule": True,
+    }
+
+
 def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        profile_name: str, hit_stance: str, free_transfers: int,
                        bank: float, current_gw: int, gw_list: list[int],
@@ -204,10 +371,30 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "hit_cost_threshold": threshold, "minimum_meaningful_gain_free": meaningful_bar,
         "bench_autosub_discount": bench_discount, "hit_stance": hit_stance, "free_transfers": free_transfers,
         "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
+        "weekly_plan": [], "is_weekly_schedule": False,
     }
 
     if squad_df is None or squad_df.empty or "code" not in squad_df.columns:
         return empty_result
+
+    # Project-discussion fix (2026-09-07): under "No hits" with a horizon
+    # wider than 1 GW, the old single-lump output was genuinely ambiguous
+    # about WHEN to make a move the model could see was worth it over the
+    # full horizon but couldn't afford this week without a hit — it only
+    # ever considered CURRENTLY banked free transfers
+    # (`k_range = range(0, free_transfers + 1)`), never modeling that a 2nd
+    # or 3rd good move becomes free once next week's free transfer accrues.
+    # `plan_transfer_schedule()` replaces the single decision with a chained,
+    # week-by-week pacing plan for exactly this combination (manager-
+    # confirmed design: replace, not show alongside; chain each week off the
+    # prior week's chosen squad; every week carries equal weight rather than
+    # hedging later weeks as placeholders). "Hit if worth it" and "Force"
+    # keep the original single-GW logic below unchanged — they can already
+    # resolve multiple transfers in one go by paying for them, so this
+    # specific ambiguity doesn't apply to them.
+    if hit_stance == "No hits" and horizon_n > 1:
+        return plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank,
+                                       current_gw, gw_list, meaningful_bar, chip_advisory)
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
     # anywhere in these columns turns a pandas comparison into a TypeError
@@ -408,6 +595,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         "hit_stance": hit_stance,
         "free_transfers": free_transfers,
         "margin_of_error": moe,
+        "weekly_plan": [],
+        "is_weekly_schedule": False,
     }
 
 

@@ -275,8 +275,8 @@ def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool
 # "Run Model" click does.
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner=False)
-def _load_data(entry_id: int, season: str, prev_season: str):
-    snap = fpl_data.load_snapshot(season)
+def _load_data(entry_id: int, season: str, prev_season: str, recency_window: int = 4):
+    snap = fpl_data.load_snapshot(season, recency_window=recency_window)
     hist = fpl_data.load_historical_snapshot(prev_season)
     entry = fpl_data.fetch_entry_official(entry_id)
     history = fpl_data.fetch_entry_history_official(entry_id)
@@ -391,7 +391,9 @@ if not st.session_state.get("has_run"):
     st.stop()
 
 with st.spinner("Fetching live data and computing xPts..."):
-    snap, hist_df, entry, history = _load_data(entry_id, cfg["meta"]["season"], cfg["meta"]["previous_season"])
+    recency_window = cfg.get("xm_heuristic", {}).get("recency_window_gws", 4)
+    snap, hist_df, entry, history = _load_data(entry_id, cfg["meta"]["season"], cfg["meta"]["previous_season"],
+                                                recency_window)
 
     if snap is None or entry is None or history is None:
         st.error("Couldn't reach the official FPL API right now. It's normally free and open with no key required — this is "
@@ -653,7 +655,8 @@ with st.spinner("Fetching live data and computing xPts..."):
                "hit_cost_threshold": style_profiles.get_profile(style_name)["hit_cost_threshold"],
                "minimum_meaningful_gain_free": cfg["transfer"].get("minimum_meaningful_gain_free", 2.0),
                "margin_of_error": eng.margin_of_error_threshold(0.0, cfg),
-               "hit_stance": hit_stance, "free_transfers": ft["free_transfers"]}
+               "hit_stance": hit_stance, "free_transfers": ft["free_transfers"],
+               "weekly_plan": [], "is_weekly_schedule": False}
 
 # ---------------------------------------------------------------------------
 # Header + verdict
@@ -843,6 +846,10 @@ if transfer_error:
 # language, front and center. All the rule-citation trace and the raw move
 # table that used to be the primary content now live behind one expander,
 # available on demand rather than shown by default.
+if rec.get("is_weekly_schedule"):
+    st.caption(f"No-hits + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's move "
+               f"assumes every earlier week's suggested move already happened), not a single this-week decision. "
+               f"Free-transfer accrual (+1/week, cap 5) is modeled explicitly below.")
 if rec.get("summary"):
     for line in rec["summary"]:
         st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
@@ -859,13 +866,27 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
                f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
                f"margin-of-error floor **{rec.get('margin_of_error', 2.0):.1f} xPts** · "
                f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
+    # Patch 14 — Standing Rule #4 disclosure: whether the recency signal
+    # behind the xM Floor Rule's Rule #19 check was actually available this
+    # run, not just assumed. If it wasn't, any player's "confirmed nailed"
+    # floor this run is on the pre-Patch-14 season-total basis only.
+    checked_gws = getattr(snap, "recent_start_checked_gws", None)
+    if checked_gws:
+        st.caption(f"Recency check (Standing Rule #19, Bench GK Verification): confirmed-start xM floors this run "
+                   f"required an actual start in GW{checked_gws[0]}–GW{checked_gws[-1]} — a player who started "
+                   f"earlier this season but not recently no longer gets an automatic 'nailed' floor.")
+    else:
+        st.caption("⚠️ Recency check (Standing Rule #19) unavailable this run — the per-gameweek live data needed "
+                   "to confirm RECENT starts couldn't be fetched, so any 'confirmed start' xM floor this run falls "
+                   "back to season-total starts only (pre-Patch-14 behavior). Treat a bench/backup-tier transfer "
+                   "candidate's projection with extra caution until this resolves.")
     for line in ft["trace"]:
         st.markdown(f"- {line}")
     for line in rec["plan"]:
         st.markdown(f"- {line}")
     if rec["moves"]:
         moves_df = pd.DataFrame(rec["moves"])
-        show_cols = [c for c in ["out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
+        show_cols = [c for c in ["gw", "out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
                                   "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
         st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
 

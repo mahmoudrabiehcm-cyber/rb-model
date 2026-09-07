@@ -75,6 +75,12 @@ class FplSnapshot:
                                             # data source: tell the manager which state a rank/points figure is
                                             # in rather than silently presenting a still-moving number as final
                                             # (Standing Rule #4).
+    recent_start_ids: Optional[set] = None      # Patch 14 — Standing Rule #19 support,
+                                                 # see fetch_recent_start_ids(). None/empty
+                                                 # (with recent_start_checked_gws empty too)
+                                                 # means the signal is UNAVAILABLE this run.
+    recent_start_checked_gws: Optional[list] = None
+    recent_start_window: Optional[tuple] = None  # (window_start_gw, window_end_gw)
     planning_gw: Optional[int] = None  # next gameweek whose deadline HASN'T
                                         # passed yet -- the one xPts
                                         # projections, transfer suggestions,
@@ -147,6 +153,62 @@ def fetch_entry_history_official(entry_id: int) -> Optional[dict]:
         return None
 
 
+def fetch_event_live_official(gw: int) -> Optional[dict]:
+    r = _get(f"{FPL_API}/event/{gw}/live/")
+    if r is None:
+        return None
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        return None
+
+
+def fetch_recent_start_ids(last_completed_gw: int, window: int) -> dict:
+    """Standing Rule #19 (Bench GK Verification) support — Patch 14. The xM
+    Floor Rule's `confirmed_current_season_start_floor` used to trigger off
+    ANY start this season (`starts >= 1`, a season-long total with no
+    recency), which meant a keeper (or any player) who started once months
+    ago covering an injury or a cup match, then went straight back to the
+    bench, still got treated as if he had a ~0.88 expected-minutes floor —
+    exactly the "backup GK who isn't actually nailed" failure the model
+    doc's Standing Rule #19 exists to catch, but that rule was documented,
+    not implemented anywhere in this codebase.
+
+    This builds a per-player "did he start in the last `window` FINISHED
+    gameweeks" signal so `estimate_xm()` can require RECENT evidence, not
+    just season-long evidence, before granting the confirmed-start floor.
+    Cost: one extra request PER GAMEWEEK in the window (not per player) —
+    `event/{gw}/live/` returns every player's stats for that single
+    gameweek in one call, so a 4-GW window is 4 extra requests total,
+    regardless of squad/pool size.
+
+    `minutes >= 60` is used as the "started" proxy (the live payload's
+    per-player stats block doesn't carry an explicit start flag) — a
+    reasonable proxy, but disclosed as one rather than presented as an
+    exact match to the official "starts" definition.
+
+    Returns {"started_ids": set[int], "checked_gws": [int,...],
+    "window_start_gw": int, "window_end_gw": int} — `checked_gws` may be
+    shorter than the requested window if a fetch failed for some gw in it
+    (best-effort signal, degrades gracefully rather than blocking the
+    pipeline); an empty `checked_gws` means the caller should treat this
+    signal as UNAVAILABLE this run, not as "nobody started recently.\""""
+    started = set()
+    checked_gws = []
+    window_start = max(1, last_completed_gw - window + 1)
+    for gw in range(window_start, last_completed_gw + 1):
+        live = fetch_event_live_official(gw)
+        if live is None or "elements" not in live:
+            continue
+        checked_gws.append(gw)
+        for el in live["elements"]:
+            stats = el.get("stats", {}) or {}
+            if (stats.get("minutes", 0) or 0) >= 60:
+                started.add(el.get("id"))
+    return {"started_ids": started, "checked_gws": checked_gws,
+            "window_start_gw": window_start, "window_end_gw": last_completed_gw}
+
+
 def fetch_bootstrap_chips(boot: dict) -> list:
     """bootstrap-static's `chips` array: the season's full chip calendar,
     each with a usable gameweek window (`chip_type`, `start_event`,
@@ -166,12 +228,17 @@ def fetch_csv_mirror(season: str, filename: str) -> Optional[pd.DataFrame]:
         return None
 
 
-def load_snapshot(season: str = "2026-27") -> FplSnapshot:
+def load_snapshot(season: str = "2026-27", recency_window: int = 4) -> FplSnapshot:
     """
     Try the official API first (freshest + gives us `events` for current GW
     and `element_type` -> position mapping consistently). Fall back to the
     GitHub mirror CSVs if the API host is blocked by network policy.
-    """
+
+    `recency_window`: how many recently-FINISHED gameweeks to check for
+    Standing Rule #19 support (see `fetch_recent_start_ids`). Only fetched
+    on the official-API path — the mirror path has no per-gameweek live
+    endpoint, so the recency signal is left unavailable there (disclosed via
+    empty `recent_start_checked_gws`, not silently assumed)."""
     boot = fetch_bootstrap_official()
     fixtures_json = fetch_fixtures_official()
 
@@ -188,9 +255,20 @@ def load_snapshot(season: str = "2026-27") -> FplSnapshot:
             if not cur_row.empty:
                 gw_finished = bool(cur_row.iloc[0].get("finished", False))
                 gw_checked = bool(cur_row.iloc[0].get("data_checked", False))
+        # Standing Rule #19 support: check the last `recency_window` gameweeks
+        # that have actually been PLAYED. current_gw itself may still be
+        # mid-processing (see current_gw_finished above) — event/{gw}/live/
+        # works fine for an unfinished-but-played gameweek too (it's how
+        # in-play scores are served), so this intentionally includes
+        # current_gw rather than only fully-finished ones.
+        last_playable_gw = current_gw if current_gw >= 1 else 1
+        recent = fetch_recent_start_ids(last_playable_gw, recency_window)
         return FplSnapshot(players, teams, fixtures, events, "official_api",
                             time.time(), current_gw, raw_boot=boot,
                             current_gw_finished=gw_finished, current_gw_data_checked=gw_checked,
+                            recent_start_ids=recent["started_ids"],
+                            recent_start_checked_gws=recent["checked_gws"],
+                            recent_start_window=(recent["window_start_gw"], recent["window_end_gw"]),
                             planning_gw=planning_gw)
 
     # ---- fallback: GitHub mirror ----

@@ -23,6 +23,18 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
     else:
         df["position"] = "MID"
 
+    # Patch 14 — Standing Rule #19 (Bench GK Verification) support: whether
+    # each player started (>=60 mins) in any of the last N finished GWs
+    # (see fpl_data.fetch_recent_start_ids). True/False when the signal is
+    # available this run, None when it isn't (mirror-fallback path, or every
+    # live/{gw}/ fetch failed) — estimate_xm() must treat None as "unknown,
+    # keep the old season-total behavior," never silently treat it as False.
+    if snap.recent_start_checked_gws and "id" in df.columns:
+        started_ids = snap.recent_start_ids or set()
+        df["recent_start"] = df["id"].isin(started_ids)
+    else:
+        df["recent_start"] = None
+
     numcols = ["expected_goals", "expected_assists", "expected_goals_per_90",
                "expected_assists_per_90", "defensive_contribution",
                "defensive_contribution_per_90", "minutes", "starts",

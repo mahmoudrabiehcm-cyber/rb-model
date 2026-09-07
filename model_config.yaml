@@ -147,6 +147,13 @@ xm_heuristic:
   max_xm: 0.95
   unavailable_statuses: ["i", "u", "s", "n"]    # injured/unavailable/suspended/not-in-squad
   doubtful_status_multiplier_applies: true      # scale by chance_of_playing_next_round
+  recency_window_gws: 4   # Patch 14 -- Standing Rule #19 (Bench GK Verification) support.
+                           # The confirmed-start xM floor above now also requires a start
+                           # within this many recently-played gameweeks (not just ANY start
+                           # this season) -- see fpl_data.fetch_recent_start_ids and
+                           # fpl_engine.estimate_xm. Raise this if the model is being too
+                           # aggressive about dropping a floor for a player who's just had a
+                           # short run of rest/rotation; lower it to require even fresher evidence.
 
 # -----------------------------------------------------------------------------
 # Step 7a — Transfer Path Optimization

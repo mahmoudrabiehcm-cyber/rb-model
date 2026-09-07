@@ -108,9 +108,30 @@ def estimate_xm(row: pd.Series, cfg: dict, override: Optional[float]) -> float:
     starts = row.get("starts", 0) or 0
     minutes = row.get("minutes", 0) or 0
     starts_per_90 = row.get("starts_per_90", None)
+    recent_start = row.get("recent_start", None)  # True/False/None(signal unavailable) — Patch 14
 
-    # Confirmed current-season start this season -> xM Floor Rule
-    if starts and starts >= 1:
+    # Confirmed current-season start -> xM Floor Rule. Patch 14 (Standing
+    # Rule #19, "Bench GK Verification" — documented but never actually
+    # implemented until now): a start ANYWHERE this season used to be
+    # enough to grant this floor with no recency check at all, so a keeper
+    # who started once months ago (injury cover, a cup match) and has been
+    # firmly benched since kept an inflated ~0.88 "basically nailed" xM
+    # indefinitely — exactly the "bench GK who isn't actually his club's
+    # #1" failure the model doc's Rule #19 exists to catch. Now the floor
+    # additionally requires a start within the recency window (see
+    # fpl_data.fetch_recent_start_ids) whenever that signal was actually
+    # available this run (`recent_start is not False` — i.e. either True,
+    # or None meaning the signal couldn't be fetched, in which case this
+    # falls back to the pre-Patch-14 season-total behavior rather than
+    # silently treating "unknown" as "not nailed"). No recent start with the
+    # signal available (`recent_start is False`) falls through to the
+    # starts_per_90 / minutes-based estimate below instead of the floor,
+    # which will correctly come out low for a genuinely benched player —
+    # this is a per-player recency correction, so it self-resolves the
+    # "own two keepers from the same club" case too: whichever one has
+    # actually been playing keeps the floor, the one who hasn't gets
+    # correctly discounted, no special-casing needed for that pairing.
+    if starts and starts >= 1 and recent_start is not False:
         base = heur["confirmed_current_season_start_floor"]
     elif starts_per_90 not in (None,) and not pd.isna(starts_per_90) and starts_per_90 > 0:
         base = min(heur["max_xm"], float(starts_per_90))
