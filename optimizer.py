@@ -45,10 +45,47 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     if pulp is None:
         return None
 
-    df = players.dropna(subset=["price", objective_col, "position"]).copy()
-    df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     must_include_codes = must_include_codes or []
     exclude_codes = exclude_codes or []
+
+    # Patch 10 — a real bug this closes: dropping a row for a missing
+    # objective_col/price BEFORE the retain-pool constraint is built means a
+    # currently-owned player with an incomplete projection this run (a
+    # sparse-minutes bench player is the classic case) silently vanishes
+    # from the candidate set entirely — and the retain-pool constraint below
+    # ('keep at least N of your squad') then recomputes its denominator from
+    # whoever survived, quietly tightening to "keep ALL of the survivors."
+    # That can use up the one transfer slot a k=1 request was supposed to
+    # give the manager on a player they never asked to touch, then force an
+    # unrelated second swap (and its hit cost) just to also fit in the swap
+    # they actually wanted. Confirmed failure pattern: a backup GK with a
+    # data gap got silently forced out, eating the only free swap at k=1,
+    # so a same-position, budget-legal 1-for-1 elsewhere in the squad
+    # couldn't be reached until k=2 — reported as needing 2 transfers when
+    # 1 was genuinely enough.
+    #
+    # Fix: a currently-owned or must-include player is never silently
+    # dropped from candidacy for a missing objective_col/price — instead
+    # their value is filled with 0.0 so they remain a real, normal
+    # candidate the solver can choose to keep OR drop on the merits, and the
+    # retain-pool's true size (15, not "however many survived a drop") is
+    # preserved. `data_gap_codes` in the return dict discloses which codes
+    # were patched (Standing Rule #4 — show the inputs, never silently
+    # estimate) so a caller can surface this to the manager.
+    players = players.copy()
+    protected_codes = set(must_include_codes) | set(retain_pool_codes or [])
+    data_gap_codes = []
+    if protected_codes and "code" in players.columns:
+        protected_mask = players["code"].isin(protected_codes)
+        for col in (objective_col, "price"):
+            if col in players.columns:
+                gap_mask = protected_mask & players[col].isna()
+                if gap_mask.any():
+                    data_gap_codes.extend(players.loc[gap_mask, "code"].tolist())
+                    players.loc[gap_mask, col] = 0.0
+
+    df = players.dropna(subset=["price", objective_col, "position"]).copy()
+    df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     if exclude_codes:
         df = df[~df["code"].isin(exclude_codes)]
     df = df[(df["status"] == "a") | (df["code"].isin(must_include_codes)) |
@@ -93,6 +130,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         "squad": squad,
         "total_xpts": round(squad[objective_col].sum(), 2),
         "cost": round(squad["price"].sum(), 1),
+        "data_gap_codes": data_gap_codes,
     }
 
 

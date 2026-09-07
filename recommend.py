@@ -270,7 +270,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         # swap count don't create a spurious "tie" against themselves
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
-                                     "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k}
+                                     "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k,
+                                     "data_gap_codes": result.get("data_gap_codes", [])}
 
     # `plan`: full technical trace (rule citations, candidate math) — kept
     # for the "How this was worked out" detail expander. `summary`: the
@@ -374,6 +375,22 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             if rolled > 0:
                 summary.append(f"{rolled} free transfer(s) banked after this move.")
                 plan.append(f"GW{current_gw}: {rolled} free transfer(s) banked (up to 5) after this move.")
+            # Patch 10 disclosure (Standing Rule #4): a currently-owned player
+            # with a missing projection this run is now kept as a real
+            # candidate (patched to 0.0) instead of silently vanishing and
+            # corrupting the retain-pool count — but if that same player got
+            # swapped out here, it may be reacting to the data gap rather
+            # than a genuine upgrade, so it's flagged rather than presented
+            # as ordinary model output.
+            gap_codes = chosen.get("data_gap_codes", [])
+            if gap_codes:
+                gap_names = full_pool[full_pool["code"].isin(gap_codes)]["web_name"].tolist()
+                names_txt = ", ".join(gap_names) if gap_names else f"{len(gap_codes)} player(s)"
+                summary.append(f"Data gap flagged: {names_txt} had a missing projection this run (treated as 0 "
+                               f"xPts so they weren't silently forced out) — check their raw projection before "
+                               f"trusting this move if they're one of the players above.")
+                plan.append(f"GW{current_gw}: Data gap — {names_txt} had a missing `xpts_horizon_sum`/`price` "
+                            f"this run; patched to 0.0 rather than dropped, per Standing Rule #4.")
 
     if chip_advisory:
         summary.append(chip_advisory)
@@ -538,7 +555,8 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         net_gain = round(new_total - old_total - hit_cost, 2)
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
-                                     "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k}
+                                     "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k,
+                                     "data_gap_codes": result.get("data_gap_codes", [])}
 
     if not candidates:
         fallback = [f"Tried 1 through 5 transfers and found no legal, budget-fitting way to add this player — "
@@ -571,6 +589,25 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         # the concrete checks above.
         summary.append(f"Needed {chosen['actual_k']} linked swaps, not a single 1-for-1:")
         summary.extend(diagnostic)
+        # Patch 10 — the actual root cause of the confirmed Semenyo→Palmer
+        # case: a currently-owned player with a missing projection this run
+        # (e.g. a sparse-minutes backup GK) used to be silently dropped from
+        # candidacy entirely by `optimizer.solve_squad()`, which quietly
+        # consumed the one transfer slot a k=1 request should have spent on
+        # the manager's actual target instead. The solver no longer drops
+        # them (their value is patched to 0.0 so they stay a real candidate
+        # it can choose to keep or drop on the merits), but Standing Rule #4
+        # ("show the inputs, never silently estimate") still requires
+        # disclosing that this happened, since it's evidence the extra
+        # swap(s) may be about filling a data gap, not a genuine upgrade.
+        gap_codes = chosen.get("data_gap_codes", [])
+        if gap_codes:
+            gap_names = full_pool[full_pool["code"].isin(gap_codes)]["web_name"].tolist()
+            names_txt = ", ".join(gap_names) if gap_names else f"{len(gap_codes)} player(s)"
+            summary.append(f"Data gap flagged: {names_txt} had a missing projection this run and was treated as "
+                            f"0 xPts so it wouldn't be silently forced out of your squad — if the solver also "
+                            f"swapped this player, it may be reacting to that gap rather than a genuine "
+                            f"upgrade. Worth checking their raw projection before trusting that leg of the move.")
     if default_net_gain is not None:
         diff = round(chosen["net_gain"] - default_net_gain, 2)
         if abs(diff) < moe:
