@@ -124,6 +124,51 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
     return result
 
 
+def apply_style_to_wildcard_squad(current_squad: pd.DataFrame, rebuild_squad: pd.DataFrame,
+                                   full_pool: pd.DataFrame, profile_name: str, cfg: dict,
+                                   this_gw_col: str) -> pd.DataFrame:
+    """Wildcard-list feature (2026-09-07 discussion): a Wildcard rebuild is
+    the single biggest squad decision in the whole tool, so it should be
+    consistent with whichever Style Profile is active in the sidebar, same
+    as every ordinary transfer recommendation already is — not silently
+    switch to a neutral pure-xPts optimization just because it's a
+    from-scratch rebuild instead of a k-transfer plan.
+
+    Reuses the exact same mechanism ordinary transfers already get: treat
+    the (current squad -> rebuild squad) difference as an, up to 15-leg,
+    transfer plan via `_pair_moves` (safe even at this size — both squads
+    are valid 2-5-5-3s, so the dropped/added position multisets always
+    match by construction, satisfying `_pair_moves`'s own legality assert),
+    then let `_apply_eo_pull` substitute any IN leg for a genuinely
+    statistically-tied, cheaper/more-differential alternative per the
+    active profile's `eo_pull` setting — a merit-gated substitution, never a
+    downgrade, exactly like a normal transfer. 'Balanced / Pure xPts'
+    (`eo_pull: none`) never substitutes, so this is a no-op for that
+    profile and the raw rebuild is returned unchanged.
+
+    Returns the adjusted 15-man squad DataFrame (retained players +
+    each pair's, possibly substituted, IN player)."""
+    profile = style_profiles.get_profile(profile_name)
+    if profile.get("eo_pull", "none") == "none" or current_squad is None or current_squad.empty \
+            or rebuild_squad is None or rebuild_squad.empty:
+        return rebuild_squad
+
+    out_codes = set(current_squad["code"]) - set(rebuild_squad["code"])
+    pairs = _pair_moves(current_squad, rebuild_squad, this_gw_col)
+    if not pairs:
+        return rebuild_squad
+    in_codes = {p["in_code"] for p in pairs}
+    pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes, in_codes)
+
+    retained_codes = set(current_squad["code"]) & set(rebuild_squad["code"])
+    retained = rebuild_squad[rebuild_squad["code"].isin(retained_codes)]
+    in_rows = full_pool[full_pool["code"].isin({p["in_code"] for p in pairs})]
+    adjusted = pd.concat([retained, in_rows], ignore_index=True, sort=False)
+    if "code" in adjusted.columns:
+        adjusted = adjusted.drop_duplicates(subset=["code"], keep="first")
+    return adjusted
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],

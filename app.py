@@ -933,13 +933,24 @@ with st.expander("Evaluate your own scenario — a specific target, or a candida
                     [c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
                      if c in pd.DataFrame(target_eval["moves"]).columns]], hide_index=True, use_container_width=True)
         if wc_gw_choice is not None:
-            future_gw_list = list(range(wc_gw_choice, wc_gw_choice + horizon))
+            # Wildcard-list feature (2026-09-07 discussion): a Wildcard
+            # resets your whole squad for the rest of the season, so
+            # evaluating it against a 1-GW window (whatever the sidebar
+            # horizon happens to be set to) is a bad basis for a decision
+            # this size — always use at least 3 GWs, disclosed explicitly
+            # whenever that overrides the sidebar's own setting.
+            wc_horizon = max(3, horizon)
+            future_gw_list = list(range(wc_gw_choice, wc_gw_choice + wc_horizon))
             future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list)
             future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
             future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
             wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
                                                               team_value, future_gw_list)
             st.markdown(f"**Wildcard what-if — GW{wc_gw_choice}**")
+            if wc_horizon != horizon:
+                st.caption(f"Evaluated over GW{future_gw_list[0]}–GW{future_gw_list[-1]} ({wc_horizon} GWs) — "
+                           f"a 3-GW minimum applies to Wildcard rebuilds regardless of the sidebar horizon "
+                           f"(currently {horizon} GW).")
             if not wc_eval["feasible"]:
                 st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
                         f"reach that far yet).")
@@ -950,6 +961,44 @@ with st.expander("Evaluate your own scenario — a specific target, or a candida
                             f'current squad, over the same {len(future_gw_list)}-GW window ({gap:+.1f} xPts). '
                             f'Informational only — Wildcard timing stays your own call (Standing Rule #24), '
                             f'never a play/hold verdict from this model.</div>', unsafe_allow_html=True)
+
+                wc_gw_col = f"xpts_gw{wc_gw_choice}"
+                full_pool_future = pd.concat([future_squad_proj, future_pool_proj], ignore_index=True, sort=False)
+                if "code" in full_pool_future.columns:
+                    full_pool_future = full_pool_future.drop_duplicates(subset=["code"], keep="first")
+                styled_squad = recommend.apply_style_to_wildcard_squad(
+                    future_squad_proj, wc_eval["rebuild_squad"], full_pool_future, style_name, cfg, wc_gw_col)
+
+                xi_result = opt.best_starting_xi(styled_squad, wc_gw_col) if wc_gw_col in styled_squad.columns \
+                    else None
+                show_cols = ["web_name", "team", "position", "price", wc_gw_col]
+                col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
+                              "price": "£m", wc_gw_col: f"xPts GW{wc_gw_choice}"}
+                if xi_result is not None:
+                    xi_df = xi_result["xi"]
+                    wc_bench_df = styled_squad[~styled_squad["code"].isin(xi_df["code"])]
+                    d, m, f = xi_result["shape"]
+                    st.markdown(f"**Recommended Wildcard XI — GW{wc_gw_choice}** "
+                                f"(formation 1-{d}-{m}-{f}, squad cost £{styled_squad['price'].sum():.1f}m)")
+                    xi_show = xi_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                        .rename(columns=col_rename)
+                    st.dataframe(xi_show, hide_index=True, use_container_width=True)
+                    if not xi_df.empty:
+                        cap_row = xi_df.sort_values(wc_gw_col, ascending=False).iloc[0]
+                        st.caption(f"Suggested captain for GW{wc_gw_choice}: **{cap_row['web_name']}** "
+                                   f"({cap_row[wc_gw_col]:.1f} projected xPts that week).")
+                    st.markdown("**Bench**")
+                    bench_show = wc_bench_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                        .rename(columns=col_rename)
+                    st.dataframe(bench_show, hide_index=True, use_container_width=True)
+                else:
+                    st.markdown(f"**Recommended Wildcard squad — GW{wc_gw_choice}** (full 15)")
+                    full_show = styled_squad.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                        .rename(columns=col_rename) if wc_gw_col in styled_squad.columns else styled_squad
+                    st.dataframe(full_show, hide_index=True, use_container_width=True)
+                st.caption(f"Style profile **{style_name}** applied to this rebuild (same EO-pull tie-break as "
+                           f"ordinary transfers). Prices, injuries and fixtures can move before GW{wc_gw_choice} "
+                           f"— re-run this closer to the date rather than treating it as locked in.")
 
 # ---------------------------------------------------------------------------
 # Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric
