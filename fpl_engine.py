@@ -281,19 +281,26 @@ def captaincy_protocol(candidates: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     (used as an ownership proxy for EO; true EO = ownership% + captaincy%,
     supply a `captaincy_pct` column if you have better data).
 
-    Patch 3: the shortlist window is now `margin_of_error_threshold(top,
-    cfg)` (Standing Rule #34) instead of the old fixed
-    `captaincy.shortlist_xpts_window` — a flat 1.0 xPts band didn't scale
-    with how big the top score actually was (the config key is kept, now
-    documented as legacy/superseded, so nothing that still references it
-    directly breaks). A `near_miss` column also flags candidates just
-    outside the shortlist but within `near_miss_multiplier x` the same
-    threshold — used by `style_profiles.captain_alt_pick()` so a genuine
-    "clear standout" week still surfaces a profile-aware alternative
-    instead of no alt slot at all."""
+    Shortlist window reverted to the documented Step 8 value (Patch 9,
+    reversing a Patch 3 error): the model doc states "any starter within
+    ~1.0 xPts of the squad's highest single-GW projection — treat as
+    statistically tied," a fixed, ~1.0-xPts window. Patch 3 replaced this
+    with `margin_of_error_threshold(top, cfg)` (Standing Rule #34's general
+    formula, floor 2.0) reasoning that a flat 1.0 band didn't scale with the
+    top score — but Rule #34's floor is TWICE as wide as Step 8's own
+    documented figure, and that's exactly what produced a real, confirmed
+    wrong call: two candidates 2.0 xPts apart (a genuine, meaningful gap)
+    were reported as a "coin-flip," when the model's own text would treat
+    anything past ~1.0 xPts as clearly separated. `captaincy.
+    shortlist_xpts_window` (was marked legacy/superseded) is live again. A
+    `near_miss` column still flags candidates just outside the shortlist but
+    within `near_miss_multiplier x` the same window — used by
+    `style_profiles.captain_alt_pick()` so a genuine "clear standout" week
+    still surfaces a profile-aware alternative instead of no alt slot at
+    all."""
     c = candidates.copy()
     top = c["xpts_this_gw"].max()
-    window = margin_of_error_threshold(top, cfg)
+    window = cfg.get("captaincy", {}).get("shortlist_xpts_window", 1.0)
     c["shortlisted"] = c["xpts_this_gw"] >= (top - window)
     near_miss_mult = cfg.get("captaincy", {}).get("near_miss_multiplier", 2.0)
     c["near_miss"] = (~c["shortlisted"]) & (c["xpts_this_gw"] >= (top - window * near_miss_mult))

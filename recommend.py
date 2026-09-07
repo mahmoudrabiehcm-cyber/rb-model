@@ -478,32 +478,36 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
                                f"legal-looking swap fail to appear at any transfer count. Worth checking the raw "
                                f"projection for this player before trusting a 'no legal way' result.")
     if not diagnostic and pd.notna(target_price) and pd.notna(target_pos):
+        # Check EVERY same-position squad player, not just the cheapest one
+        # (a real bug this fixes: checking only the cheapest picked whichever
+        # player leaves the LARGEST funding gap to cover — the opposite of
+        # useful — and could name a player the manager never intended to
+        # sell instead of the one they actually asked about, e.g. reporting
+        # a budget shortfall against a cheap bench midfielder when the
+        # manager meant a specific, similarly-priced starter).
         same_pos = squad_df[squad_df["position"] == target_pos].copy()
-        if not same_pos.empty:
-            same_pos = same_pos.sort_values("price")
-            cheapest_out = same_pos.iloc[0]
-            gap = round(float(target_price) - float(cheapest_out["price"]), 1)
+        legal_options = []
+        checked = []
+        for _, out_row in same_pos.iterrows():
+            gap = round(float(target_price) - float(out_row["price"]), 1)
             budget_ok = gap <= bank + 1e-9
-            new_team_counts = squad_df[squad_df["code"] != cheapest_out["code"]]["team"].value_counts()
+            new_team_counts = squad_df[squad_df["code"] != out_row["code"]]["team"].value_counts()
             new_target_team_count = int(new_team_counts.get(target_team, 0)) + 1
             club_ok = new_target_team_count <= cfg["squad_rules"]["max_per_club"]
-            if not budget_ok:
-                diagnostic.append(f"Budget check: selling your cheapest {target_pos} ({cheapest_out['web_name']}, "
-                                   f"£{cheapest_out['price']}m) for this player (£{target_price}m) needs "
-                                   f"£{gap}m more than your £{bank}m bank covers — that's the real constraint on "
-                                   f"a clean 1-for-1, not a bug.")
-            elif not club_ok:
-                diagnostic.append(f"Club-limit check: adding this player would put you at {new_target_team_count} "
-                                   f"{target_team} players, over the {cfg['squad_rules']['max_per_club']}-per-club "
-                                   f"cap — that's why a clean 1-for-1 isn't legal here.")
-            else:
-                diagnostic.append(f"Budget and club-limit checks both pass for a straight swap of "
-                                   f"{cheapest_out['web_name']} ({cheapest_out['position']}, £{cheapest_out['price']}m) "
-                                   f"for this player (£{target_price}m, gap £{gap}m vs your £{bank}m bank) — if the "
-                                   f"model still needed more than 1 transfer, that points to something else (a data "
-                                   f"gap on one of the two players' projections, or the solver preferring a "
-                                   f"different, higher-xPts combination at the same transfer count) rather than a "
-                                   f"genuine legality problem with this specific swap.")
+            checked.append(out_row["web_name"])
+            if budget_ok and club_ok:
+                legal_options.append((out_row["web_name"], out_row["price"], gap))
+        if legal_options:
+            names = ", ".join(f"{n} (£{p}m, gap £{g}m)" for n, p, g in legal_options)
+            diagnostic.append(f"A clean 1-for-1 IS budget/club-legal for at least one same-position player you own: "
+                               f"{names}. If the model still used more than 1 transfer, that points to the solver "
+                               f"preferring a different combination for a higher total, or a data gap on one "
+                               f"player's projection — not a genuine legality problem.")
+        elif checked:
+            diagnostic.append(f"Checked every {target_pos} you currently own ({', '.join(checked)}) — none can be "
+                               f"swapped for this player as a clean 1-for-1 within your £{bank}m bank and the "
+                               f"{cfg['squad_rules']['max_per_club']}-per-club cap. That's a genuine budget/club "
+                               f"constraint, not a bug.")
 
     # Always search the full 1-5 transfer range here, regardless of hit
     # stance (fixing a real bug: capping this at `free_transfers` under "No

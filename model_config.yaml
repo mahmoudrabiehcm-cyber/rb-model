@@ -207,17 +207,20 @@ transfer:
 # Step 8 — Captaincy Protocol
 # -----------------------------------------------------------------------------
 captaincy:
-  # LEGACY / SUPERSEDED (Patch 3): the shortlist window is now computed
-  # dynamically as margin_of_error_threshold(top_xpts, cfg) — Standing Rule
-  # #34 — instead of this flat figure, so it scales with how big the top
-  # score actually is. Key left in place (not deleted) in case anything
-  # else still reads it directly; fpl_engine.captaincy_protocol() no
-  # longer does.
+  # LIVE AGAIN (Patch 9, reversing Patch 3's substitution). Step 8's own
+  # documented text: "any starter within ~1.0 xPts of the squad's highest
+  # single-GW projection — treat as statistically tied." Patch 3 replaced
+  # this fixed figure with the general Rule #34 margin-of-error formula
+  # (floor 2.0), reasoning it should scale with the top score — but that
+  # made the shortlist window twice as wide as the model actually specifies,
+  # and it produced a confirmed wrong call in practice: two candidates 2.0
+  # xPts apart (Bruno 6.0 vs Foden 4.0, a real, meaningful gap) were called
+  # a "coin-flip." Reverted to follow Step 8 as written.
   shortlist_xpts_window: 1.0
-  # A candidate within (margin-of-error window x this multiplier) of the
-  # top score, but outside the shortlist itself, is flagged `near_miss` —
-  # used as the alt-captain fallback pool on a clear-standout week where
-  # the real shortlist has no second member.
+  # A candidate within (shortlist_xpts_window x this multiplier) of the top
+  # score, but outside the shortlist itself, is flagged `near_miss` — used
+  # as the alt-captain fallback pool on a clear-standout week where the real
+  # shortlist has no second member.
   near_miss_multiplier: 2.0
   eo_tiers:
     contrarian_max: 40
