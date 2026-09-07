@@ -456,7 +456,33 @@ with st.spinner("Fetching live data and computing xPts..."):
     points_total = entry.get("summary_overall_points") if entry else None
     hits_last_3 = sum(1 for r in cur_hist[-3:] if (r.get("event_transfers_cost") or 0) > 0)
 
-    verdict = recommend.season_verdict(rank_history, hits_last_3, squad_gw)
+    # Patch 12 — the "points are right but rank is off" bug: `entry/{id}/`
+    # and `entry/{id}/history/` are two DIFFERENT official-API fields for the
+    # same thing, and they don't update in lockstep. `summary_overall_points`
+    # (used above for points_total) happens to match the front-end's own
+    # points display, but the rank header was built from
+    # `history["current"][-1]["overall_rank"]` — a snapshot written into that
+    # GW's history ROW, which lags behind `entry["summary_overall_rank"]`
+    # (the field the official FPL app/site actually displays as your current
+    # Overall Rank). Confirmed on the manager's own live data: history showed
+    # 1,436,772 for GW3 while entry.summary_overall_rank showed 1,438,164 at
+    # the same moment — a real, verifiable field-source mismatch, not a
+    # caching artifact. Fix: the live rank always comes from
+    # `entry["summary_overall_rank"]` — replacing (not just appending to)
+    # the last slot of the display series, so the header and the trend arrow
+    # both use the same live-correct source. `rank_history` itself is left
+    # untouched for the Season Ledger table further down, since each PAST
+    # (already-finalized) row there is its own historical record, not a
+    # "current standing" claim.
+    live_overall_rank = entry.get("summary_overall_rank") if entry else None
+    rank_history_display = list(rank_history)
+    if live_overall_rank is not None:
+        if rank_history_display:
+            rank_history_display[-1] = live_overall_rank
+        else:
+            rank_history_display = [live_overall_rank]
+
+    verdict = recommend.season_verdict(rank_history_display, hits_last_3, squad_gw)
 
     # free transfers + bank — moved ahead of Team Rating % (below) because the
     # reachable-ceiling solve needs free_transfers to set its min-retain constraint.
@@ -554,7 +580,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     squad_team_ids = squad_df["team_id"].tolist() if "team_id" in squad_df.columns else []
     chip_notes = chip_protocol.chip_recommendations(chip_rows, dgw_bgw, squad_team_ids, max(len(squad_df), 1))
     flagged_players = squad_df[(squad_df["status"] != "a") | (squad_df["est_rescue_needed"])]
-    wc_flag = chip_protocol.wildcard_flag(rank_history, len(flagged_players),
+    wc_flag = chip_protocol.wildcard_flag(rank_history_display, len(flagged_players),
                                            squad_xpts_total=squad_total,
                                            reachable_ceiling_total=reachable_total,
                                            moe_threshold=moe)
@@ -639,10 +665,10 @@ with col1:
                 f'<p class="b">{verdict["body"]}</p></div>', unsafe_allow_html=True)
 with col2:
     trend = ""
-    if len(rank_history) >= 2:
-        trend = '<span class="trend-up">▲</span>' if rank_history[-1] < rank_history[-2] \
-            else ('<span class="trend-down">▼</span>' if rank_history[-1] > rank_history[-2] else "")
-    rank_disp = f"{rank_history[-1]:,}" if rank_history else "—"
+    if len(rank_history_display) >= 2:
+        trend = '<span class="trend-up">▲</span>' if rank_history_display[-1] < rank_history_display[-2] \
+            else ('<span class="trend-down">▼</span>' if rank_history_display[-1] > rank_history_display[-2] else "")
+    rank_disp = f"{rank_history_display[-1]:,}" if rank_history_display else "—"
     rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon, divided by the best "
                        "squad actually reachable using your free transfers right now (not an unlimited-budget "
                        "fantasy ideal). See the disclosure expander below for the full researched-tier breakdown.")
