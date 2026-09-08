@@ -551,6 +551,36 @@ with st.spinner("Fetching live data and computing xPts..."):
                   f"Standing Rules #16/#18 disclosure.")
     rating = eng.team_rating_pct(squad_total, reachable_total, tier_label)
 
+    # Free Hit rating — computed automatically every run (Patch 22,
+    # 2026-09-07 discussion), not gated behind the manual "Evaluate your
+    # own scenario" picker any more. Targets the CURRENT planning_gw only
+    # (never a manager-chosen candidate date — that manual picker in
+    # "Evaluate your own scenario" stays exactly as it was, untouched, for
+    # exploring a DIFFERENT gameweek than this one). Reuses `proj` as-is —
+    # planning_gw is always inside gw_list, so no extra re-projection call
+    # is needed the way the manual scenario picker needs one for an
+    # out-of-horizon date. Same opt.rating_gw_value() mechanic as the main
+    # Team Rating % (Patch 20) and the manual FH comparison (Patch 21),
+    # just against a genuinely unconstrained single-GW ceiling instead of
+    # the free-transfer-limited "reachable ceiling" — see the discussion
+    # earlier this session on why that makes this number move more
+    # meaningfully than the main headline can.
+    fh_auto_col = f"xpts_gw{planning_gw}"
+    fh_auto_result = data_pipeline.solve_free_hit_optimal_squad(cfg, proj, team_value, planning_gw)
+    fh_auto_current_val = opt.rating_gw_value(squad_df, fh_auto_col, cfg)["total_realized"] \
+        if not squad_df.empty else 0.0
+    fh_auto_optimal_val = opt.rating_gw_value(fh_auto_result["squad"], fh_auto_col, cfg)["total_realized"] \
+        if fh_auto_result else 0.0
+    fh_auto_rating = eng.team_rating_pct(fh_auto_current_val, fh_auto_optimal_val, "")
+    fh_auto_gap = round(fh_auto_optimal_val - fh_auto_current_val, 2)
+    fh_auto_moe = eng.margin_of_error_threshold(fh_auto_optimal_val, cfg) if fh_auto_optimal_val else 0.0
+    fh_auto_tooltip = (f"Free Hit rating = your current squad's best XI this GW (captain doubled, bench "
+                       f"autosub-discounted), divided by a genuinely unconstrained optimal squad for GW"
+                       f"{planning_gw} only (full player pool, no free-transfer limit — a true from-scratch "
+                       f"rebuild, unlike Team Rating %'s reachable-ceiling comparison above). Gap: "
+                       f"{fh_auto_gap:.1f} xPts (margin-of-error threshold: {fh_auto_moe:.1f} xPts). "
+                       f"Explore a different candidate gameweek in 'Evaluate your own scenario' below.")
+
     # captaincy — starting XI only, never the bench. "code" is carried through
     # (Patch 2) so the pitch view can match the recommendation back to its
     # card and place the armband there directly, rather than just displaying
@@ -713,6 +743,11 @@ with col2:
         <div class="n">{rating['rating_pct'] if rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{rating_tooltip}">i</span></div>
         <div class="l">Team rating</div>
         <div class="rating-basis">vs. reachable ceiling</div>
+      </div>
+      <div class="stat rating">
+        <div class="n">{fh_auto_rating['rating_pct'] if fh_auto_rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{fh_auto_tooltip}">i</span></div>
+        <div class="l">Free Hit rating</div>
+        <div class="rating-basis">vs. GW{planning_gw} optimal</div>
       </div>
       <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
       <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
@@ -918,6 +953,47 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
                                   "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
         st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
 
+        # "New numbers if you make this move" (2026-09-07 discussion, Patch
+        # 23). Scoped to the single-decision recommendation only for now
+        # ("Hit if worth it"/"Force" at any horizon, or "No hits" at
+        # horizon=1) — the "No hits" chained multi-week schedule
+        # (rec["is_weekly_schedule"]) isn't covered yet, since "which
+        # week's squad" is itself ambiguous there in a way it isn't here.
+        # Per the manager's explicit design: the header stats above are
+        # NEVER touched by this — this is a separate, local preview. The
+        # post-transfer squad's GW xPts and its rating are both re-derived
+        # from scratch (best XI re-solved on the changed 15, per Standing
+        # Rule #18 -- never assume the old XI just carries over), and the
+        # rating is compared against the SAME Free Hit optimal total
+        # already computed for planning_gw this run (Patch 22) -- not a
+        # fresh reachable-ceiling solve, per the manager's own direction.
+        if not rec.get("is_weekly_schedule") and "out_code" in moves_df.columns and "in_code" in moves_df.columns:
+            move_out_codes = set(moves_df["out_code"])
+            move_in_codes = set(moves_df["in_code"])
+            post_transfer_squad = pd.concat([
+                squad_df[~squad_df["code"].isin(move_out_codes)],
+                proj[proj["code"].isin(move_in_codes)],
+            ], ignore_index=True, sort=False)
+            if "code" in post_transfer_squad.columns:
+                post_transfer_squad = post_transfer_squad.drop_duplicates(subset=["code"], keep="first")
+
+            new_xi_result = opt.best_starting_xi(post_transfer_squad, fh_auto_col) \
+                if fh_auto_col in post_transfer_squad.columns else None
+            new_gw_xpts = round(new_xi_result["total"], 1) if new_xi_result else None
+            new_current_val = opt.rating_gw_value(post_transfer_squad, fh_auto_col, cfg)["total_realized"]
+            new_rating = eng.team_rating_pct(new_current_val, fh_auto_optimal_val, "")
+
+            if new_gw_xpts is not None and new_rating["rating_pct"] is not None:
+                st.markdown(f'<div class="tx-reco">📈 If you make this move — new GW{planning_gw} xPts: '
+                            f'**{new_gw_xpts:.1f}** (was {gw_xpts_total:.1f}) · new Free Hit rating: '
+                            f'**{new_rating["rating_pct"]}%** (was {fh_auto_rating["rating_pct"]}%, vs. the same '
+                            f'GW{planning_gw} Free Hit optimal shown at the top). These are a local preview for '
+                            f'this recommendation only — the header stats above are unaffected until you actually '
+                            f'make the transfer and re-run.</div>', unsafe_allow_html=True)
+            else:
+                st.info("Couldn't compute the post-transfer preview this run (no valid XI for the resulting "
+                        "squad this gameweek).")
+
 # ---------------------------------------------------------------------------
 # Evaluate your own scenario (Patch 6) — manager-directed what-ifs, always
 # shown ALONGSIDE the model's own default recommendation above, never in
@@ -1092,6 +1168,36 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                                f"not season-shaping, so no Style Profile differential pull is applied. Prices, "
                                f"injuries and fixtures can move before GW{fh_gw_choice} — re-run this closer to "
                                f"the date rather than treating it as locked in.")
+
+                    # Rating vs. FH optimal (2026-09-07 discussion) — same
+                    # rating_gw_value() mechanic Patch 20 uses for the main
+                    # Team Rating % (best XI + captain doubled + Rule #12
+                    # bench discount), applied here to a genuinely
+                    # unconstrained single-GW ceiling instead of the main
+                    # rating's free-transfer-limited "reachable ceiling."
+                    # That sidesteps the exact distortion flagged earlier
+                    # this session: this comparison isn't capped to "the one
+                    # best swap available," it's your actual current squad
+                    # against a true from-scratch optimal for this one week
+                    # — a cleaner read on "how far off is my squad, really."
+                    current_squad_at_fh_gw = fh_proj[fh_proj["code"].isin(squad_codes)]
+                    fh_current_val = opt.rating_gw_value(current_squad_at_fh_gw, fh_col, cfg)["total_realized"]
+                    fh_optimal_val = opt.rating_gw_value(fh_squad, fh_col, cfg)["total_realized"]
+                    fh_rating = eng.team_rating_pct(fh_current_val, fh_optimal_val, "")
+                    fh_gap = round(fh_optimal_val - fh_current_val, 2)
+                    fh_moe = eng.margin_of_error_threshold(fh_optimal_val, cfg)
+                    st.markdown("**Your squad vs. this Free Hit optimal**")
+                    if fh_rating["rating_pct"] is not None:
+                        st.markdown(f"Your current squad's best XI this GW: **{fh_current_val:.1f} xPts** vs. "
+                                    f"Free Hit optimal: **{fh_optimal_val:.1f} xPts** → "
+                                    f"**{fh_rating['rating_pct']}%** (gap: {fh_gap:.1f} xPts, "
+                                    f"margin-of-error threshold: {fh_moe:.1f} xPts)")
+                        if fh_gap < fh_moe:
+                            st.caption(f"✓ That gap is inside normal weekly noise — your squad is already "
+                                       f"effectively at this week's ceiling; a Free Hit's upside here is limited.")
+                    else:
+                        st.info("Couldn't compute a comparison — your current squad has no valid XI for this GW "
+                                "this run.")
 
 # ---------------------------------------------------------------------------
 # Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric
