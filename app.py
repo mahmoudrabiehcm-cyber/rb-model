@@ -69,7 +69,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .verdict-card .h{ font-family:"Fraunces"; font-weight:800; font-size:1.35rem; margin:0 0 6px; color:var(--accent-strong); }
 .verdict-card .b{ margin:0; color:var(--ink-muted); font-size:.94rem; font-style:italic; }
 
-.stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:wrap; align-items:flex-start; }
+.stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:nowrap; align-items:flex-start; overflow-x:auto; }
 .stat .n{ font-size:1.5rem; font-weight:600; }
 .stat .l{ font-size:10.5px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
 .stat.rating .n{ display:flex; align-items:center; gap:6px; }
@@ -574,11 +574,17 @@ with st.spinner("Fetching live data and computing xPts..."):
     fh_auto_rating = eng.team_rating_pct(fh_auto_current_val, fh_auto_optimal_val, "")
     fh_auto_gap = round(fh_auto_optimal_val - fh_auto_current_val, 2)
     fh_auto_moe = eng.margin_of_error_threshold(fh_auto_optimal_val, cfg) if fh_auto_optimal_val else 0.0
-    fh_auto_tooltip = (f"Free Hit rating = your current squad's best XI this GW (captain doubled, bench "
+    # Patch 24 (2026-09-08 discussion) — this FH-optimal-based ratio now IS
+    # the header's "Team Rating" (manager's explicit call: it's a truer
+    # current-vs-optimal read than the old reachable-ceiling version, which
+    # is tautologically high whenever few free transfers are banked). The
+    # old reachable-ceiling calc (`rating`/squad_total/reachable_total/moe)
+    # is kept as-is for the Wildcard-flag trigger only (chip_protocol.wildcard_flag
+    # below) — untouched, not displayed anywhere any more.
+    fh_auto_tooltip = (f"Team Rating % = your current squad's best XI this GW (captain doubled, bench "
                        f"autosub-discounted), divided by a genuinely unconstrained optimal squad for GW"
                        f"{planning_gw} only (full player pool, no free-transfer limit — a true from-scratch "
-                       f"rebuild, unlike Team Rating %'s reachable-ceiling comparison above). Gap: "
-                       f"{fh_auto_gap:.1f} xPts (margin-of-error threshold: {fh_auto_moe:.1f} xPts). "
+                       f"rebuild). Gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: {fh_auto_moe:.1f} xPts). "
                        f"Explore a different candidate gameweek in 'Evaluate your own scenario' below.")
 
     # captaincy — starting XI only, never the bench. "code" is carried through
@@ -720,10 +726,6 @@ with col2:
         trend = '<span class="trend-up">▲</span>' if rank_history_display[-1] < rank_history_display[-2] \
             else ('<span class="trend-down">▼</span>' if rank_history_display[-1] > rank_history_display[-2] else "")
     rank_disp = f"{rank_history_display[-1]:,}" if rank_history_display else "—"
-    rating_tooltip = ("Team Rating % = your optimized XI's projected xPts over this horizon (captain doubled, "
-                       "bench valued at its real autosub-discounted rate — Patch 20), divided by the best squad "
-                       "actually reachable using your free transfers right now (not an unlimited-budget fantasy "
-                       "ideal). See the disclosure expander below for the full researched-tier breakdown.")
     # Patch 11 — Standing Rule #4 disclosure: `points_total`/`rank_history[-1]`
     # come straight from the official API's `entry/` and `entry/.../history/`
     # endpoints for GW{squad_gw}. Those are real, live numbers, not stale
@@ -740,14 +742,8 @@ with col2:
     st.markdown(f"""<div class="stat-row">
       <div class="stat"><div class="n">{rank_disp} {trend}{prov_badge}</div><div class="l">Overall rank</div></div>
       <div class="stat rating">
-        <div class="n">{rating['rating_pct'] if rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{rating_tooltip}">i</span></div>
-        <div class="l">Team rating</div>
-        <div class="rating-basis">vs. reachable ceiling</div>
-      </div>
-      <div class="stat rating">
         <div class="n">{fh_auto_rating['rating_pct'] if fh_auto_rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{fh_auto_tooltip}">i</span></div>
-        <div class="l">Free Hit rating</div>
-        <div class="rating-basis">vs. GW{planning_gw} optimal</div>
+        <div class="l">Team rating</div>
       </div>
       <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
       <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
@@ -763,27 +759,23 @@ st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squ
             f'planning for GW{planning_gw} · '
             f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
-if rating["rating_pct"] is not None:
-    if at_ceiling:
-        st.caption(f"✓ Already at your reachable ceiling this week — the {rating_gap:.1f} xPts gap is inside "
-                   f"normal weekly noise (threshold {moe:.1f} xPts), not real room left on the table.")
+fh_at_ceiling = fh_auto_optimal_val > 0 and fh_auto_gap < fh_auto_moe
+if fh_auto_rating["rating_pct"] is not None:
+    if fh_at_ceiling:
+        st.caption(f"✓ Already at this GW's optimal — the {fh_auto_gap:.1f} xPts gap is inside normal weekly "
+                   f"noise (threshold {fh_auto_moe:.1f} xPts), not real room left on the table.")
     with st.expander("Team Rating % — full breakdown"):
         st.markdown(tier_label)
-        st.caption(f"Squad horizon xPts: {squad_total:.1f} · Reachable ceiling: {reachable_total:.1f} "
-                   f"(best squad gettable using your {ft['free_transfers']} free transfer(s) right now, "
-                   f"£{cfg['squad_rules']['budget']}m proxy budget, {horizon}-GW horizon) · "
-                   f"gap to reachable ceiling: {rating_gap:.1f} xPts (margin-of-error threshold: {moe:.1f} xPts)")
-        st.caption(f"Theoretical ceiling (secondary reference, unconstrained — ignores what you currently own or "
-                   f"how many transfers you have): {theoretical_total:.1f} xPts")
-        st.caption("Patch 20 methodology: each of the three totals above is your best legal Starting XI per GW in "
-                   "the horizon, plus a captain bonus (that XI's own top scorer counted a second time — the real "
-                   "doubling effect, per §1a's captaincy requirement), plus the 4 bench slots valued at their "
-                   "Rule #12 autosub-discounted rate rather than full raw value — computed identically for the "
-                   "squad and both ceiling sides (Rule #22 Systematic Application), never a flat 15-man sum. "
-                   "The underlying squad SELECTION for the two ceiling solves still optimizes a simpler raw-sum "
-                   "objective (a disclosed approximation — the true joint optimum across squad+XI+captain+bench "
-                   "for a multi-GW horizon is a materially harder combinatorial problem); only the reported score "
-                   "for whichever squad each solve returns uses the corrected calculation above.")
+        st.caption(f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
+                   f"{fh_auto_current_val:.1f} · GW{planning_gw} optimal (a genuinely unconstrained best-possible "
+                   f"squad from the full player pool, £{team_value}m proxy budget, no free-transfer limit): "
+                   f"{fh_auto_optimal_val:.1f} · gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: "
+                   f"{fh_auto_moe:.1f} xPts)")
+        st.caption("Patch 24 methodology (2026-09-08): Team Rating % = current squad GW xPts / GW-optimal xPts, "
+                   "both sides using the same best-legal-Starting-XI-plus-captain-bonus-plus-Rule-#12-bench-value "
+                   "calculation (Rule #22 Systematic Application) — replacing the prior reachable-ceiling version, "
+                   "which the manager flagged as tautologically high whenever few free transfers are banked. This "
+                   "is the same figure previously shown as 'Free Hit rating'; it is now the sole Team Rating stat.")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
 
