@@ -180,7 +180,9 @@ def estimate_xm(row: pd.Series, cfg: dict, override: Optional[float]) -> float:
 
 # ---------------------------------------------------------------------------
 # CS% — MODEL_POISSON tier from official team strength ratings, with
-# manual override slot for a pasted tier-2/3 number (oddschecker / soccerstats)
+# manual override slot for a pasted tier-2/3 number (oddschecker / soccerstats /
+# Spreadex / Solio Analytics — v6.1 note: Solio is EST-tier/provisional until
+# independently re-confirmed a second time, per Rule #1)
 # ---------------------------------------------------------------------------
 def _poisson_pmf(k: int, lam: float) -> float:
     return math.exp(-lam) * lam ** k / math.factorial(k)

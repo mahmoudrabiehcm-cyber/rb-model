@@ -1,5 +1,5 @@
 # =============================================================================
-# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.0" +
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.1" +
 # app-side Patch 1: reachable-ceiling Team Rating %, Chip Advisor, dynamic
 # alt-captain, Rule #34 margin-of-error)
 # =============================================================================
@@ -10,13 +10,22 @@
 # =============================================================================
 
 meta:
-  model_version: "6.0"
+  model_version: "6.1"
   base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
-                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.0) for the deltas.
+                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.1) for the deltas.
                           # v6.0 (Patch 18): Standing Rule #38 splits the Decay Schedule below
                           # into three metric-specific curves (npxG/90, xA/90, DEFCON/90) --
                           # see decay_schedule_npxg / decay_schedule_xa / decay_schedule_dc.
+                          # v6.1 (2026-09-08): data-source addition only, no process/formula
+                          # change -- adds Solio Analytics (fpl.solioanalytics.com) to Sec 3's CS%
+                          # source hierarchy as a live, no-auth, EST-tier/provisional rank-2-adjacent
+                          # cross-check (alongside Spreadex-derived team-odds pages), pending a
+                          # second independent cross-validation per Rule #1. No config values below
+                          # changed as a result -- CS% still enters this pipeline only via the
+                          # automatic MODEL_POISSON default or a hand-pasted cs_pct_override in
+                          # manual_overrides.csv; Solio/Spreadex are just two more names a human
+                          # researcher can cite as the source for that pasted number.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
