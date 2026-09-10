@@ -1,5 +1,5 @@
 # =============================================================================
-# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.1" +
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.2" +
 # app-side Patch 1: reachable-ceiling Team Rating %, Chip Advisor, dynamic
 # alt-captain, Rule #34 margin-of-error)
 # =============================================================================
@@ -10,10 +10,10 @@
 # =============================================================================
 
 meta:
-  model_version: "6.1"
+  model_version: "6.2"
   base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
-                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.1) for the deltas.
+                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.2) for the deltas.
                           # v6.0 (Patch 18): Standing Rule #38 splits the Decay Schedule below
                           # into three metric-specific curves (npxG/90, xA/90, DEFCON/90) --
                           # see decay_schedule_npxg / decay_schedule_xa / decay_schedule_dc.
@@ -26,6 +26,13 @@ meta:
                           # automatic MODEL_POISSON default or a hand-pasted cs_pct_override in
                           # manual_overrides.csv; Solio/Spreadex are just two more names a human
                           # researcher can cite as the source for that pasted number.
+                          # v6.2 (Patch 26, 2026-09-10): Standing Rule #39 (Wildcard-Banking
+                          # Interaction Rule) -- a real logic fix, not a config value. Corrects
+                          # transfers.py's derive_free_transfers(), which previously reset the
+                          # banked free-transfer count to 1 on a Wildcard gameweek. A Wildcard
+                          # draws from its own unlimited-transfer pool, never from the bank, so
+                          # the bank now carries forward untouched through a Wildcard GW and
+                          # still gets its normal +1 accrual, same as any other week.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

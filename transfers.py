@@ -3,9 +3,21 @@ transfers.py
 Step 7a addendum — free-transfer count, derived automatically from the
 manager's transfer history rather than asked (v4.0 doc). Mirrors the
 official 2026/27 rule: +1 free transfer per gameweek from GW2 onward,
-banked up to a max of 5; a played Wildcard resets the bank to 1 the
-following gameweek; a played Free Hit doesn't touch the bank at all
-(its transfers are free and don't draw down or reset anything).
+banked up to a max of 5; a played Wildcard draws from its own separate
+unlimited-transfer pool that week and does NOT touch the banked count at
+all -- the bank carries forward untouched and still gets its normal +1
+accrual, same as any other gameweek; a played Free Hit likewise doesn't
+touch the bank (its transfers are free and don't draw down or reset
+anything).
+
+Patch 26 (v6.2 / Standing Rule #39, 2026-09-10 discussion) -- this
+previously reset the bank to 1 on a Wildcard gameweek, on the mistaken
+premise that the Wildcard's unlimited moves made the existing bank
+irrelevant. Corrected: a banked transfer survives a Wildcard untouched
+and remains available immediately after it as a genuine, deliberate tool
+(fixing a Wildcard-build miss, chasing a fixture swing the Wildcard
+didn't reach, or setting up a subsequent chip) -- it is never zeroed out
+just because a Wildcard was played.
 """
 from __future__ import annotations
 
@@ -40,11 +52,14 @@ def derive_free_transfers(history_current: list[dict], chips_played: list[dict])
             elif made:
                 trace.append(f"GW{gw}: used {made} of the banked free transfer(s).")
 
+        # Patch 26 (v6.2 / Standing Rule #39) — a Wildcard draws from its own
+        # unlimited pool, not from the bank, so the bank is NEVER reset here.
+        # Both branches now get the same normal +1 accrual regardless of
+        # whether a Wildcard was played this GW.
         if chip == "wildcard":
-            ft = 1
-            trace.append(f"GW{gw}: Wildcard resets the bank to 1 for GW{gw + 1}.")
-        else:
-            ft = min(MAX_BANK, ft + 1)
+            trace.append(f"GW{gw}: Wildcard played — bank carries forward untouched (Rule #39), "
+                          f"then gets its normal +1 accrual for GW{gw + 1} like any other week.")
+        ft = min(MAX_BANK, ft + 1)
 
     trace.append(f"-> {ft} free transfer(s) available now (cap {MAX_BANK}).")
     return {"free_transfers": ft, "trace": trace}
