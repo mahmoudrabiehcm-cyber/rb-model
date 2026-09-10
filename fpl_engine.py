@@ -357,3 +357,114 @@ def captaincy_protocol(candidates: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     c["eo_tier"] = c["eo"].apply(tier)
     return c.sort_values("xpts_this_gw", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Standing Rule #40 (v6.3, Patch 27) — Team-Stability Captaincy Check
+# ---------------------------------------------------------------------------
+def team_league_table(fixtures: pd.DataFrame, teams: pd.DataFrame) -> pd.DataFrame:
+    """Mechanical proxy for Rule #40's "team-level results form" signal,
+    built entirely from data already in this pipeline (finished fixtures'
+    final scores) rather than a new manually-researched field -- the
+    manager's explicit choice over a manual_overrides.csv-style column.
+
+    League position is computed properly (points, then goal difference,
+    then goals for -- the standard PL tiebreak order) from finished
+    fixtures, so that part of Rule #40 is a genuine, exact signal.
+
+    "Controlled performances versus repeated late rescues" is the part
+    this pipeline has no data to detect directly -- the official fixtures
+    endpoint carries final scores only, no goal-minute data, so there is
+    no mechanical way to see a stoppage-time equalizer. `close_margin_share`
+    is a disclosed, EST-tagged APPROXIMATION: the share of a team's played
+    matches decided by a single goal or drawn (|goal difference| <= 1).
+    A high share means a team is grinding out tight results -- consistent
+    with, but not proof of, the "repeated late rescue" pattern Rule #40
+    describes; a low share (games settled by 2+ goals) reads as more
+    genuinely "controlled." This is disclosed wherever it's shown, never
+    presented as if it were literal comeback/rescue detection.
+
+    Returns one row per team_id with: position, played, points, gf, ga,
+    gd, close_margin_share. Teams with 0 played matches get position =
+    NaN (not yet rankable) rather than a misleading last place."""
+    cols_needed = {"team_h", "team_a", "team_h_score", "team_a_score", "finished"}
+    if fixtures is None or fixtures.empty or not cols_needed.issubset(fixtures.columns):
+        return pd.DataFrame(columns=["team_id", "position", "played", "points", "gf", "ga",
+                                      "gd", "close_margin_share"]).set_index("team_id")
+
+    played = fixtures[fixtures["finished"] == True].dropna(subset=["team_h_score", "team_a_score"])
+    team_ids = teams["id"].tolist() if teams is not None and "id" in teams.columns else \
+        pd.unique(played[["team_h", "team_a"]].values.ravel())
+
+    rows = []
+    for tid in team_ids:
+        home = played[played["team_h"] == tid]
+        away = played[played["team_a"] == tid]
+        gf = int(home["team_h_score"].sum() + away["team_a_score"].sum())
+        ga = int(home["team_a_score"].sum() + away["team_h_score"].sum())
+        n = len(home) + len(away)
+        wins = int((home["team_h_score"] > home["team_a_score"]).sum() +
+                   (away["team_a_score"] > away["team_h_score"]).sum())
+        draws = int((home["team_h_score"] == home["team_a_score"]).sum() +
+                    (away["team_a_score"] == away["team_h_score"]).sum())
+        points = wins * 3 + draws
+        close = int((abs(home["team_h_score"] - home["team_a_score"]) <= 1).sum() +
+                    (abs(away["team_a_score"] - away["team_h_score"]) <= 1).sum())
+        rows.append({"team_id": tid, "played": n, "points": points, "gf": gf, "ga": ga,
+                     "gd": gf - ga, "close_margin_share": (close / n) if n else None})
+
+    table = pd.DataFrame(rows).set_index("team_id")
+    # Standard PL tiebreak order (points, then goal difference, then goals
+    # for) -- assigned from sorted row order directly rather than rank(),
+    # since rank() on points alone wouldn't apply the gd/gf tiebreak.
+    ranked = table[table["played"] > 0].sort_values(["points", "gd", "gf"], ascending=False)
+    table["position"] = pd.Series(range(1, len(ranked) + 1), index=ranked.index).reindex(table.index)
+    return table
+
+
+def team_stability_tiebreak(shortlist: pd.DataFrame, team_table: pd.DataFrame, cfg: dict) -> dict:
+    """Rule #40: among an ALREADY-TIED captaincy shortlist (Step 8's
+    ~1.0-xPts window), narrow to the candidate(s) whose team is showing
+    a meaningfully more "controlled" results pattern -- never a standalone
+    ranking input, never touching a candidate the formula already separated.
+
+    Only acts when the signal is a genuine, disclosed-threshold gap, not
+    any nonzero difference -- `captaincy.team_stability_position_gap` and
+    `captaincy.team_stability_grind_gap` in model_config.yaml are a
+    manager-directed EST extension (the doc names the two signals but
+    gives no numeric threshold, same disclosed-extension pattern as
+    chip_advisor_thresholds). Returns {"narrowed": DataFrame, "applied":
+    bool, "reason": str} -- "narrowed" is the full shortlist unchanged
+    when the signal doesn't clearly separate the candidates."""
+    teams_in_play = shortlist["team"].unique() if "team" in shortlist.columns else []
+    if team_table is None or team_table.empty or len(teams_in_play) < 2:
+        return {"narrowed": shortlist, "applied": False, "reason": "single team in shortlist or no table"}
+
+    ts_cfg = cfg.get("captaincy", {})
+    pos_gap = ts_cfg.get("team_stability_position_gap", 6)
+    grind_gap = ts_cfg.get("team_stability_grind_gap", 0.25)
+
+    rows = shortlist.copy()
+    rows["_position"] = rows["team"].map(team_table["position"])
+    rows["_close_margin_share"] = rows["team"].map(team_table["close_margin_share"])
+    if rows["_position"].isna().any():
+        return {"narrowed": shortlist, "applied": False, "reason": "a candidate's team has no played matches yet"}
+
+    best_pos = rows["_position"].min()
+    worst_pos = rows["_position"].max()
+    if worst_pos - best_pos >= pos_gap:
+        narrowed = rows[rows["_position"] == best_pos].drop(columns=["_position", "_close_margin_share"])
+        return {"narrowed": narrowed, "applied": True,
+                "reason": f"league position gap of {int(worst_pos - best_pos)} places (>= {pos_gap})"}
+
+    best_grind = rows["_close_margin_share"].min()
+    worst_grind = rows["_close_margin_share"].max()
+    if (worst_grind - best_grind) >= grind_gap:
+        narrowed = rows[rows["_close_margin_share"] == best_grind].drop(
+            columns=["_position", "_close_margin_share"])
+        return {"narrowed": narrowed, "applied": True,
+                "reason": f"close-margin-result share gap of {worst_grind - best_grind:.2f} "
+                          f"(>= {grind_gap:.2f}) -- fewer 1-goal/drawn results reads as more controlled"}
+
+    return {"narrowed": shortlist, "applied": False,
+            "reason": "neither signal cleared its disclosed threshold -- no genuine separation"}

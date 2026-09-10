@@ -597,7 +597,13 @@ with st.spinner("Fetching live data and computing xPts..."):
         cap_candidates = starters_df.rename(columns={cap_col: "xpts_this_gw"})[
             ["code", "web_name", "team", "xpts_this_gw", "selected_by_percent"]]
         cap_result = eng.captaincy_protocol(cap_candidates, cfg)
-        cap_pick = style_profiles.captaincy_pick(cap_result, style_name)
+        # Patch 27 (v6.3 / Standing Rule #40) — team-level results-form
+        # tiebreak, built from finished-fixture scores already in `snap`
+        # (no new manual research field). Only ever narrows an
+        # already-tied shortlist; see fpl_engine.team_stability_tiebreak's
+        # docstring for the disclosed EST proxy this uses.
+        team_table = eng.team_league_table(snap.fixtures, snap.teams)
+        cap_pick = style_profiles.captaincy_pick(cap_result, style_name, team_table=team_table, cfg=cfg)
         cap_alt_row, cap_alt_label = style_profiles.captain_alt_pick(cap_result, cap_pick["web_name"], style_name)
         cap_pick_row = cap_pick
 
@@ -621,6 +627,12 @@ with st.spinner("Fetching live data and computing xPts..."):
         if cap_alt_row is not None and cap_alt_label.startswith("Near miss"):
             cap_caption += (f" Nearest alternative if this pick disappoints: <b>{cap_alt_row['web_name']}</b> "
                             f"({cap_alt_label.replace('Near miss – ', '')}, outside this week's shortlist).")
+        team_stability_note = cap_pick_row.get("team_stability_note")
+        if team_stability_note:
+            cap_caption += (f" <i>Team-Stability tiebreak (Rule #40): {cap_pick_row['web_name']}'s team wins the "
+                            f"tie on {team_stability_note} — an EST-tagged results-form proxy, not literal "
+                            f"comeback detection (no goal-minute data available); see the model doc for the "
+                            f"full disclosure.</i>")
 
     # chip status + timing — computed before transfer suggestions so the
     # transfer plan can factor in "a chip is coming, banking may beat spending"

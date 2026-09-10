@@ -60,26 +60,51 @@ def differential_floor(pool: pd.DataFrame, xpts_col: str, ceiling_key: str | Non
     return top_n[xpts_col].mean() if not top_n.empty else float("-inf")
 
 
-def captaincy_pick(cap_result: pd.DataFrame, profile_name: str) -> pd.Series:
+def captaincy_pick(cap_result: pd.DataFrame, profile_name: str, team_table=None,
+                    cfg: dict | None = None) -> pd.Series:
     """cap_result comes from fpl_engine.captaincy_protocol() — already has
     `shortlisted`, `eo`, `eo_tier` columns, sorted by xpts_this_gw desc.
     Applies the profile's tie-break (Step 8 addendum) among shortlisted
-    (statistically-tied, within the ~1.0 xPts window) candidates."""
+    (statistically-tied, within the ~1.0 xPts window) candidates.
+
+    Patch 27 (v6.3 / Standing Rule #40) — before the profile's own
+    tiebreak, the shortlist is first narrowed by
+    fpl_engine.team_stability_tiebreak() whenever the candidates' teams
+    show a genuinely disclosed-threshold gap in results reliability
+    (league position / close-margin-result share — see that function's
+    docstring for why this is an EST-tagged proxy, not literal comeback
+    detection). This never overrides a clear formula leader — it only
+    ever narrows an ALREADY-TIED shortlist — and silently no-ops
+    (falls through unchanged) when `team_table`/`cfg` aren't supplied,
+    so existing callers are unaffected until they opt in."""
     profile = get_profile(profile_name)
     shortlist = cap_result[cap_result["shortlisted"]]
     if shortlist.empty:
         shortlist = cap_result.head(1)
 
+    stability_note = None
+    if team_table is not None and cfg is not None and len(shortlist) > 1:
+        import fpl_engine as eng
+        ts = eng.team_stability_tiebreak(shortlist, team_table, cfg)
+        if ts["applied"] and not ts["narrowed"].empty:
+            shortlist = ts["narrowed"]
+            stability_note = ts["reason"]
+
     rule = profile["captain_tiebreak"]
     if rule == "highest_eo":
-        return shortlist.sort_values("eo", ascending=False).iloc[0]
-    if rule == "lowest_eo_in_shortlist":
-        return shortlist.sort_values("eo", ascending=True).iloc[0]
-    if rule == "highest_raw_xpts":
-        return shortlist.sort_values("xpts_this_gw", ascending=False).iloc[0]
-    # "mixed_case_by_case" (Calculated Maverick default) — no single mechanical
-    # rule per the v4.0 doc; fall back to highest raw xPts as the objective
-    # anchor, flagged in the UI as a case-by-case call rather than a solver verdict.
+        picked = shortlist.sort_values("eo", ascending=False).iloc[0]
+    elif rule == "lowest_eo_in_shortlist":
+        picked = shortlist.sort_values("eo", ascending=True).iloc[0]
+    elif rule == "highest_raw_xpts":
+        picked = shortlist.sort_values("xpts_this_gw", ascending=False).iloc[0]
+    else:
+        # "mixed_case_by_case" (Calculated Maverick default) — no single mechanical
+        # rule per the v4.0 doc; fall back to highest raw xPts as the objective
+        # anchor, flagged in the UI as a case-by-case call rather than a solver verdict.
+        picked = shortlist.sort_values("xpts_this_gw", ascending=False).iloc[0]
+    picked = picked.copy()
+    picked["team_stability_note"] = stability_note
+    return picked
     return shortlist.sort_values("xpts_this_gw", ascending=False).iloc[0]
 
 

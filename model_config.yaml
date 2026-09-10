@@ -1,5 +1,5 @@
 # =============================================================================
-# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.2" +
+# FPL PROJECTION MODEL — CONFIG  (mirrors "FPL Projection Model v6.3" +
 # app-side Patch 1: reachable-ceiling Team Rating %, Chip Advisor, dynamic
 # alt-captain, Rule #34 margin-of-error)
 # =============================================================================
@@ -10,10 +10,10 @@
 # =============================================================================
 
 meta:
-  model_version: "6.2"
+  model_version: "6.3"
   base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
-                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.2) for the deltas.
+                          # v3.3 -- see the model doc's changelog (v4.0 -> v6.3) for the deltas.
                           # v6.0 (Patch 18): Standing Rule #38 splits the Decay Schedule below
                           # into three metric-specific curves (npxG/90, xA/90, DEFCON/90) --
                           # see decay_schedule_npxg / decay_schedule_xa / decay_schedule_dc.
@@ -33,6 +33,13 @@ meta:
                           # draws from its own unlimited-transfer pool, never from the bank, so
                           # the bank now carries forward untouched through a Wildcard GW and
                           # still gets its normal +1 accrual, same as any other week.
+                          # v6.3 (Patch 27, 2026-09-10): Standing Rule #40 (Team-Stability
+                          # Captaincy Check). Adds fpl_engine.team_league_table() /
+                          # team_stability_tiebreak() -- a captaincy-shortlist tiebreak from
+                          # league position and a disclosed close-margin-result proxy, built
+                          # from finished-fixture scores already in the pipeline (manager's
+                          # explicit choice over a new manually-researched field). See the
+                          # captaincy: section below for the two threshold values.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -282,6 +289,22 @@ captaincy:
   # as the alt-captain fallback pool on a clear-standout week where the real
   # shortlist has no second member.
   near_miss_multiplier: 2.0
+  # Patch 27 (v6.3 / Standing Rule #40, 2026-09-10) — Team-Stability
+  # Captaincy Check thresholds. The doc names the two signals (league
+  # position; controlled vs. repeated late-rescue results) but gives no
+  # numeric gap, so these are a disclosed, manager-directed EST extension
+  # -- same pattern as chip_advisor_thresholds below. Only acts as a
+  # tiebreak among an ALREADY-TIED shortlist (fpl_engine.team_stability_tiebreak).
+  # team_stability_position_gap: league-table places apart before position
+  # alone settles the tie (out of a 20-team league).
+  team_stability_position_gap: 6
+  # team_stability_grind_gap: gap in close_margin_share (fraction of a
+  # team's played matches decided by <=1 goal or drawn) before that signal
+  # settles the tie. This is a disclosed APPROXIMATION of "controlled vs.
+  # repeated late rescues" -- the official fixtures data has final scores
+  # only, no goal-minute data, so a literal comeback/rescue can't be
+  # detected mechanically. See fpl_engine.team_league_table's docstring.
+  team_stability_grind_gap: 0.25
   eo_tiers:
     contrarian_max: 40
     mixed_max: 70
