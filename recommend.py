@@ -281,6 +281,148 @@ def apply_style_to_wildcard_squad(current_squad: pd.DataFrame, rebuild_squad: pd
     return adjusted
 
 
+def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.DataFrame,
+                         gw_list: list[int], cfg: dict, bench_w: float, bb_play_gw: int | None,
+                         moe: float, team_value: float, current_gw: int) -> tuple[dict, list[str] | None]:
+    """Patch 41 (manager, 2026-09-14, screenshot: Damsgaard — the model's own
+    automatic pick, +2.5 xPts — and Tavernier — manually evaluated via
+    "Evaluate your own scenario", +2.54 xPts — landed statistically tied at
+    the requested horizon: "if 2 candidates are so close the model needs to
+    look at +1 GW horizon to identify the best candidate"). Root cause: the
+    automatic recommendation comes from a SINGLE MILP solve per transfer
+    count k (`optimizer.solve_squad`, searching the whole pool by raw
+    xpts_horizon_sum) — it returns exactly one candidate squad, never
+    explicitly comparing specific alternative in-players against each other
+    on realized net-gain. A genuinely-tied or better alternative can go
+    completely unseen by the automatic pick even though it's realistically
+    as good or better — Tavernier only surfaced because the manager tested
+    him by hand.
+
+    Scope, confirmed with the manager (2026-09-14): only the straight
+    1-for-1 swap case (`actual_k == 1`, the reported scenario and the common
+    case in practice) — for a clean 1-for-1, every other same-position,
+    budget/club-legal pool player can be substituted directly with no MILP
+    re-solve needed (the rest of the squad doesn't change), scored on the
+    exact same realized-value math as the model's own chosen candidate, so
+    a genuine full-pool scan is cheap here. Multi-transfer (k>=2) candidates
+    are left alone — recombining a k-way swap combinatorially would need a
+    fresh MILP solve per alternative, which is the expensive case the
+    manager did NOT ask this to cover.
+
+    Manager-confirmed behavior: a full scan every run (not capped to a
+    top-N), and when a genuine tie is found and a further-out GW's data
+    resolves it clearly, the winner REPLACES the headline recommendation
+    (not just flagged) — the displayed net_gain still reflects the
+    ORIGINAL requested horizon for whichever player wins; only the decision
+    of WHICH player to show is informed by the extra GW.
+
+    Returns `(possibly-updated chosen dict, plan lines to append or None)`.
+    Never mutates `chosen`; returns it unchanged (second element None) when
+    there's nothing to do (not a 1-for-1, no real tie found, or no data to
+    extend into)."""
+    if chosen.get("actual_k") != 1 or chosen.get("squad") is None:
+        return chosen, None
+    out_codes = set(squad_df["code"]) - set(chosen["squad"]["code"])
+    in_codes = set(chosen["squad"]["code"]) - set(squad_df["code"])
+    if len(out_codes) != 1 or len(in_codes) != 1:
+        return chosen, None  # not a clean 1-for-1 — defensive, shouldn't happen at actual_k==1
+    out_code, in_code = next(iter(out_codes)), next(iter(in_codes))
+    out_rows = squad_df[squad_df["code"] == out_code]
+    if out_rows.empty:
+        return chosen, None
+    out_row = out_rows.iloc[0]
+    out_pos, out_price, out_team = out_row.get("position"), out_row.get("price"), out_row.get("team")
+    if pd.isna(out_price) or out_pos is None:
+        return chosen, None
+
+    max_per_club = cfg["squad_rules"]["max_per_club"]
+    squad_total_price = squad_df["price"].sum(skipna=True) or 0.0
+    other_team_counts = squad_df[squad_df["code"] != out_code]["team"].value_counts()
+    baseline_total = chosen.get("baseline_total", 0.0)
+    hit_cost = chosen.get("hit_cost", 0.0)
+
+    # Manager-confirmed scope (2026-09-14, reaffirmed after checking the
+    # cost): a full scan of every same-position, budget/club-legal pool
+    # player, not capped to a top-N — this never calls the MILP solver (it's
+    # a direct 1-for-1 substitution scored with the same cheap realized-
+    # value math used everywhere else), so pool size doesn't meaningfully
+    # affect runtime the way the actual MILP solves elsewhere in this
+    # function do.
+    same_pos_pool = full_pool[(full_pool["position"] == out_pos)
+                               & (~full_pool["code"].isin(set(squad_df["code"]) - {out_code}))].copy()
+    if same_pos_pool.empty:
+        return chosen, None
+
+    scored: dict = {in_code: {"net_gain": chosen["net_gain"], "squad": chosen["squad"], "total": chosen["total"],
+                               "web_name": chosen["squad"][chosen["squad"]["code"] == in_code]["web_name"]
+                               .iloc[0] if in_code in set(chosen["squad"]["code"]) else in_code,
+                               "xi_total": chosen.get("new_xi"), "bench_total": chosen.get("new_bench")}}
+    for _, alt_row in same_pos_pool.iterrows():
+        alt_code = alt_row.get("code")
+        if alt_code == in_code or alt_code == out_code:
+            continue
+        alt_price = alt_row.get("price")
+        if pd.isna(alt_price):
+            continue
+        if (squad_total_price - out_price + alt_price) > team_value + 1e-9:
+            continue  # not budget-legal as a straight swap
+        alt_team = alt_row.get("team")
+        if int(other_team_counts.get(alt_team, 0)) + 1 > max_per_club:
+            continue  # would breach the per-club cap
+        alt_squad = pd.concat([squad_df[squad_df["code"] != out_code], pd.DataFrame([alt_row])],
+                               ignore_index=True, sort=False)
+        if "code" in alt_squad.columns:
+            alt_squad = alt_squad.drop_duplicates(subset=["code"], keep="first")
+        alt_bd = opt.realized_horizon_breakdown(alt_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                 bb_play_gw=bb_play_gw)
+        alt_net = round(alt_bd["total"] - baseline_total - hit_cost, 2)
+        scored[alt_code] = {"net_gain": alt_net, "squad": alt_squad, "total": alt_bd["total"],
+                             "web_name": alt_row.get("web_name", alt_code),
+                             "xi_total": alt_bd["xi_total"], "bench_total": alt_bd["bench_total"]}
+
+    best_net_here = max(v["net_gain"] for v in scored.values())
+    tied_codes = [code for code, v in scored.items() if (best_net_here - v["net_gain"]) < moe]
+    if len(tied_codes) <= 1:
+        return chosen, None  # the model's own pick wasn't actually tied with anything real
+
+    next_gw = max(gw_list) + 1
+    next_col = f"xpts_gw{next_gw}"
+    if next_col not in full_pool.columns or next_col not in squad_df.columns:
+        tied_names = ", ".join(scored[c]["web_name"] for c in tied_codes)
+        return chosen, [f"GW{current_gw}: Tie-break: {tied_names} are statistically tied at this horizon "
+                        f"(within {moe:.1f} xPts) but there's no GW{next_gw} projection data this run to break "
+                        f"the tie — keeping the model's original pick."]
+
+    extended_gw_list = gw_list + [next_gw]
+    ext_baseline = realistic_baseline_value(squad_df, {out_code}, extended_gw_list, cfg,
+                                             bb_play_gw=bb_play_gw)["baseline_total"]
+    ext_scores = {}
+    for code in tied_codes:
+        ext_bd = opt.realized_horizon_breakdown(scored[code]["squad"], extended_gw_list, cfg,
+                                                 bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+        ext_scores[code] = round(ext_bd["total"] - ext_baseline - hit_cost, 2)
+    winner_code = max(ext_scores, key=lambda c: ext_scores[c])
+
+    if winner_code == in_code:
+        return chosen, [f"GW{current_gw}: Tie-break: {len(tied_codes)} candidates were statistically tied at this "
+                        f"horizon (within {moe:.1f} xPts) — extended to GW{next_gw} to check, and the model's "
+                        f"original pick ({scored[in_code]['web_name']}) still comes out ahead "
+                        f"({ext_scores[in_code]:+.2f} vs {max(v for c, v in ext_scores.items() if c != in_code):+.2f} "
+                        f"xPts over the extended window)."]
+
+    winner = scored[winner_code]
+    new_chosen = {**chosen, "squad": winner["squad"], "total": winner["total"], "net_gain": winner["net_gain"],
+                  "new_xi": winner["xi_total"], "new_bench": winner["bench_total"], "data_gap_codes": []}
+    loser_ext = ext_scores[in_code]
+    plan_lines = [f"GW{current_gw}: Tie-break: {scored[in_code]['web_name']} (the model's original pick) and "
+                  f"{winner['web_name']} were statistically tied at this horizon "
+                  f"({chosen['net_gain']:+.2f} vs {scored[winner_code]['net_gain']:+.2f} xPts, within "
+                  f"{moe:.1f} xPts) — extended to GW{next_gw} to break it: {winner['web_name']} nets "
+                  f"{ext_scores[winner_code]:+.2f} xPts vs {scored[in_code]['web_name']}'s {loser_ext:+.2f} xPts "
+                  f"over the extended window, so the recommendation switched to {winner['web_name']}."]
+    return new_chosen, plan_lines
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
@@ -452,6 +594,16 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         viable = [k for k in viable if k == 0 or k not in week_bench_only]
         chosen_k = min(viable) if viable else 0
         chosen = candidates[chosen_k]
+
+        # Patch 41 — same position tie-break as the single-decision path
+        # (see _position_tie_break()'s docstring): the same "one MILP pick
+        # per k, never compared against real alternatives" blind spot
+        # exists per week in this chained pacing plan too.
+        if chosen.get("actual_k") == 1:
+            chosen, _tie_plan = _position_tie_break(chosen, sim_squad, full_pool, remaining_gws, cfg,
+                                                      bench_w, bb_play_gw, moe, team_value, gw)
+            if _tie_plan:
+                plan.extend(_tie_plan)
 
         ft_used = min(chosen["actual_k"], ft_bank)
         ft_after = min(transfers.MAX_BANK, (ft_bank - ft_used) + 1)
@@ -790,6 +942,16 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             chosen_k = max(smaller) if smaller else 0
         chosen = candidates[chosen_k]
         chosen_net_gain = chosen["net_gain"]
+        # Patch 41 — same position tie-break as the default recommendation
+        # path below applies here too: Force still picks whichever single
+        # player the MILP happened to land on for the forced count, with
+        # the same blind spot to a statistically-tied alternative.
+        if chosen.get("actual_k") == 1:
+            chosen, _tie_plan = _position_tie_break(chosen, squad_df, full_pool, gw_list, cfg,
+                                                      bench_w, bb_play_gw, moe, team_value, current_gw)
+            chosen_net_gain = chosen["net_gain"]
+            if _tie_plan:
+                plan.extend(_tie_plan)
         if chosen["actual_k"] == 0:
             summary.append("No legal improving swap found at the forced transfer count — squad unchanged.")
             plan.append(f"GW{current_gw}: Forced transfer requested, but no legal improving swap was found in "
@@ -855,6 +1017,19 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         chosen_k = min(viable) if viable else 0
         chosen = candidates[chosen_k]
         chosen_net_gain = chosen["net_gain"]
+
+        # Patch 41 (manager, 2026-09-14: Damsgaard vs Tavernier both landing
+        # at ~2.5 xPts, statistically tied, with the model showing only its
+        # own MILP pick and never comparing the two directly) — see
+        # _position_tie_break()'s docstring for the full root-cause and
+        # scope. Only meaningful for a clean 1-for-1 (actual_k == 1); a
+        # no-op otherwise.
+        if chosen.get("actual_k") == 1:
+            chosen, _tie_plan = _position_tie_break(chosen, squad_df, full_pool, gw_list, cfg,
+                                                      bench_w, bb_play_gw, moe, team_value, current_gw)
+            chosen_net_gain = chosen["net_gain"]
+            if _tie_plan:
+                plan.extend(_tie_plan)
 
         if chosen["actual_k"] == 0 and bench_only_viable:
             bo_k = min(bench_only_ks)

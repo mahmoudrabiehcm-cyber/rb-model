@@ -410,6 +410,53 @@ meta:
                           # panel is relevant; nothing else about this section changed.
                           # NOTE (2026-09-14): rb_model_app_patch40.zip is CUMULATIVE: Patch 29 through
                           # 40 together, on top of the manager's Patch 28 baseline.
+                          # Patch 41 (2026-09-14, manager screenshot: Damsgaard -- the model's own default
+                          # MILP pick, net +2.5 xPts -- and Tavernier -- manually evaluated via "Evaluate
+                          # your own scenario", net +2.54 xPts -- landed statistically tied at a 1-GW
+                          # horizon: "if 2 candidates are so close the model needs to look at +1 GW horizon
+                          # to identify the best candidate"): root cause traced and fixed. The automatic
+                          # recommendation comes from a SINGLE MILP solve per transfer count k
+                          # (optimizer.solve_squad, searching the whole pool by raw xpts_horizon_sum) --
+                          # it returns exactly one candidate squad and never explicitly compares specific
+                          # alternative in-players against each other on realized net-gain. Worse: that raw
+                          # xpts_horizon_sum objective can reflect a WIDER window than the manager's actual
+                          # requested horizon, so the MILP's own pick can lose to a genuinely better
+                          # short-horizon alternative it never even considered on the metric that matters.
+                          # New recommend._position_tie_break(): for the common case (a clean 1-for-1 swap,
+                          # actual_k == 1), every other same-position, budget/club-legal pool player is
+                          # substituted directly (no MILP re-solve needed -- the rest of the squad doesn't
+                          # change) and scored with the SAME realized-value math, at the SAME manager-
+                          # requested gw_list, as the model's own chosen candidate. If none land within the
+                          # existing margin-of-error band of the chosen candidate, nothing changes (most
+                          # runs). If a genuine tie is found, the comparison extends one GW further
+                          # (gw_list + [max(gw_list)+1]) using the same baseline-adjusted realized math, and
+                          # per the manager's confirmed choice, a clear winner there REPLACES the headline
+                          # recommendation outright (not just flagged) -- disclosed as a new "Tie-break:"
+                          # line in the trace expander; the displayed net_gain still reflects the ORIGINALLY
+                          # requested horizon for whichever player wins, only the decision of which player
+                          # to show is informed by the extra GW. Degrades gracefully (keeps the model's
+                          # original pick, discloses why) when there's no projection data one GW further to
+                          # resolve the tie with. Scope, confirmed with the manager after checking the
+                          # actual cost (no MILP solve per alternative -- this is cheap arithmetic, not a
+                          # source of the app's separate general slowness): a FULL scan of every legal
+                          # same-position pool player every run, not capped to a top-N. Wired into every
+                          # place suggest_transfers()/plan_transfer_schedule() finalizes a 1-for-1 pick --
+                          # the main recommendation path, "Force" mode, and each week of the "No hits"/"Hit
+                          # if worth it" chained pacing plan. Multi-transfer (k>=2) candidates are
+                          # deliberately out of scope -- recombining a k-way swap would need a fresh MILP
+                          # solve per alternative, which the manager did not ask this to cover. Verified via
+                          # a new unit test (test_patch41_tiebreak.py) reproducing the exact reported shape
+                          # (Damsgaard higher on the MILP's own GW5-only objective, Tavernier genuinely
+                          # better once GW6 is priced in) -- confirms the tie is detected, the extension to
+                          # GW6 correctly promotes Tavernier, the displayed net_gain stays anchored to the
+                          # originally-requested 1-GW horizon, and a genuinely clear (non-tied) winner
+                          # triggers no tie-break line at all. Full regression suite
+                          # (test_patch28/29/30/34_unit/35/36/37/38(_horizon,_open_pool)/39_hits) still
+                          # passes unchanged; test_patch34_impact_check.py Test 1 still fails on the same
+                          # pre-existing, unrelated fixture issue flagged since Patch 36/37 (not a
+                          # regression from this patch).
+                          # NOTE (2026-09-14): rb_model_app_patch41.zip is CUMULATIVE: Patch 29 through
+                          # 41 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
