@@ -335,6 +335,45 @@ meta:
                           # credit +0.03, net +2.53) via a new Patch 38 unit test.
                           # NOTE (2026-09-14): rb_model_app_patch38.zip is CUMULATIVE: Patch 29 through
                           # 38 together, on top of the manager's Patch 28 baseline.
+                          # Patch 39 (2026-09-14, manager report on live Patch 38 screenshots: "why 3 GWs
+                          # horizon doesn't give me the specific plan for each week 'transfer, roll' and
+                          # why all of this under the recommendation transfer, keep only the
+                          # recommendation and avoid the explanation .. for the evaluate scenario
+                          # 'tavernir' see the second screen"): two changes, both manager-confirmed before
+                          # building (AskUserQuestion). (1) DECLUTTER: `suggest_transfers()`'s successful-
+                          # transfer branch, `plan_transfer_schedule()`'s per-week branches, and
+                          # `evaluate_target_transfer()` now each emit exactly ONE always-visible headline
+                          # line into `summary` -- "Why this counts as a real change", "Baseline note",
+                          # the Patch 38 "Arithmetic" line, "Side effect", "Chip-aware alt", "N free
+                          # transfer(s) banked", "Data gap flagged", and the "Statistically tied.../nets
+                          # more/less than the model's own pick" line all moved to `plan` (rendered only in
+                          # the existing collapsed "Why -- full trace" expander). `evaluate_target_transfer()`
+                          # gained a `plan` key it never had before; app.py's target-scenario UI now wraps
+                          # it in its own "Why -- full trace" expander, matching the main recommendation.
+                          # (2) WEEKLY PLANNER HIT-COST EXTENSION (manager's confirmed choice: "Extend the
+                          # weekly planner to allow hits"): `plan_transfer_schedule()` gained a `hit_stance`
+                          # param. Under "Hit if worth it" its per-week search range extends past the
+                          # banked free transfers (k up to 5, same cap suggest_transfers() itself uses),
+                          # charging `hit_cost_per_transfer * max(0, k - ft_bank)` and requiring a
+                          # hit-costing week to clear the stricter `hit_cost_threshold` bar (a free week
+                          # still only needs `minimum_meaningful_gain_free`) -- exactly mirroring
+                          # suggest_transfers()'s own k_range/bar logic. `suggest_transfers()`'s dispatch
+                          # condition now routes "Hit if worth it" (as well as "No hits") through the
+                          # weekly pacing plan whenever horizon_n > 1; "Force" is unchanged -- it stays on
+                          # the original single joint-decision path, since it's an explicit manager
+                          # override of one specific k, not a pacing question for the planner to re-decide
+                          # week by week. Verified with a new unit test (test_patch39_hits.py): a
+                          # 2-transfer week that clears the hit-cost bar with only 1 FT banked correctly
+                          # takes the hit and is disclosed via a "Hit taken" plan line, and every week's
+                          # `summary` line contains no "Why:"/"Baseline note" text under either hit stance.
+                          # Full regression run: test_patch28/29/30/34_unit/35/36/37/38(_horizon,_open_pool)
+                          # all still pass unchanged; test_patch34_impact_check.py Test 1 still fails on the
+                          # same pre-existing, unrelated fixture issue flagged in the Patch 36/37 delivery
+                          # (the synthetic squad's price exactly exhausts its budget with zero bank slack,
+                          # so solve_squad() never finds a k>0 candidate regardless of which code path
+                          # calls it) -- not a regression from this patch.
+                          # NOTE (2026-09-14): rb_model_app_patch39.zip is CUMULATIVE: Patch 29 through
+                          # 39 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

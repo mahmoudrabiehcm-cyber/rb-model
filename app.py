@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 38"
+PATCH_VERSION = "Patch 39"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1489,9 +1489,11 @@ if transfer_error:
 # table that used to be the primary content now live behind one expander,
 # available on demand rather than shown by default.
 if rec.get("is_weekly_schedule"):
-    st.caption(f"No-hits + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's move "
+    _hs_txt = rec.get("hit_stance", "No hits")
+    st.caption(f"{_hs_txt} + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's move "
                f"assumes every earlier week's suggested move already happened), not a single this-week decision. "
-               f"Free-transfer accrual (+1/week, cap 5) is modeled explicitly below.")
+               f"Free-transfer accrual (+1/week, cap 5) is modeled explicitly below."
+               + (" Hits are allowed where a paid move still clears the stricter hit-cost bar." if _hs_txt == "Hit if worth it" else ""))
 if rec.get("summary"):
     for line in rec["summary"]:
         st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
@@ -1619,6 +1621,10 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                 st.dataframe(pd.DataFrame(target_eval["moves"])[
                     [c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
                      if c in pd.DataFrame(target_eval["moves"]).columns]], hide_index=True, use_container_width=True)
+            if target_eval.get("plan"):
+                with st.expander("Why — full trace, rule references, and move-by-move detail"):
+                    for line in target_eval["plan"]:
+                        st.markdown(f"- {line}")
         if wc_gw_choice is not None:
             # Wildcard-list feature (2026-09-07 discussion): a Wildcard
             # resets your whole squad for the rest of the season, so
