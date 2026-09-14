@@ -374,6 +374,42 @@ meta:
                           # calls it) -- not a regression from this patch.
                           # NOTE (2026-09-14): rb_model_app_patch39.zip is CUMULATIVE: Patch 29 through
                           # 39 together, on top of the manager's Patch 28 baseline.
+                          # Patch 40 (2026-09-14, manager request: "the navigator can have a 3rd option to
+                          # read from the scenarios on the section for 'evaluate the scenario'"): the pitch
+                          # navigator's "Squad" toggle (app.py's _render_pitch_navigator()) gained a 3rd
+                          # option, "After evaluated scenario (<player>)", alongside the existing "Current
+                          # squad" / "After recommended transfer". When the manager evaluates a specific
+                          # target in "Evaluate your own scenario" (e.g. Tavernier) and it returns feasible
+                          # moves, those moves (out_code/in_code) are stashed in
+                          # st.session_state["scenario_nav_moves"]/["scenario_nav_label"] -- the section
+                          # renders below the navigator in the script, but a button click there is a full
+                          # script rerun (not confined to the navigator's own st.fragment), so the very next
+                          # run picks it up. The navigator reconstructs the post-scenario squad the
+                          # identical out_code/in_code way "After recommended transfer" already does
+                          # (swap out of squad_df_adv, in from chip_adv_proj -- so multi-GW navigation
+                          # across the wider Chip Advisor window still works for the newly-added player,
+                          # not just the current planning GW). The option is only offered when the stashed
+                          # scenario's out-players are still actually in the current squad (a stale
+                          # scenario from before a real transfer was made, or a reloaded squad, is silently
+                          # unavailable rather than previewing a squad that no longer makes sense -- same
+                          # caution as every other as-if preview on this page); the "no moves" branches of
+                          # evaluate_target_transfer (already-owned, no-legal-way) clear the stashed
+                          # scenario instead of leaving a stale one sitting in the toggle. Session-state
+                          # value for the radio widget is defensively reset if a changed scenario label
+                          # would otherwise no longer match any current option (would raise a Streamlit
+                          # exception rather than just falling back to "Current squad").
+                          # Patch 40 addendum (2026-09-14, manager screenshot before deploying: "Keep it
+                          # without expanding", pointing at the Free Hit sub-panel under "Team
+                          # Recommendation — active signals, auto-built"): the 4 chip sub-panels under that
+                          # section (Wildcard rebuild / Free Hit / Bench Boost / Triple Captain) now default
+                          # to collapsed (`expanded=False`) instead of auto-opening every run. The section
+                          # header itself stays a plain always-visible label (not itself a collapsible
+                          # expander -- Streamlit doesn't allow nesting an expander inside another
+                          # expander, and the manager's screenshot confirmed the ask was specifically about
+                          # the sub-panel default state, not the header). One click still opens whichever
+                          # panel is relevant; nothing else about this section changed.
+                          # NOTE (2026-09-14): rb_model_app_patch40.zip is CUMULATIVE: Patch 29 through
+                          # 40 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 39"
+PATCH_VERSION = "Patch 40"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1176,7 +1176,7 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
             _full_pool_now = _full_pool_now.drop_duplicates(subset=["code"], keep="first")
         wc_eval_auto = chip_protocol.evaluate_wildcard_whatif(
             squad_df, pool_df, cfg, team_value, detect_gw_list or gw_list)
-        with st.expander(f"🃏 Wildcard rebuild — trigger active, shown for GW{wc_rebuild_gw} onward", expanded=True):
+        with st.expander(f"🃏 Wildcard rebuild — trigger active, shown for GW{wc_rebuild_gw} onward", expanded=False):
             if not wc_eval_auto["feasible"]:
                 st.info("Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
             else:
@@ -1210,7 +1210,7 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
         _fh_col = f"xpts_gw{_fh_gw}"
         _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw])
         fh_res_auto = data_pipeline.solve_free_hit_optimal_squad(cfg, _fh_proj_auto, team_value, _fh_gw)
-        with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=True):
+        with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=False):
             if fh_res_auto is None:
                 st.info("Couldn't solve an optimal Free Hit squad this run.")
             else:
@@ -1235,7 +1235,7 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
     if _bb_play:
         _bb_gw = int(bb_advisor["verdict"].split("gw")[1])
         _bb_col = f"xpts_gw{_bb_gw}"
-        with st.expander(f"🛋️ Bench Boost — PLAY GW{_bb_gw}, full 15", expanded=True):
+        with st.expander(f"🛋️ Bench Boost — PLAY GW{_bb_gw}, full 15", expanded=False):
             if _bb_col in squad_df_adv.columns:
                 cols = ["web_name", "team", "position", "price", _bb_col]
                 rn = {"web_name": "Player", "team": "Team", "position": "Pos", "price": "£m",
@@ -1250,7 +1250,7 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
     if _tc_play:
         _tc_gw = int(tc_advisor["verdict"].split("gw")[1])
         _tc_col = f"xpts_gw{_tc_gw}"
-        with st.expander(f"👑 Triple Captain — PLAY GW{_tc_gw}", expanded=True):
+        with st.expander(f"👑 Triple Captain — PLAY GW{_tc_gw}", expanded=False):
             if _tc_col in starters_df_adv.columns and not starters_df_adv.empty:
                 cap_row = starters_df_adv.sort_values(_tc_col, ascending=False).iloc[0]
                 st.markdown(f"**{cap_row['web_name']}** ({cap_row.get('team','')}) — "
@@ -1324,15 +1324,56 @@ def _render_pitch_navigator():
         if "code" in _nav_squad_after.columns:
             _nav_squad_after = _nav_squad_after.drop_duplicates(subset=["code"], keep="first")
 
+    # Patch 40 (manager, 2026-09-14: "the navigator can have a 3rd option to
+    # read from the scenarios on the section for 'evaluate the scenario'") —
+    # a 3rd toggle, built the exact same out_code/in_code reconstruction way
+    # as "After recommended transfer" above, but sourced from whatever the
+    # manager last evaluated in "Evaluate your own scenario" (a manager-
+    # named target, e.g. Tavernier) rather than the model's own default pick.
+    # Only offered when that scenario's out-players are still actually in
+    # the current squad — a stale scenario from a squad that's since changed
+    # (a real transfer made, a new GW loaded) is silently unavailable rather
+    # than previewing a squad that no longer makes sense, same caution as
+    # every other "as-if" preview on this page.
+    _scenario_moves = st.session_state.get("scenario_nav_moves")
+    _nav_squad_scenario = None
+    _scenario_label = st.session_state.get("scenario_nav_label", "scenario")
+    if _scenario_moves:
+        _scen_moves_df = pd.DataFrame(_scenario_moves)
+        if "out_code" in _scen_moves_df.columns and "in_code" in _scen_moves_df.columns:
+            _scen_out_codes = set(_scen_moves_df["out_code"])
+            _scen_in_codes = set(_scen_moves_df["in_code"])
+            if _scen_out_codes.issubset(set(squad_df_adv["code"])):
+                _nav_squad_scenario = pd.concat([
+                    squad_df_adv[~squad_df_adv["code"].isin(_scen_out_codes)],
+                    chip_adv_proj[chip_adv_proj["code"].isin(_scen_in_codes)],
+                ], ignore_index=True, sort=False)
+                if "code" in _nav_squad_scenario.columns:
+                    _nav_squad_scenario = _nav_squad_scenario.drop_duplicates(subset=["code"], keep="first")
+
+    _nav_options = ["Current squad"]
+    if _nav_can_toggle:
+        _nav_options.append("After recommended transfer")
+    if _nav_squad_scenario is not None:
+        _nav_options.append(f"After evaluated scenario ({_scenario_label})")
+
+    # Dynamic options (the 3rd one's label carries the evaluated player's
+    # name, which can change run to run) — a stale session_state value that
+    # no longer matches any current option would otherwise raise a
+    # Streamlit exception on the widget below, so reset it defensively
+    # rather than let a changed scenario label crash the whole page.
+    if st.session_state.get("nav_mode") not in _nav_options:
+        st.session_state["nav_mode"] = "Current squad"
+
     nav_c1, nav_c2 = st.columns([2, 2])
     with nav_c1:
-        nav_mode = st.radio("Squad", ["Current squad", "After recommended transfer"],
+        nav_mode = st.radio("Squad", _nav_options,
                              index=0, horizontal=True, key="nav_mode",
-                             disabled=not _nav_can_toggle,
-                             help=None if _nav_can_toggle else
+                             disabled=len(_nav_options) == 1,
+                             help=None if len(_nav_options) > 1 else
                              "No single-decision transfer this run to preview (either nothing recommended, "
                              "or a No-hits chained weekly schedule where 'which week's squad' isn't a single "
-                             "answer).")
+                             "answer) and no scenario evaluated below yet.")
     with nav_c2:
         pb1, pb2, pb3 = st.columns([1, 3, 1])
         with pb1:
@@ -1348,7 +1389,12 @@ def _render_pitch_navigator():
 
     nav_gw = _nav_gw_list[st.session_state.nav_gw_idx]
     nav_col = f"xpts_gw{nav_gw}"
-    nav_squad = squad_df_adv if (nav_mode == "Current squad" or _nav_squad_after is None) else _nav_squad_after
+    if nav_mode.startswith("After evaluated scenario") and _nav_squad_scenario is not None:
+        nav_squad = _nav_squad_scenario
+    elif nav_mode == "After recommended transfer" and _nav_squad_after is not None:
+        nav_squad = _nav_squad_after
+    else:
+        nav_squad = squad_df_adv
     at_planning_gw = (nav_gw == planning_gw and nav_mode == "Current squad")
 
     if nav_col not in nav_squad.columns:
@@ -1621,6 +1667,24 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                 st.dataframe(pd.DataFrame(target_eval["moves"])[
                     [c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
                      if c in pd.DataFrame(target_eval["moves"]).columns]], hide_index=True, use_container_width=True)
+                # Patch 40 (manager, 2026-09-14: "the navigator can have a 3rd
+                # option to read from the scenarios on the section for
+                # 'evaluate the scenario'"). Stash this evaluated scenario's
+                # moves in session_state so the pitch navigator above (it
+                # renders earlier in the script, but this is a full rerun —
+                # not confined to the navigator's own st.fragment — so the
+                # next run picks this up) can offer a 3rd "After evaluated
+                # scenario" toggle alongside "Current squad" / "After
+                # recommended transfer", built the same out_code/in_code
+                # reconstruction way as that existing toggle.
+                st.session_state["scenario_nav_moves"] = target_eval["moves"]
+                st.session_state["scenario_nav_label"] = target_choice[1]
+            elif "scenario_nav_moves" in st.session_state:
+                # Feasible search ran but found no moves to preview (e.g. the
+                # already-owned / no-legal-way branches) — don't leave a
+                # stale, unrelated scenario sitting in the navigator toggle.
+                del st.session_state["scenario_nav_moves"]
+                st.session_state.pop("scenario_nav_label", None)
             if target_eval.get("plan"):
                 with st.expander("Why — full trace, rule references, and move-by-move detail"):
                     for line in target_eval["plan"]:
