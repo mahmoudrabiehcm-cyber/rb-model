@@ -799,17 +799,42 @@ with st.spinner("Fetching live data and computing xPts..."):
         return lambda total: eng.margin_of_error_threshold(
             total, cfg, floor_points=t.get("floor_points"), pct_of_total=t.get("pct_of_total"))
 
+    # Patch 32 (2026-09-14 manager report) — the Chip Advisor scans its OWN
+    # window now, independent of the sidebar's transfer-planning Horizon
+    # slider (that slider can legitimately be 1 GW; reusing it here meant a
+    # "PLAY GW{n}" verdict was often just confirming the sole candidate, not
+    # finding a genuine optimum). See chip_protocol.chip_advisor_gw_window()
+    # for the sizing/DGW-BGW-extension logic (model_config.yaml
+    # chip_advisor_horizon:). Only computed when at least one of BB/TC/FH is
+    # still available, and re-projects bench/starters/squad onto the wider
+    # window while keeping the SAME player-identity split (who's bench vs.
+    # XI, who's in the squad) that the sidebar-horizon view already settled
+    # on for this planning_gw.
+    chip_adv_window = None
+    bench_df_adv, starters_df_adv, squad_df_adv, chip_adv_proj = bench_df, starters_df, squad_df, proj
+    if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names) \
+            and not squad_df.empty:
+        chip_adv_window = chip_protocol.chip_advisor_gw_window(planning_gw, snap.fixtures, all_team_ids, cfg)
+        chip_adv_gw_list = chip_adv_window["gw_list"]
+        if chip_adv_gw_list != gw_list:
+            chip_adv_proj = _project(snap, hist_df, overrides, cfg, chip_adv_gw_list)
+            bench_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(bench_df["code"])]
+            starters_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(starters_df["code"])]
+            squad_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(squad_codes)]
+
     bb_advisor = None
     if any(c.startswith("Bench Boost") for c in available_chip_names):
-        bb_advisor = chip_protocol.evaluate_bench_boost(bench_df, gw_list, _chip_moe_fn("bench_boost"))
+        bb_advisor = chip_protocol.evaluate_bench_boost(
+            bench_df_adv, chip_adv_window["gw_list"], _chip_moe_fn("bench_boost"))
     tc_advisor = None
     if any(c.startswith("Triple Captain") for c in available_chip_names):
-        tc_advisor = chip_protocol.evaluate_triple_captain(starters_df, gw_list, _chip_moe_fn("triple_captain"))
+        tc_advisor = chip_protocol.evaluate_triple_captain(
+            starters_df_adv, chip_adv_window["gw_list"], _chip_moe_fn("triple_captain"))
     fh_advisor = None
     if any(c.startswith("Free Hit") for c in available_chip_names) and not squad_df.empty:
         fh_advisor = chip_protocol.evaluate_free_hit(
-            squad_df, gw_list,
-            lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, proj, team_value, gw),
+            squad_df_adv, chip_adv_window["gw_list"],
+            lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, chip_adv_proj, team_value, gw),
             _chip_moe_fn("free_hit"))
 
     # Chip-aware transfer advisory: only from signals already computed
@@ -971,20 +996,24 @@ if pill_items:
 # hover tooltip (same hover-hidden pattern as the header's .info-dot),
 # instead of sitting as permanent visible body text.
 def _advisor_card(label: str, adv: dict | None) -> str:
+    _win = (f"GW{chip_adv_window['gw_list'][0]}-GW{chip_adv_window['gw_list'][-1]}" if chip_adv_window
+            else "the scanned window")
     if adv is None or adv.get("best_gw") is None:
-        return _signal_card(label, "N/A", "used", "—", "no horizon data this run",
-                             "No candidate gameweek available for this chip in the current horizon.")
+        return _signal_card(label, "N/A", "used", "—", "no data this run",
+                             f"No candidate gameweek available for this chip across {_win}.")
     if adv["verdict"].startswith("play_gw"):
         gw = adv["verdict"].split("gw")[1]
         margin = adv.get("margin", adv.get("threshold", 0))
         return _signal_card(
             label, f"PLAY GW{gw}", "play", f"GW{gw}", f"+{margin:.1f} xPts clear of next-best",
-            f"Clears margin-of-error by {margin:.1f} xPts over the next-best GW in your horizon "
+            f"The single best GW across a {_win} scan (Patch 32 — independent of the sidebar's transfer "
+            f"Horizon slider, extended further if a confirmed Double/Blank fell just past it). Clears "
+            f"margin-of-error by {margin:.1f} xPts over the next-best GW in that window "
             f"(threshold {adv['threshold']:.1f} xPts) — Standing Rule #34 margin-of-error gate.",
             "is-play")
     return _signal_card(
         label, "HOLD", "hold", f"GW{adv['best_gw']}", "best candidate, statistical tie",
-        f"No GW in your horizon clears margin-of-error over the others (best candidate GW{adv['best_gw']}, "
+        f"No GW across a {_win} scan clears margin-of-error over the others (best candidate GW{adv['best_gw']}, "
         f"threshold {adv['threshold']:.1f} xPts) — Standing Rule #34. A statistical tie, not a reason to rule "
         f"it out later.")
 
@@ -1101,25 +1130,29 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
         _bb_gw = int(bb_advisor["verdict"].split("gw")[1])
         _bb_col = f"xpts_gw{_bb_gw}"
         with st.expander(f"🛋️ Bench Boost — PLAY GW{_bb_gw}, full 15", expanded=True):
-            if _bb_col in squad_df.columns:
+            if _bb_col in squad_df_adv.columns:
                 cols = ["web_name", "team", "position", "price", _bb_col]
                 rn = {"web_name": "Player", "team": "Team", "position": "Pos", "price": "£m",
                       _bb_col: f"xPts GW{_bb_gw}"}
                 st.caption(f"Clears margin-of-error by {bb_advisor.get('margin', bb_advisor['threshold']):.1f} "
-                           f"xPts — every one of your 15 scores this week, bench included.")
-                st.dataframe(squad_df.sort_values(["position", _bb_col], ascending=[True, False])[cols]
+                           f"xPts — every one of your 15 scores this week, bench included. Found by scanning "
+                           f"GW{chip_adv_window['gw_list'][0]}-GW{chip_adv_window['gw_list'][-1]}, independent of "
+                           f"the sidebar's transfer Horizon.")
+                st.dataframe(squad_df_adv.sort_values(["position", _bb_col], ascending=[True, False])[cols]
                              .rename(columns=rn), hide_index=True, use_container_width=True)
 
     if _tc_play:
         _tc_gw = int(tc_advisor["verdict"].split("gw")[1])
         _tc_col = f"xpts_gw{_tc_gw}"
         with st.expander(f"👑 Triple Captain — PLAY GW{_tc_gw}", expanded=True):
-            if _tc_col in starters_df.columns and not starters_df.empty:
-                cap_row = starters_df.sort_values(_tc_col, ascending=False).iloc[0]
+            if _tc_col in starters_df_adv.columns and not starters_df_adv.empty:
+                cap_row = starters_df_adv.sort_values(_tc_col, ascending=False).iloc[0]
                 st.markdown(f"**{cap_row['web_name']}** ({cap_row.get('team','')}) — "
                             f"{cap_row[_tc_col]:.1f} xPts, tripled to {cap_row[_tc_col]*3:.1f}.")
                 st.caption(f"Clears margin-of-error by {tc_advisor.get('margin', tc_advisor['threshold']):.1f} xPts "
-                           f"over the next-best captaincy GW in your horizon.")
+                           f"over the next-best captaincy GW in a GW{chip_adv_window['gw_list'][0]}-"
+                           f"GW{chip_adv_window['gw_list'][-1]} scan, independent of the sidebar's transfer "
+                           f"Horizon.")
 
 # ---------------------------------------------------------------------------
 # Pitch view

@@ -94,6 +94,36 @@ meta:
                           # separately. This zip (rb_model_app_patch31.zip) is CUMULATIVE and
                           # self-contained: it carries Patch 29 + Patch 30 + Patch 31 together in
                           # one deploy, on top of the manager's current Patch 28 baseline.
+                          # Patch 32 (2026-09-14, same-day manager report against the Patch 31
+                          # screenshot): fixes a real bug the manager caught -- Bench Boost/Triple
+                          # Captain/Free Hit's "which GW" verdicts (chip_protocol.evaluate_bench_
+                          # boost/evaluate_triple_captain/evaluate_free_hit) were being scanned
+                          # across the sidebar's transfer-planning Horizon slider, which defaults to
+                          # 1 GW and is meant for transfer decisions, not chip timing. At horizon=1
+                          # there was only ever one candidate GW, so a "PLAY GW{n}" verdict wasn't
+                          # finding an optimal week, it was just confirming the sole option -- the
+                          # manager's own words: "the parameter for the GW horizon here isn't
+                          # relative [sic, relevant]". Fix: the Chip Advisor now scans its OWN
+                          # window, independent of that slider -- see chip_advisor_horizon: below and
+                          # chip_protocol.chip_advisor_gw_window(). Confirmed with the manager before
+                          # building: an 8-GW base window, auto-extended to the nearest confirmed
+                          # Double/Blank gameweek if one falls just past it (a DGW is definitionally
+                          # the best Bench Boost/Triple Captain week, a BGW the biggest Free Hit
+                          # case), capped at 16 GWs total. Building this also surfaced a second, pre-
+                          # existing bug in chip_protocol.dgw_bgw_flags(): its blank-detection default
+                          # (counts.get(t, 1) == 0) could never be true, since a team with zero
+                          # fixtures that GW simply has no row in the data at all rather than an
+                          # explicit 0 -- so blanks were mechanically undetectable app-wide, not just
+                          # for this new window (Bench Boost/Triple Captain doubles-detection was
+                          # unaffected). Fixed alongside this patch: fixture_counts_by_team() now
+                          # distinguishes "this GW round isn't published in the fixtures feed yet"
+                          # (None) from "this GW is published and this team genuinely has zero
+                          # matches" (a real blank, default corrected to 0) -- see both functions'
+                          # docstrings in chip_protocol.py.
+                          # NOTE (2026-09-14): as with Patch 31, the manager had not yet deployed any
+                          # of Patches 29-31 when this was built. rb_model_app_patch32.zip is
+                          # CUMULATIVE: Patch 29 + 30 + 31 + 32 together, on top of the Patch 28
+                          # baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -487,5 +517,29 @@ chip_advisor_thresholds:
 # -----------------------------------------------------------------------------
 chip_shape_test:
   detection_window_gws: 4
+
+# -----------------------------------------------------------------------------
+# Chip Advisor search window (Patch 32, 2026-09-14 manager report: the Bench
+# Boost/Triple Captain/Free Hit "which GW" verdicts were being scanned across
+# the sidebar's transfer-planning Horizon slider (1-6 GWs, defaults to 1) --
+# at horizon=1 there is only ever one candidate GW, so a "PLAY GW{n}" verdict
+# wasn't actually finding an optimal week, just confirming the sole option.
+# That slider is for transfer decisions and stays exactly as-is; the Chip
+# Advisor now scans its OWN independent window, sized here, same disclosed-
+# EST-extension pattern as chip_advisor_thresholds/chip_shape_test above (the
+# doc specifies the play/hold PROCEDURE via Rule #34 but no window length).
+#   - default_gws: the base scan length from the current planning GW.
+#   - max_extend_gws: if a confirmed Double or Blank gameweek (chip_protocol.
+#     dgw_bgw_flags(), already used elsewhere for advisory notes) falls just
+#     past the default window, the window auto-extends to include it -- a DGW
+#     is definitionally the best Bench Boost/Triple Captain week and a BGW
+#     the biggest Free Hit case, so stopping short of a known one would blind
+#     the advisor to the actual optimal GW. This caps how far that extension
+#     can reach, since Free Hit's verdict requires one full MILP squad
+#     rebuild solve per candidate GW in the window.
+# -----------------------------------------------------------------------------
+chip_advisor_horizon:
+  default_gws: 8
+  max_extend_gws: 16
   structural_overlap_ceiling: 0.7
   spike_overlap_floor: 0.85

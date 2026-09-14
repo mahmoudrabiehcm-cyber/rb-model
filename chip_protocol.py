@@ -60,14 +60,26 @@ def chip_status(boot_chips: list, history_chips: list) -> list[dict]:
 
 
 def fixture_counts_by_team(fixtures: pd.DataFrame, gw_list: list[int]) -> dict:
-    """{gw: {team_id: fixture_count}} for the given gameweeks — 0 = blank,
-    2+ = double. Mechanical, from official fixtures data (Standing Rule #17:
-    only trust this a few gameweeks out, not a season-long projection)."""
-    out = {gw: {} for gw in gw_list}
+    """{gw: {team_id: fixture_count} | None} for the given gameweeks — 0 =
+    blank, 2+ = double. Mechanical, from official fixtures data (Standing
+    Rule #17: only trust this a few gameweeks out, not a season-long
+    projection).
+
+    A gw with NO fixture rows at all gets `None`, not `{}` — the official
+    fixtures feed can legitimately not have that round published yet (a GW
+    well beyond the currently-scheduled fixture list), and that's a
+    different situation from a GW that IS published but where a specific
+    team genuinely has zero matches (a real blank). Collapsing both into the
+    same empty dict is what silently made blank detection impossible in
+    dgw_bgw_flags() below (fixed same patch, 2026-09-14) — every absent team
+    read as "assume 1, normal week" instead of "this team blanks.\""""
+    out: dict[int, dict | None] = {gw: None for gw in gw_list}
     if fixtures is None or fixtures.empty or "event" not in fixtures.columns:
         return out
     for gw in gw_list:
         rows = fixtures[fixtures["event"] == gw]
+        if rows.empty:
+            continue  # this round isn't in the fixtures feed yet — stays None, not a false blank
         counts: dict[int, int] = {}
         for _, r in rows.iterrows():
             for tid in (r.get("team_h"), r.get("team_a")):
@@ -78,13 +90,68 @@ def fixture_counts_by_team(fixtures: pd.DataFrame, gw_list: list[int]) -> dict:
 
 
 def dgw_bgw_flags(fixture_counts: dict, all_team_ids: list[int]) -> dict:
-    """{gw: {"doubles": [team_id,...], "blanks": [team_id,...]}}"""
+    """{gw: {"doubles": [team_id,...], "blanks": [team_id,...]}}. A gw whose
+    fixture_counts entry is None (round not yet published — see
+    fixture_counts_by_team()) reports no doubles/blanks rather than guessing
+    — there's no fixture data yet to mechanically confirm either."""
     out = {}
     for gw, counts in fixture_counts.items():
-        doubles = [t for t in all_team_ids if counts.get(t, 1) >= 2]
-        blanks = [t for t in all_team_ids if counts.get(t, 1) == 0]
+        if counts is None:
+            out[gw] = {"doubles": [], "blanks": []}
+            continue
+        doubles = [t for t in all_team_ids if counts.get(t, 0) >= 2]
+        blanks = [t for t in all_team_ids if counts.get(t, 0) == 0]
         out[gw] = {"doubles": doubles, "blanks": blanks}
     return out
+
+
+def chip_advisor_gw_window(planning_gw: int, fixtures: pd.DataFrame, all_team_ids: list[int],
+                            cfg: dict) -> dict:
+    """Patch 32 (2026-09-14 manager report). The Bench Boost/Triple Captain/
+    Free Hit "which GW" verdicts (evaluate_bench_boost/evaluate_triple_captain/
+    evaluate_free_hit below) need their OWN independent scan window — reusing
+    the sidebar's transfer-planning Horizon slider was the actual bug: at
+    horizon=1 there's only ever one candidate GW, so "PLAY GW{n}" wasn't
+    finding an optimal week, it was just confirming the sole option. The
+    Horizon slider stays exactly as-is for transfer decisions; this builds a
+    separate window sized by chip_advisor_horizon: in model_config.yaml
+    (disclosed EST extension, same pattern as chip_advisor_thresholds/
+    chip_shape_test — Rule #34 specifies the play/hold PROCEDURE, not a scan
+    length).
+
+    Auto-extends past the default window to the nearest confirmed Double or
+    Blank gameweek (via dgw_bgw_flags(), same mechanical fixture-count source
+    already used for the advisory notes elsewhere) — a DGW is definitionally
+    the best Bench Boost/Triple Captain week and a BGW the biggest Free Hit
+    case, so stopping short of a known one would blind the advisor to the
+    real optimal GW. The extension is capped at max_extend_gws, since Free
+    Hit's verdict costs one full MILP rebuild solve per candidate GW.
+
+    Returns {"gw_list": [...], "default_end": gw, "extended_to": gw|None,
+    "extended": bool, "nearest_event_gw": gw|None}."""
+    cah_cfg = cfg.get("chip_advisor_horizon", {})
+    default_gws = max(1, cah_cfg.get("default_gws", 8))
+    max_gws = max(default_gws, cah_cfg.get("max_extend_gws", 16))
+    base_end = planning_gw + default_gws - 1
+    max_end = planning_gw + max_gws - 1
+
+    nearest_event_gw = None
+    if fixtures is not None and not fixtures.empty and all_team_ids:
+        lookahead_gws = list(range(planning_gw, max_end + 1))
+        fixture_counts = fixture_counts_by_team(fixtures, lookahead_gws)
+        flags = dgw_bgw_flags(fixture_counts, all_team_ids)
+        for gw in range(base_end + 1, max_end + 1):
+            f = flags.get(gw, {})
+            if f.get("doubles") or f.get("blanks"):
+                nearest_event_gw = gw
+                break
+
+    extended = nearest_event_gw is not None
+    extend_to = nearest_event_gw if extended else base_end
+    gw_list = list(range(planning_gw, extend_to + 1))
+    return {"gw_list": gw_list, "default_end": base_end,
+            "extended_to": extend_to if extended else None,
+            "extended": extended, "nearest_event_gw": nearest_event_gw}
 
 
 def chip_recommendations(status_rows: list[dict], dgw_bgw: dict, squad_teams: list[int],
