@@ -168,6 +168,61 @@ meta:
                           # transfer recommendation is generated, "from the start."
                           # NOTE (2026-09-14): rb_model_app_patch34.zip is CUMULATIVE: Patch 29 + 30 +
                           # 31 + 32 + 33 + 34 together, on top of the manager's Patch 28 baseline.
+                          # Patch 35 (2026-09-14, same-day manager report against Patch 34's live
+                          # testing): three fixes plus one new check. (1) A real bug found while
+                          # investigating a Foden->Damsgaard recommendation the manager correctly
+                          # flagged as not adding up: recommend._move_row() built every row shown in
+                          # Transfer Recommendations but silently dropped out_code/in_code, which
+                          # disabled BOTH the Patch 33 "if you make this move" preview AND the new
+                          # pitch navigator's "after recommended transfer" toggle every run, regardless
+                          # of whether a transfer was recommended -- fixed by carrying both fields
+                          # through. (2) starting_xi_impact_check() gained two things: a third override
+                          # -- `disrupted_out` -- so a transfer whose outgoing player carries a live
+                          # disruption flag (Rule #41) counts as real impact on its own, independent of
+                          # whether the incoming player reaches the XI (moving on a flagged player has
+                          # value regardless); and `incoming_entered_gws`, so the recommendation can
+                          # state PLAINLY why a move passed ("reaches your starting XI at GW{n}" /
+                          # "outgoing player is disruption-flagged" / "raises your Bench Boost GW{n}
+                          # bench value") instead of a bare net-gain number next to a disconnected
+                          # chip-context paragraph. The "XI shifts" disclosure now excludes the
+                          # incoming transfer target's own name (that's the headline move, not a side
+                          # effect) and is relabeled "Side effect -- already on your bench, no transfer
+                          # needed" so an existing squad player's bench->XI promotion (a knock-on of
+                          # the swap) doesn't read as a second, unexplained transfer candidate.
+                          # (3) New: fpl_engine.free_lineup_fix_check() -- manager's pointed follow-up,
+                          # "we can get Tavernier directly instead of Foden if this required": a
+                          # disruption flag only PARTIALLY discounts a "doubtful" player's projection
+                          # (scaled by live chance-of-playing%, never zeroed -- only a hard-unavailable
+                          # status zeroes it), so a flagged player can still out-score the bench and
+                          # stay in the auto-picked XI, meaning only a transfer can force him out under
+                          # this app's own mechanics. This surfaces the WORST-CASE comparison instead --
+                          # what the best XI looks like if his projection is forced to zero, using only
+                          # the existing squad, no transfer -- shown above Transfer Recommendations
+                          # whenever a flagged player is currently starting. Built, then corrected
+                          # mid-build: the first version tried to find a positive "free gain" by simply
+                          # removing the flagged player and re-solving, which is mathematically
+                          # impossible -- the current best XI was already chosen from every bench
+                          # option available, so removing a choice from an already-optimal pick can
+                          # only match or reduce the total, never improve it. Captioned accordingly as
+                          # a downside-risk check, not a claimed free upgrade -- the model's own
+                          # projection for a doubtful player already reflects its best probability-
+                          # weighted estimate, which is exactly why it isn't zeroed automatically.
+                          # (4) Merged the two separate pitch sections (manager report: "having 2
+                          # pitches like this is too much") into one -- the navigator now lives inside
+                          # the main "Squad · planning for GWn" section instead of a duplicate section
+                          # below it, opening on planning_gw/current-squad by default. Confirmed with
+                          # the manager: every navigated GW shows a simple top-projected-scorer
+                          # armband; the real captaincy-protocol pick (EO-aware) and live-captain
+                          # marker only apply at planning_gw with the current squad, since a full
+                          # captaincy re-run isn't meaningful for a hypothetical future GW or an
+                          # as-if-transferred squad. Wrapped in @st.fragment and the per-GW optimal-
+                          # squad solve is cached (manager report: "the app performance is too slow" --
+                          # Streamlit reruns the ENTIRE page on every widget interaction by default,
+                          # and the navigator's arrows are clicked far more often than any other
+                          # control; a fragment confines a rerun to just this section, and caching
+                          # makes revisiting an already-viewed GW instant instead of a fresh MILP solve).
+                          # NOTE (2026-09-14): rb_model_app_patch35.zip is CUMULATIVE: Patch 29 through
+                          # 35 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

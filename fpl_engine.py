@@ -18,6 +18,8 @@ from typing import Optional
 import pandas as pd
 import yaml
 
+import optimizer as opt
+
 POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 CFG_PATH = Path(__file__).parent / "model_config.yaml"
@@ -581,6 +583,73 @@ def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int
                       f"magnitude threshold).")
 
     return {"players": players, "capped_gw_list": capped_gw_list, "notes": notes}
+
+
+def free_lineup_fix_check(squad_df: pd.DataFrame, disrupted_codes: set, this_gw_col: str) -> dict:
+    """Patch 34 follow-up (2026-09-14 manager report: "we can get Tavernier
+    directly instead of Foden if this required" — i.e. why spend a transfer
+    when an already-owned bench player can do the same job for free?).
+
+    IMPORTANT correction made while building this: the first version of this
+    check simply removed the flagged player and re-solved, expecting to find
+    a positive "free gain." That's mathematically impossible — the current
+    best XI was already chosen from every bench alternative the flagged
+    player is being compared against, so removing an option from an already-
+    optimal choice can only ever match or REDUCE the total, never improve
+    it. If a bench player were genuinely worth more right now, the optimizer
+    would already be starting him, flag or not.
+
+    What this actually answers instead: a disruption flag (Rule #41) only
+    PARTIALLY discounts a "doubtful" player's projection (scaled by his live
+    chance-of-playing%, never zeroed — only a hard-unavailable status zeroes
+    it), so the model's own number for him already reflects a probability-
+    weighted expectation, not a worst case. If the manager's own read is
+    harsher than that live percentage (e.g. they believe he's a guaranteed
+    non-starter), this shows the WORST-CASE comparison: what the best XI
+    looks like if his projection for this GW is forced to zero, and who
+    would start instead, using only the existing squad — no transfer. That's
+    a real, honestly-computed number a manager can weigh against a proposed
+    transfer's net gain, but it is a downside-risk view, not a claimed free
+    upgrade — the model's own projection still says keeping him is the
+    better expectation, which is exactly why it isn't zeroed automatically.
+
+    Returns {"flagged_starting": bool, "player": name|None, "player_code":
+    code|None, "worst_case_replacement": name|None, "worst_case_total":
+    float|None, "current_total": float|None}. "flagged_starting": False
+    means no currently-disrupted player is actually in today's best XI, so
+    there's no worst-case scenario to show. Only the single highest-
+    projected disrupted starter is evaluated if more than one qualifies —
+    the most consequential one, not a combinatorial list."""
+    empty = {"flagged_starting": False, "player": None, "player_code": None,
+             "worst_case_replacement": None, "worst_case_total": None, "current_total": None}
+    if squad_df is None or squad_df.empty or not disrupted_codes or this_gw_col not in squad_df.columns:
+        return empty
+
+    current_xi = opt.best_starting_xi(squad_df, this_gw_col)
+    if current_xi is None:
+        return empty
+    current_total = current_xi["total"]
+    current_codes = set(current_xi["xi"]["code"])
+    starting_disrupted = [c for c in disrupted_codes if c in current_codes]
+    if not starting_disrupted:
+        return empty
+
+    flagged_row = squad_df[squad_df["code"].isin(starting_disrupted)] \
+        .sort_values(this_gw_col, ascending=False).iloc[0]
+    code = flagged_row["code"]
+
+    worst_case_squad = squad_df.copy()
+    worst_case_squad.loc[worst_case_squad["code"] == code, this_gw_col] = 0.0
+    worst_case_xi = opt.best_starting_xi(worst_case_squad, this_gw_col)
+    if worst_case_xi is None:
+        return empty
+    worst_case_codes = set(worst_case_xi["xi"]["code"])
+    entering = worst_case_codes - (current_codes - {code})
+    entering_names = squad_df[squad_df["code"].isin(entering)]["web_name"].tolist()
+
+    return {"flagged_starting": True, "player": flagged_row["web_name"], "player_code": code,
+            "worst_case_replacement": ", ".join(entering_names) if entering_names else None,
+            "worst_case_total": round(worst_case_xi["total"], 2), "current_total": round(current_total, 2)}
 
 
 def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squad_df: pd.DataFrame,

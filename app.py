@@ -938,12 +938,30 @@ with st.spinner("Fetching live data and computing xPts..."):
     if planned_chip_gw is not None and transfer_gw_list and planned_chip_gw <= transfer_gw_list[-1]:
         _chip_capped_gw_list = [g for g in transfer_gw_list if g < planned_chip_gw]
 
+    # Post-Patch-34 follow-up (2026-09-14 manager report on a Foden->Damsgaard
+    # recommendation that made no sense on its face): a disrupted outgoing
+    # player is real justification for a transfer on its own, independent of
+    # whether the incoming player reaches the XI — but the model had no idea
+    # WHICH squad player was flagged, so it couldn't say so. `disruption`
+    # (computed above, Rule #41) is the single source of truth here too.
+    _disrupted_codes = {p["code"] for p in disruption["players"]} if disruption["players"] else None
+
+    # Post-Patch-34 follow-up — "we can get Tavernier directly instead of
+    # Foden if this required": before reaching for a transfer, show what the
+    # worst case already looks like using only players you own (a disruption
+    # flag only partially discounts a player's projection — see
+    # fpl_engine.free_lineup_fix_check()'s docstring for why this is a
+    # downside-risk comparison, not a claimed free upgrade).
+    free_fix = eng.free_lineup_fix_check(squad_df, _disrupted_codes, opt_col) if _disrupted_codes else \
+        {"flagged_starting": False}
+
     transfer_error = None
     try:
         rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
                                            ft["free_transfers"], bank, planning_gw, transfer_gw_list, forced_count,
                                            meaningful_bar_override, set(bench_df["code"]), chip_advisory,
-                                           bb_play_gw=_bb_play_gw, chip_capped_gw_list=_chip_capped_gw_list)
+                                           bb_play_gw=_bb_play_gw, chip_capped_gw_list=_chip_capped_gw_list,
+                                           disrupted_codes=_disrupted_codes)
     except Exception as e:
         transfer_error = str(e)
         rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,
@@ -1234,67 +1252,44 @@ if _wc_active or _bb_play or _tc_play or _fh_play:
                            f"Horizon.")
 
 # ---------------------------------------------------------------------------
-# Pitch view
+# Squad pitch + GW navigator (merged, manager report: "having 2 pitches like
+# this is too much, i need only one on the above and build the navigator
+# inside it"). One pitch section now: it opens on your planning GW with
+# "Current squad" selected — visually identical to the pre-navigator pitch —
+# and arrows/toggle at the top let it move across the WIDER Chip Advisor
+# window (chip_adv_window), aligned with chip strategy, not just the
+# narrower sidebar Horizon. Confirmed with the manager: every navigated GW
+# shows a simple top-projected-scorer armband (not the full captaincy-
+# protocol pick, which is only ever run for planning_gw).
+#
+# Wrapped in st.fragment (manager report: "the app performance is too slow"
+# — Streamlit reruns the ENTIRE page on every widget interaction by default,
+# and arrow clicks are clicked far more often than any other control; a
+# fragment confines a rerun to just this section instead) and the per-GW
+# "optimal squad" solve is cached (@st.cache_data) so revisiting a GW you've
+# already viewed this session is instant instead of re-running a fresh MILP.
+# Re-solves a fresh best_starting_xi() per (GW, toggle-state) pair rather
+# than reusing planning_gw's XI/bench split for every displayed GW — that
+# reuse was a real staleness bug (a GW several weeks out can have a totally
+# different optimal XI once rotation/fixtures/doubles are accounted for).
 # ---------------------------------------------------------------------------
-st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
-if starters_df.empty:
-    st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if this is a brand-new team). "
-               "Transfer targets and captaincy below still use the full player pool.")
-else:
-    pitch_html = '<div class="pitch">'
-    for pos in ["GK", "DEF", "MID", "FWD"]:
-        rows = starters_df[starters_df["position"] == pos].sort_values("xpts_horizon_sum", ascending=False)
-        if rows.empty:
-            continue
-        pitch_html += '<div class="prow">'
-        for _, r in rows.iterrows():
-            rec_cap = cap_pick_row is not None and r["code"] == cap_pick_row["code"]
-            live_cap_diff = (r["code"] == captain_id) and not rec_cap
-            pitch_html += _player_card(r, is_captain=rec_cap, is_live_captain=live_cap_diff,
-                                        xp_col=opt_col, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
-        pitch_html += '</div>'
-    if not bench_df.empty:
-        pitch_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
-        for _, r in bench_df.sort_values("xpts_horizon_sum", ascending=False).iterrows():
-            pitch_html += _player_card(r, xp_col=opt_col, opp_col=f"opp_gw{planning_gw}", gw_list=gw_list)
-        pitch_html += '</div></div>'
-    pitch_html += '</div>'
-    st.markdown(pitch_html, unsafe_allow_html=True)
-    if gw_list and len(gw_list) > 1:
-        st.markdown('<p class="side-note">Fixture ticker: one dot per GW in your horizon — '
-                    'easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the '
-                    'table below.</p>', unsafe_allow_html=True)
-    st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season minutes accrue.</p>',
-                unsafe_allow_html=True)
+@st.cache_data(ttl=900, show_spinner=False)
+def _nav_optimal_squad(_cfg, _proj, team_value, gw):
+    return data_pipeline.solve_free_hit_optimal_squad(_cfg, _proj, team_value, gw)
 
-# Patch 4 — captaincy-on-pitch caption, replacing the old standalone
-# "Captaincy Pick" section. Rendered here (own top-level block, not nested
-# inside the pitch if/else above) so it still shows even in the rare case
-# starters_df is empty but the pool-only captaincy protocol still ran.
-if cap_caption:
-    st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------------------------------
-# Multi-GW pitch navigator (Patch 34, manager request: "i want the team pitch
-# visuals to read the starting xi for each GW and an arrow to move to the
-# next GWs ... with/without applying the transfer recommendations ... this
-# will change rate%, xpts on the top"). Confirmed scope: range = the WIDER
-# Chip Advisor window (chip_adv_window), not the narrower sidebar Horizon —
-# "make it wider and aligned with the chip strategy." Re-solves a fresh
-# best_starting_xi() PER (GW, toggle-state) pair rather than reusing
-# planning_gw's XI/bench split for every displayed GW — that reuse was a
-# real staleness bug (a GW several weeks out can have a totally different
-# optimal XI once rotation/fixtures/doubles are accounted for). Only the
-# projected header tiles (Team Rating %, GW xPts) below move with
-# navigation; Overall rank and Season points stay put everywhere else on the
-# page since those are live actuals from the FPL API, not projections for a
-# future GW — never implied to change by navigating here.
-# ---------------------------------------------------------------------------
-st.markdown('<div class="section-h">GW Navigator</div>', unsafe_allow_html=True)
-_nav_gw_list = chip_adv_window["gw_list"] if chip_adv_window else gw_list
-if not _nav_gw_list or squad_df.empty:
-    st.caption("No GW window available to navigate this run (need at least one active chip signal or a live squad).")
-else:
+@st.fragment
+def _render_pitch_navigator():
+    st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
+    if starters_df.empty:
+        st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if "
+                   "this is a brand-new team). Transfer targets and captaincy below still use the full player pool.")
+        return
+
+    _nav_gw_list = chip_adv_window["gw_list"] if chip_adv_window else gw_list
+    if not _nav_gw_list:
+        _nav_gw_list = [planning_gw]
+
     if "nav_gw_idx" not in st.session_state or st.session_state.get("nav_gw_list") != _nav_gw_list:
         st.session_state.nav_gw_idx = _nav_gw_list.index(planning_gw) if planning_gw in _nav_gw_list else 0
         st.session_state.nav_gw_list = _nav_gw_list
@@ -1303,8 +1298,9 @@ else:
     # "After recommended transfer" needs a single-decision move set (moves) —
     # not the "No hits" chained weekly schedule, where "which week's squad"
     # is itself ambiguous (same scope restriction as the Patch 33 preview
-    # above). Re-projected onto the WIDE chip_adv_proj window, not the
-    # narrower sidebar-horizon `proj`, so it has xPts for every GW in range.
+    # below). Fixed (Patch 34 follow-up): _move_row() previously dropped
+    # out_code/in_code entirely, which silently disabled this toggle every
+    # run regardless of whether a transfer was recommended.
     _nav_moves_df = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
     _nav_can_toggle = (not rec.get("is_weekly_schedule") and not _nav_moves_df.empty
                        and "out_code" in _nav_moves_df.columns and "in_code" in _nav_moves_df.columns)
@@ -1326,7 +1322,8 @@ else:
                              disabled=not _nav_can_toggle,
                              help=None if _nav_can_toggle else
                              "No single-decision transfer this run to preview (either nothing recommended, "
-                             "or a No-hits chained weekly schedule where 'which week's squad' isn't a single answer).")
+                             "or a No-hits chained weekly schedule where 'which week's squad' isn't a single "
+                             "answer).")
     with nav_c2:
         pb1, pb2, pb3 = st.columns([1, 3, 1])
         with pb1:
@@ -1343,57 +1340,91 @@ else:
     nav_gw = _nav_gw_list[st.session_state.nav_gw_idx]
     nav_col = f"xpts_gw{nav_gw}"
     nav_squad = squad_df_adv if (nav_mode == "Current squad" or _nav_squad_after is None) else _nav_squad_after
+    at_planning_gw = (nav_gw == planning_gw and nav_mode == "Current squad")
 
     if nav_col not in nav_squad.columns:
         st.caption(f"No projection data for GW{nav_gw} this run.")
+        return
+    nav_xi_result = opt.best_starting_xi(nav_squad, nav_col)
+    if nav_xi_result is None:
+        st.caption(f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
+        return
+
+    nav_starters = nav_xi_result["xi"]
+    nav_bench = nav_squad[~nav_squad["code"].isin(nav_starters["code"])]
+    nav_gw_xpts = round(nav_xi_result["total"], 1)
+
+    # Header tiles — same mechanic as the main Team Rating % (Patch 20/24):
+    # current squad's best XI (captain doubled, bench autosub-discounted)
+    # over a genuinely unconstrained optimal squad for THIS GW specifically.
+    # Cached (see _nav_optimal_squad above) so revisiting a GW is instant.
+    nav_optimal_result = _nav_optimal_squad(cfg, chip_adv_proj, team_value, nav_gw)
+    nav_current_val = opt.rating_gw_value(nav_squad, nav_col, cfg)["total_realized"]
+    nav_optimal_val = opt.rating_gw_value(nav_optimal_result["squad"], nav_col, cfg)["total_realized"] \
+        if nav_optimal_result else 0.0
+    nav_rating = eng.team_rating_pct(nav_current_val, nav_optimal_val, "")
+
+    nt1, nt2 = st.columns(2)
+    with nt1:
+        st.metric(f"GW{nav_gw} xPts (best XI)", f"{nav_gw_xpts:.1f}")
+    with nt2:
+        st.metric(f"Team Rating % (GW{nav_gw})",
+                  f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—")
+    if not at_planning_gw:
+        st.caption("Projected for this GW only — Overall rank and Season points elsewhere on this page are "
+                   "your live actuals and don't change with navigation.")
+
+    if nav_starters.empty:
+        st.warning("No starting XI data for this GW.")
+        return
+
+    # Armband: at planning_gw with the current squad, use the real
+    # captaincy-protocol pick (EO-aware) and mark your actual live FPL
+    # captain if it differs. Every other navigated GW/toggle state uses a
+    # simple top-projected-scorer armband (confirmed with the manager) — a
+    # full captaincy-protocol re-run isn't meaningful for a hypothetical
+    # future GW or an as-if-transferred squad.
+    if at_planning_gw:
+        nav_cap_code = cap_pick_row["code"] if cap_pick_row is not None else None
     else:
-        nav_xi_result = opt.best_starting_xi(nav_squad, nav_col)
-        if nav_xi_result is None:
-            st.caption(f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
-        else:
-            nav_starters = nav_xi_result["xi"]
-            nav_bench = nav_squad[~nav_squad["code"].isin(nav_starters["code"])]
-            nav_gw_xpts = round(nav_xi_result["total"], 1)
+        nav_cap_code = nav_starters.sort_values(nav_col, ascending=False).iloc[0]["code"]
+    nav_show_ticker = at_planning_gw and gw_list and len(gw_list) > 1
 
-            # Header tiles — same mechanic as the main Team Rating % (Patch 20/24):
-            # current squad's best XI (captain doubled, bench autosub-discounted)
-            # over a genuinely unconstrained optimal squad for THIS GW specifically.
-            nav_optimal_result = data_pipeline.solve_free_hit_optimal_squad(cfg, chip_adv_proj, team_value, nav_gw)
-            nav_current_val = opt.rating_gw_value(nav_squad, nav_col, cfg)["total_realized"]
-            nav_optimal_val = opt.rating_gw_value(nav_optimal_result["squad"], nav_col, cfg)["total_realized"] \
-                if nav_optimal_result else 0.0
-            nav_rating = eng.team_rating_pct(nav_current_val, nav_optimal_val, "")
+    nav_html = '<div class="pitch">'
+    for pos in ["GK", "DEF", "MID", "FWD"]:
+        rows = nav_starters[nav_starters["position"] == pos].sort_values(nav_col, ascending=False)
+        if rows.empty:
+            continue
+        nav_html += '<div class="prow">'
+        for _, r in rows.iterrows():
+            rec_cap = nav_cap_code is not None and r["code"] == nav_cap_code
+            live_cap_diff = at_planning_gw and (r["code"] == captain_id) and not rec_cap
+            nav_html += _player_card(r, is_captain=rec_cap, is_live_captain=live_cap_diff,
+                                      xp_col=nav_col, opp_col=f"opp_gw{nav_gw}",
+                                      gw_list=gw_list if nav_show_ticker else None)
+        nav_html += '</div>'
+    if not nav_bench.empty:
+        nav_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
+        for _, r in nav_bench.sort_values(nav_col, ascending=False).iterrows():
+            nav_html += _player_card(r, xp_col=nav_col, opp_col=f"opp_gw{nav_gw}",
+                                      gw_list=gw_list if nav_show_ticker else None)
+        nav_html += '</div></div>'
+    nav_html += '</div>'
+    st.markdown(nav_html, unsafe_allow_html=True)
+    if nav_show_ticker:
+        st.markdown('<p class="side-note">Fixture ticker: one dot per GW in your horizon — '
+                    'easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the '
+                    'table below.</p>', unsafe_allow_html=True)
+    st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season '
+                'minutes accrue.</p>', unsafe_allow_html=True)
+    if at_planning_gw and cap_caption:
+        # Patch 4 — captaincy-on-pitch caption, only meaningful at
+        # planning_gw where the real captaincy protocol (not the simple
+        # top-scorer armband) actually ran.
+        st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
 
-            nt1, nt2 = st.columns(2)
-            with nt1:
-                st.metric(f"GW{nav_gw} xPts (best XI)", f"{nav_gw_xpts:.1f}")
-            with nt2:
-                st.metric(f"Team Rating % (GW{nav_gw})",
-                          f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—")
-            st.caption("Projected for this GW only — Overall rank and Season points elsewhere on this page are "
-                       "your live actuals and don't change with navigation.")
 
-            if nav_starters.empty:
-                st.warning("No starting XI data for this GW.")
-            else:
-                nav_cap_row = nav_starters.sort_values(nav_col, ascending=False).iloc[0]
-                nav_html = '<div class="pitch">'
-                for pos in ["GK", "DEF", "MID", "FWD"]:
-                    rows = nav_starters[nav_starters["position"] == pos].sort_values(nav_col, ascending=False)
-                    if rows.empty:
-                        continue
-                    nav_html += '<div class="prow">'
-                    for _, r in rows.iterrows():
-                        nav_html += _player_card(r, is_captain=(r["code"] == nav_cap_row["code"]),
-                                                  xp_col=nav_col, opp_col=f"opp_gw{nav_gw}")
-                    nav_html += '</div>'
-                if not nav_bench.empty:
-                    nav_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
-                    for _, r in nav_bench.sort_values(nav_col, ascending=False).iterrows():
-                        nav_html += _player_card(r, xp_col=nav_col, opp_col=f"opp_gw{nav_gw}")
-                    nav_html += '</div></div>'
-                nav_html += '</div>'
-                st.markdown(nav_html, unsafe_allow_html=True)
+_render_pitch_navigator()
 
 # ---------------------------------------------------------------------------
 # GW Breakdown table (Patch 2) — opponent + per-GW xPts split out instead of
@@ -1424,6 +1455,22 @@ if horizon > 1 and not squad_df.empty:
 # Transfer recommendations
 # ---------------------------------------------------------------------------
 st.markdown('<div class="section-h">Transfer Recommendations</div>', unsafe_allow_html=True)
+
+# Post-Patch-34 follow-up — free worst-case comparison, shown before any
+# transfer recommendation: if a flagged squad player is currently starting,
+# this is what your best XI looks like if he truly scores zero, using only
+# players you already own. Deliberately captioned as a downside-risk check,
+# not "free upgrade" — the model's own projection for him already reflects
+# a probability-weighted expectation (see the function's docstring); this is
+# for when the manager's own read is harsher than that.
+if free_fix.get("flagged_starting"):
+    st.markdown(f'<div class="tx-preview">⚠️ Worst case if <b>{free_fix["player"]}</b> scores 0 this GW '
+                f'(currently started; his own projection already reflects a live chance-of-playing discount, '
+                f'this is the harsher case): best XI with <b>{free_fix["worst_case_replacement"] or "—"}</b> '
+                f'instead — <b>{free_fix["worst_case_total"]:.1f}</b> xPts (vs {free_fix["current_total"]:.1f} '
+                f'if he plays at his current projection). No transfer needed for this — compare against any '
+                f'transfer recommended below.</div>', unsafe_allow_html=True)
+
 if transfer_error:
     st.error(f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
              f"is unaffected — try Run Model again, and if it repeats, this is worth reporting with that message.")
@@ -1553,7 +1600,8 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
         if target_choice[0] is not None:
             target_eval = recommend.evaluate_target_transfer(
                 squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
-                planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"))
+                planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
+                disrupted_codes=_disrupted_codes)
             st.markdown("**Target player scenario**")
             if target_eval["summary"]:
                 for line in target_eval["summary"]:

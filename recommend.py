@@ -128,7 +128,9 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
 
 def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, in_codes: set,
                               gw_list: list[int], cfg: dict, bb_play_gw: int | None = None,
-                              capped_gw_list: list[int] | None = None) -> dict:
+                              capped_gw_list: list[int] | None = None,
+                              out_codes: set | None = None,
+                              disrupted_codes: set | None = None) -> dict:
     """Patch 34 (manager report, 2026-09-14): `realized_horizon_value()`
     already discounts a bench player down to P(autosub) x points (Standing
     Rule #12) rather than their full "if they started" number — but a swap
@@ -148,18 +150,32 @@ def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, i
     transfer, not just a disrupted player — else the full `gw_list`), and
     checks whether any TRANSFERRED-IN player actually appears in that GW's
     starting XI. If none do across the whole window, `has_impact` is False
-    UNLESS `bb_play_gw` (a Bench Boost "play" verdict gw already inside this
-    window) is provided AND the swap raises that specific GW's total bench
-    value (raw, not discounted — Bench Boost bypasses the autosub
-    uncertainty entirely, so bench value is real value that week).
+    UNLESS one of two overrides applies:
+    - `bb_play_gw` (a Bench Boost "play" verdict gw already inside this
+      window): the swap raises that specific GW's total bench value (raw,
+      not discounted — Bench Boost bypasses the autosub uncertainty
+      entirely, so bench value is real value that week).
+    - `disrupted_codes` (2026-09-14 manager report — a Foden→Damsgaard swap
+      wasn't vetoed, and it turned out the real reason was that Foden was
+      disruption-flagged, but nothing said so): if `out_codes` intersects
+      `disrupted_codes`, moving on a flagged player has real value on its
+      own — a live status/data-quality flag means his own currently-
+      discounted-but-nonzero projection is optimistic, so removing him
+      isn't gated behind the incoming player alone reaching the XI.
 
     Returns {"has_impact": bool, "shifts": [{"gw", "in": [names], "out":
-    [names]}, ...], "bench_boost_gw": gw|None} — `shifts` lists every GW
-    where XI membership actually changes (not just the transferred players —
-    a knock-on reshuffle counts too), for a minimal "XI shifts: X in GW{n}"
-    disclosure line; `bench_boost_gw` is set only when the Bench Boost
-    override is what actually saved the swap from a "no impact" verdict."""
-    empty = {"has_impact": True, "shifts": [], "bench_boost_gw": None}  # fail-open: never block on missing data
+    [names]}, ...], "bench_boost_gw": gw|None, "incoming_entered_gws":
+    [gw, ...], "disrupted_out": bool}. `shifts` lists every GW where XI
+    membership changes for an EXISTING squad player as a side effect of the
+    swap (the transferred-in player(s) themselves are excluded from this
+    list — manager report: their own arrival is the headline move, not a
+    side effect, and silently including/excluding them read as
+    inconsistent); `incoming_entered_gws` lists the GWs where a transferred-
+    in player actually started, for a "reaches your XI at GW{n}" disclosure;
+    `bench_boost_gw`/`disrupted_out` name which override, if any, is what
+    actually saved the swap from a "no impact" verdict."""
+    empty = {"has_impact": True, "shifts": [], "bench_boost_gw": None,
+             "incoming_entered_gws": [], "disrupted_out": False}  # fail-open: never block on missing data
     if old_squad is None or old_squad.empty or new_squad is None or new_squad.empty or not gw_list:
         return empty
     check_gws = capped_gw_list if capped_gw_list is not None else gw_list
@@ -167,11 +183,16 @@ def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, i
         # entire horizon capped away (e.g. a rebuild chip lands immediately) —
         # nothing left to check, so there's genuinely nothing this transfer
         # can impact within the checked window.
-        return {"has_impact": False, "shifts": [], "bench_boost_gw": None}
+        return {"has_impact": False, "shifts": [], "bench_boost_gw": None,
+                "incoming_entered_gws": [], "disrupted_out": False}
+
+    in_codes_set = set(in_codes)
+    disrupted_out = bool(out_codes and disrupted_codes and (set(out_codes) & set(disrupted_codes)))
 
     shifts = []
-    any_impact = False
+    any_impact = disrupted_out
     bb_gw_hit = None
+    incoming_entered_gws = []
     for gw in check_gws:
         col = f"xpts_gw{gw}"
         if col not in old_squad.columns or col not in new_squad.columns:
@@ -182,10 +203,15 @@ def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, i
         new_codes = set(new_xi["code"]) if new_xi is not None else set()
         entering = new_codes - old_codes
         leaving = old_codes - new_codes
-        if entering & set(in_codes):
+        if entering & in_codes_set:
             any_impact = True
-        if entering or leaving:
-            in_names = new_squad[new_squad["code"].isin(entering)]["web_name"].tolist()
+            incoming_entered_gws.append(gw)
+        # Side-effect disclosure only — excludes the transferred-in player(s)
+        # themselves, so this only ever names an EXISTING squad player whose
+        # bench/XI status changed as a knock-on of the swap.
+        side_entering = entering - in_codes_set
+        if side_entering or leaving:
+            in_names = new_squad[new_squad["code"].isin(side_entering)]["web_name"].tolist()
             out_names = old_squad[old_squad["code"].isin(leaving)]["web_name"].tolist()
             if in_names or out_names:
                 shifts.append({"gw": gw, "in": in_names, "out": out_names})
@@ -195,7 +221,8 @@ def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, i
             if new_bench_sum > old_bench_sum + 0.5:  # small materiality guard against float noise
                 any_impact = True
                 bb_gw_hit = gw
-    return {"has_impact": any_impact, "shifts": shifts, "bench_boost_gw": bb_gw_hit}
+    return {"has_impact": any_impact, "shifts": shifts, "bench_boost_gw": bb_gw_hit,
+            "incoming_entered_gws": incoming_entered_gws, "disrupted_out": disrupted_out}
 
 
 def best_starting_xi_safe(squad: pd.DataFrame, gw_col: str):
@@ -259,7 +286,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             current_gw: int, gw_list: list[int],
                             meaningful_bar: float | None = None,
                             chip_advisory: str | None = None,
-                            bb_play_gw: int | None = None) -> dict:
+                            bb_play_gw: int | None = None,
+                            disrupted_codes: set | None = None) -> dict:
     """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
@@ -371,8 +399,10 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 continue
             c = candidates[k]
             in_codes = set(c["squad"]["code"]) - out_codes_all
+            out_codes_this = out_codes_all - set(c["squad"]["code"])
             check = starting_xi_impact_check(sim_squad, c["squad"], in_codes, remaining_gws, cfg,
-                                              bb_play_gw=bb_play_gw)
+                                              bb_play_gw=bb_play_gw, out_codes=out_codes_this,
+                                              disrupted_codes=disrupted_codes)
             week_impact[k] = check
             if not check["has_impact"]:
                 week_bench_only.append(k)
@@ -410,12 +440,22 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             move_bits = ", ".join(
                 f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
                 for p in pairs)
-            shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}"
-                          for s in week_impact.get(chosen_k, {}).get("shifts", []) if s["in"]]
-            shift_txt = f" XI shifts: {'; '.join(shift_bits)}." if shift_bits else ""
+            week_check = week_impact.get(chosen_k, {})
+            reason_bits = []
+            if week_check.get("incoming_entered_gws"):
+                gws_txt = ", ".join(f"GW{g}" for g in week_check["incoming_entered_gws"])
+                reason_bits.append(f"reaches your starting XI at {gws_txt}")
+            if week_check.get("disrupted_out"):
+                reason_bits.append("outgoing player is disruption-flagged (Rule #41)")
+            if week_check.get("bench_boost_gw"):
+                reason_bits.append(f"raises your GW{week_check['bench_boost_gw']} Bench Boost bench value")
+            reason_txt = f" Why: {'; '.join(reason_bits)}." if reason_bits else ""
+            shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in week_check.get("shifts", []) if s["in"]]
+            shift_txt = (f" Side effect (already on your bench, no transfer needed): "
+                         f"{'; '.join(shift_bits)}." if shift_bits else "")
             week_summary = (f"GW{gw}: {move_bits} (free) — net {chosen['net_gain']:+.1f} xPts over the "
                              f"remaining horizon. {ft_bank - ft_used} FT left banked → {ft_after} for "
-                             f"GW{gw + 1}.{shift_txt}")
+                             f"GW{gw + 1}.{reason_txt}{shift_txt}")
             sim_squad = chosen["squad"]
 
         if data_gap_note:
@@ -463,7 +503,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        bench_codes: set | None = None,
                        chip_advisory: str | None = None,
                        bb_play_gw: int | None = None,
-                       chip_capped_gw_list: list[int] | None = None) -> dict:
+                       chip_capped_gw_list: list[int] | None = None,
+                       disrupted_codes: set | None = None) -> dict:
     """Patch 3 — joint multi-transfer optimization (Standing Rules #28/#30/
     #34/#35/#36), replacing the old pairwise best-single-swap-per-slot
     heuristic entirely:
@@ -562,7 +603,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     if hit_stance == "No hits" and horizon_n > 1:
         return plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank,
                                        current_gw, gw_list, meaningful_bar, chip_advisory,
-                                       bb_play_gw=bb_play_gw)
+                                       bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes)
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
     # anywhere in these columns turns a pandas comparison into a TypeError
@@ -689,12 +730,14 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                 return True
             c = candidates[k]
             in_codes = set(c["squad"]["code"]) - out_codes_all
+            out_codes_this = out_codes_all - set(c["squad"]["code"])
             # Uses the FULL gw_list here, not chip_capped_gw_list — that cap
             # is reserved for the separate "Chip-aware alt" comparison below
             # (a genuinely different question: "is this still worth it if a
             # rebuild chip is coming", not "does it ever have XI impact").
             check = starting_xi_impact_check(squad_df, c["squad"], in_codes, gw_list, cfg,
-                                              bb_play_gw=bb_play_gw)
+                                              bb_play_gw=bb_play_gw, out_codes=out_codes_this,
+                                              disrupted_codes=disrupted_codes)
             impact_notes[k] = check
             if not check["has_impact"]:
                 bench_only_ks.append(k)
@@ -783,14 +826,35 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                         f"xPts margin-of-error band (Rules #34/#35). Scored on realized (bench-discounted) "
                         f"value per Standing Rule #12.")
 
-            # Patch 34 — minimal "XI shifts" disclosure: which players'
-            # starting-XI membership actually changes, and when, rather than
-            # re-showing the whole squad (manager request: "just mentioning
-            # the changes not the full squad").
+            # Patch 34 (2026-09-14 manager report: "why the app still
+            # recommending the transfer" when the incoming player didn't
+            # visibly reach the XI) — state WHY this move cleared the
+            # Starting-XI Impact Check, right on the recommendation itself,
+            # instead of leaving it to a disconnected chip-context paragraph
+            # or an unexplained side-effect name.
             chosen_check = impact_notes.get(chosen_k, {})
+            reason_bits = []
+            if chosen_check.get("incoming_entered_gws"):
+                gws_txt = ", ".join(f"GW{g}" for g in chosen_check["incoming_entered_gws"])
+                reason_bits.append(f"reaches your starting XI at {gws_txt}")
+            if chosen_check.get("disrupted_out"):
+                reason_bits.append("the outgoing player is disruption-flagged (Rule #41) — moving him on has "
+                                    "value on its own, independent of whether the incoming player himself starts")
+            if chosen_check.get("bench_boost_gw"):
+                reason_bits.append(f"raises your GW{chosen_check['bench_boost_gw']} Bench Boost bench value "
+                                    f"(full value that week, not autosub-discounted)")
+            if reason_bits:
+                summary.append(f"Why this counts as a real change: {'; '.join(reason_bits)}.")
+
+            # Minimal "XI shifts" disclosure: an EXISTING squad player (never
+            # the incoming transfer target — that's the headline move above,
+            # not a side effect) whose bench/XI status changes as a knock-on
+            # of this swap, rather than re-showing the whole squad (manager
+            # request: "just mentioning the changes not the full squad").
             shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in chosen_check.get("shifts", []) if s["in"]]
             if shift_bits:
-                summary.append(f"XI shifts: {'; '.join(shift_bits)}.")
+                summary.append(f"Side effect — already on your bench, no transfer needed: "
+                                f"{'; '.join(shift_bits)}.")
 
             # Patch 34 — chip-aware alt: if a planned full-rebuild chip GW
             # truncates this horizon (chip_capped_gw_list), re-check whether
@@ -856,7 +920,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
 def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                               profile_name: str, hit_stance: str, free_transfers: int,
                               bank: float, current_gw: int, gw_list: list[int],
-                              target_code, default_net_gain: float | None = None) -> dict:
+                              target_code, default_net_gain: float | None = None,
+                              disrupted_codes: set | None = None) -> dict:
     """Manager-directed what-if (Patch 6): "if I bring THIS specific player
     in, is it worth it?" — auto-solving the cheapest legal way to fund him
     (`optimizer.solve_squad`'s `must_include_codes`), scored the exact same
@@ -1067,15 +1132,25 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     # chosen target, so the model states what it found rather than
     # overriding an explicit choice with Roll).
     in_codes_scenario = set(chosen["squad"]["code"]) - out_codes_all
-    scenario_check = starting_xi_impact_check(squad_df, chosen["squad"], in_codes_scenario, gw_list, cfg)
+    out_codes_scenario = out_codes_all - set(chosen["squad"]["code"])
+    scenario_check = starting_xi_impact_check(squad_df, chosen["squad"], in_codes_scenario, gw_list, cfg,
+                                               out_codes=out_codes_scenario, disrupted_codes=disrupted_codes)
     if not scenario_check["has_impact"]:
         summary.append(f"Note: {target_row['web_name']} isn't projected to reach your starting XI at any point "
                         f"in this horizon — this net gain is entirely bench-autosub value (Standing Rule #12), "
                         f"not a real week-to-week scoring change.")
     else:
+        reason_bits = []
+        if scenario_check.get("incoming_entered_gws"):
+            gws_txt = ", ".join(f"GW{g}" for g in scenario_check["incoming_entered_gws"])
+            reason_bits.append(f"{target_row['web_name']} reaches your starting XI at {gws_txt}")
+        if scenario_check.get("disrupted_out"):
+            reason_bits.append("the outgoing player is disruption-flagged (Rule #41)")
+        if reason_bits:
+            summary.append(f"Why this counts as a real change: {'; '.join(reason_bits)}.")
         shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in scenario_check.get("shifts", []) if s["in"]]
         if shift_bits:
-            summary.append(f"XI shifts: {'; '.join(shift_bits)}.")
+            summary.append(f"Side effect — already on your bench, no transfer needed: {'; '.join(shift_bits)}.")
 
     if chosen["actual_k"] > 1:
         # Say WHY more than one swap was needed using the diagnostic actually
@@ -1152,8 +1227,10 @@ def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dic
     so splitting it across rows would misstate what any single row cost on
     its own. The accompanying plan-text line states the batch total once."""
     return {
-        "out": p["out"], "out_team": p["out_team"], "out_price": p["out_price"], "out_xm": p.get("out_xm"),
-        "in": p["in"], "in_team": p["in_team"], "in_price": p["in_price"], "in_xm": p.get("in_xm"),
+        "out": p["out"], "out_code": p["out_code"], "out_team": p["out_team"], "out_price": p["out_price"],
+        "out_xm": p.get("out_xm"),
+        "in": p["in"], "in_code": p["in_code"], "in_team": p["in_team"], "in_price": p["in_price"],
+        "in_xm": p.get("in_xm"),
         "position": p["position"],
         "xpts_gain": round(p["in_xpts"] - p["out_xpts"], 2),
         "xpts_gain_this_gw": round(p["in_gw"] - p["out_gw"], 2),
