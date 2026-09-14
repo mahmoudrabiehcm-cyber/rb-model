@@ -525,6 +525,14 @@ def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int
         else pd.Series(False, index=squad_df.index)
     disrupted = squad_df[(squad_df["status"] != "a") | rescue_col].copy()
     if disrupted.empty:
+        # Patch 33 (2026-09-14 manager report: "nothing changed when choosing
+        # anything here, what should be expected!!") — a manager-set planned
+        # chip GW with literally nothing to disclose used to be a silent
+        # no-op indistinguishable from a bug. Now it always says something.
+        if planned_chip_gw is not None:
+            return {**empty, "notes": [f"Next planned full-rebuild chip GW set to GW{planned_chip_gw} — no "
+                                        f"currently disrupted squad player this run, so there's nothing for it "
+                                        f"to cap (Standing Rule #41 only acts on a flagged player)."]}
         return empty
 
     players = []
@@ -555,6 +563,16 @@ def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int
                           f"(was GW{gw_list[-1]}) for the flagged player(s) above -- the planned GW{planned_chip_gw} "
                           f"rebuild chip means gains projected past it aren't a real reason to move them now "
                           f"(Standing Rule #41).")
+        else:
+            # Patch 33 — same "always say something" fix as the no-disrupted-
+            # player case above, for the other silent-no-op path: a planned
+            # chip GW past this run's transfer horizon has nothing to cap
+            # YET, which is correct, but was previously indistinguishable
+            # from the setting being ignored/broken.
+            notes.append(f"Next planned full-rebuild chip GW set to GW{planned_chip_gw} — outside this run's "
+                          f"GW{gw_list[0]}-GW{gw_list[-1]} transfer horizon, so it has no effect on this run "
+                          f"(nothing to cap yet). It'll start capping the horizon for the flagged player(s) above "
+                          f"once your Horizon slider reaches GW{planned_chip_gw}.")
 
     if price_drop_names:
         notes.append(f"Price-drop-flow override (Rule #24): {', '.join(price_drop_names)} current transfers-out "

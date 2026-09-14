@@ -124,6 +124,50 @@ meta:
                           # of Patches 29-31 when this was built. rb_model_app_patch32.zip is
                           # CUMULATIVE: Patch 29 + 30 + 31 + 32 together, on top of the Patch 28
                           # baseline.
+                          # Patch 33 (2026-09-14, same-day manager report against three UI/UX
+                          # problems on the Patch 31/32 screenshots): (1) the "Next planned full-
+                          # rebuild chip GW" sidebar setting could silently do nothing with no
+                          # feedback -- fpl_engine.disruption_check() now always returns an
+                          # explanatory note when the setting is populated, even when there's no
+                          # currently-disrupted player to cap or the planned GW falls outside this
+                          # run's transfer horizon. (2) Chip Signal cards (Bench Boost/Triple
+                          # Captain/Free Hit) showed a bare "PLAY GW{n}" verdict with no visible
+                          # reasoning -- app.py's _signal_card() now renders as an expand-in-place
+                          # <details>/<summary> with a CSS-only per-GW mini bar chart of the scanned
+                          # values, winning GW highlighted (manager's confirmed choice over a modal
+                          # or separate page). (3) Transfer Recommendations didn't disclose incoming-
+                          # player rotation risk or the post-transfer Team Rating%/xPts preview --
+                          # recommend._xm_badge() adds an inline "nailed / rotation risk / bench risk"
+                          # badge (thresholds anchored on xm_heuristic.confirmed_current_season_
+                          # start_floor) to both legs of every transfer recommendation, and the
+                          # existing post-transfer preview (Patch 23) was promoted out of the
+                          # collapsed "Why" expander to always-visible directly under each
+                          # recommendation (manager's confirmed choice, via .tx-preview CSS class).
+                          # Patch 34 (2026-09-14, same-day manager report following a Foden ->
+                          # Damsgaard transfer recommendation the manager correctly identified as
+                          # illusory): a transfer whose entire net gain is bench-autosub-discounted
+                          # value (Standing Rule #12) with the incoming player never actually
+                          # entering the best starting XI across the checked horizon is not a real
+                          # week-to-week scoring change -- recommend.starting_xi_impact_check() now
+                          # gates every transfer-recommendation code path (suggest_transfers(),
+                          # plan_transfer_schedule(), evaluate_target_transfer()) on this, vetoing
+                          # bench-only swaps back to Roll, UNLESS a chip-strategy override applies:
+                          # (a) Bench Boost override -- if a Bench Boost "play" verdict GW falls
+                          # inside the checked window and the swap raises that GW's RAW (undiscounted)
+                          # bench total by a real margin, it counts as genuine impact and the swap
+                          # PROMOTES to the primary recommendation outright, since Bench Boost counts
+                          # full bench value that week; (b) planned-rebuild-chip truncation -- if the
+                          # "Next planned full-rebuild chip GW" setting falls inside the transfer
+                          # horizon, a separate "Chip-aware alt: Roll" comparison is computed against
+                          # just the pre-rebuild window and surfaced alongside the primary verdict
+                          # when it would flip the answer. Per the manager's explicit "minimum words"
+                          # instruction, disclosure uses a terse "XI shifts: {player} in GW{n}" line
+                          # naming only the players whose starting-XI membership changes and when,
+                          # never the full squad. Confirmed scope with the manager: applies across the
+                          # exact sidebar Horizon (not a separately-chosen window) and everywhere a
+                          # transfer recommendation is generated, "from the start."
+                          # NOTE (2026-09-14): rb_model_app_patch34.zip is CUMULATIVE: Patch 29 + 30 +
+                          # 31 + 32 + 33 + 34 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

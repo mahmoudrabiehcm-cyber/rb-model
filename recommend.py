@@ -57,8 +57,10 @@ def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: s
                 "position": pos,
                 "out_code": o["code"], "out": o["web_name"], "out_team": o["team"], "out_price": o["price"],
                 "out_xpts": o.get("xpts_horizon_sum", 0.0) or 0.0, "out_gw": 0 if pd.isna(o_gw) else o_gw,
+                "out_xm": o.get("xm"),
                 "in_code": i["code"], "in": i["web_name"], "in_team": i["team"], "in_price": i["price"],
                 "in_xpts": i.get("xpts_horizon_sum", 0.0) or 0.0, "in_gw": 0 if pd.isna(i_gw) else i_gw,
+                "in_xm": i.get("xm"),
                 "in_eo": i.get("selected_by_percent"),
                 "setpiece_flag": bool(i.get("setpiece_flag", False)),
             })
@@ -124,6 +126,89 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
     return result
 
 
+def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, in_codes: set,
+                              gw_list: list[int], cfg: dict, bb_play_gw: int | None = None,
+                              capped_gw_list: list[int] | None = None) -> dict:
+    """Patch 34 (manager report, 2026-09-14): `realized_horizon_value()`
+    already discounts a bench player down to P(autosub) x points (Standing
+    Rule #12) rather than their full "if they started" number — but a swap
+    whose ENTIRE net gain comes from that small autosub-chance discount,
+    with the incoming player never actually entering the starting XI at any
+    point in the horizon, still cleared the materiality/margin-of-error bars
+    as if it were a real week-to-week scoring change. It isn't: it only ever
+    pays off if an autosub happens to fire. The manager's own framing: if a
+    transfer's incoming player "won't make it to the starting XI" across the
+    whole horizon, saving the transfer is the right call, not spending it on
+    a swap that may never actually move your score.
+
+    Solves the best starting XI for OLD and NEW squads at every GW in the
+    checked window (`capped_gw_list` if given — e.g. truncated before a
+    manager-planned full-rebuild chip, same idea as
+    `fpl_engine.disruption_check()`'s horizon cap, generalized here to any
+    transfer, not just a disrupted player — else the full `gw_list`), and
+    checks whether any TRANSFERRED-IN player actually appears in that GW's
+    starting XI. If none do across the whole window, `has_impact` is False
+    UNLESS `bb_play_gw` (a Bench Boost "play" verdict gw already inside this
+    window) is provided AND the swap raises that specific GW's total bench
+    value (raw, not discounted — Bench Boost bypasses the autosub
+    uncertainty entirely, so bench value is real value that week).
+
+    Returns {"has_impact": bool, "shifts": [{"gw", "in": [names], "out":
+    [names]}, ...], "bench_boost_gw": gw|None} — `shifts` lists every GW
+    where XI membership actually changes (not just the transferred players —
+    a knock-on reshuffle counts too), for a minimal "XI shifts: X in GW{n}"
+    disclosure line; `bench_boost_gw` is set only when the Bench Boost
+    override is what actually saved the swap from a "no impact" verdict."""
+    empty = {"has_impact": True, "shifts": [], "bench_boost_gw": None}  # fail-open: never block on missing data
+    if old_squad is None or old_squad.empty or new_squad is None or new_squad.empty or not gw_list:
+        return empty
+    check_gws = capped_gw_list if capped_gw_list is not None else gw_list
+    if not check_gws:
+        # entire horizon capped away (e.g. a rebuild chip lands immediately) —
+        # nothing left to check, so there's genuinely nothing this transfer
+        # can impact within the checked window.
+        return {"has_impact": False, "shifts": [], "bench_boost_gw": None}
+
+    shifts = []
+    any_impact = False
+    bb_gw_hit = None
+    for gw in check_gws:
+        col = f"xpts_gw{gw}"
+        if col not in old_squad.columns or col not in new_squad.columns:
+            continue
+        old_xi = best_starting_xi_safe(old_squad, col)
+        new_xi = best_starting_xi_safe(new_squad, col)
+        old_codes = set(old_xi["code"]) if old_xi is not None else set()
+        new_codes = set(new_xi["code"]) if new_xi is not None else set()
+        entering = new_codes - old_codes
+        leaving = old_codes - new_codes
+        if entering & set(in_codes):
+            any_impact = True
+        if entering or leaving:
+            in_names = new_squad[new_squad["code"].isin(entering)]["web_name"].tolist()
+            out_names = old_squad[old_squad["code"].isin(leaving)]["web_name"].tolist()
+            if in_names or out_names:
+                shifts.append({"gw": gw, "in": in_names, "out": out_names})
+        if bb_play_gw is not None and gw == bb_play_gw:
+            old_bench_sum = old_squad[~old_squad["code"].isin(old_codes)][col].fillna(0).sum()
+            new_bench_sum = new_squad[~new_squad["code"].isin(new_codes)][col].fillna(0).sum()
+            if new_bench_sum > old_bench_sum + 0.5:  # small materiality guard against float noise
+                any_impact = True
+                bb_gw_hit = gw
+    return {"has_impact": any_impact, "shifts": shifts, "bench_boost_gw": bb_gw_hit}
+
+
+def best_starting_xi_safe(squad: pd.DataFrame, gw_col: str):
+    """Thin wrapper so `starting_xi_impact_check()` doesn't need to import
+    `optimizer` directly (avoids a circular-import risk — `optimizer.py`
+    doesn't import `recommend.py`, but keeping the boundary one-directional
+    is cheap insurance) and doesn't crash on a missing/empty XI result."""
+    if gw_col not in squad.columns:
+        return None
+    result = opt.best_starting_xi(squad, gw_col)
+    return result["xi"] if result else None
+
+
 def apply_style_to_wildcard_squad(current_squad: pd.DataFrame, rebuild_squad: pd.DataFrame,
                                    full_pool: pd.DataFrame, profile_name: str, cfg: dict,
                                    this_gw_col: str) -> pd.DataFrame:
@@ -173,7 +258,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
                             meaningful_bar: float | None = None,
-                            chip_advisory: str | None = None) -> dict:
+                            chip_advisory: str | None = None,
+                            bb_play_gw: int | None = None) -> dict:
     """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
@@ -272,6 +358,25 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         best_net = max(c["net_gain"] for c in candidates.values())
         tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
         viable = [k for k in tied_ks if k == 0 or candidates[k]["net_gain"] >= meaningful_bar]
+
+        # Patch 34 — same Starting-XI Impact Check as suggest_transfers(),
+        # applied per week ("everywhere", per manager request): a candidate
+        # that only clears the bar via bench-autosub value with no
+        # transferred-in player reaching the XI in the remaining weeks (and
+        # no Bench Boost override) isn't a real weekly scoring change.
+        week_impact: dict[int, dict] = {}
+        week_bench_only: list[int] = []
+        for k in list(viable):
+            if k == 0:
+                continue
+            c = candidates[k]
+            in_codes = set(c["squad"]["code"]) - out_codes_all
+            check = starting_xi_impact_check(sim_squad, c["squad"], in_codes, remaining_gws, cfg,
+                                              bb_play_gw=bb_play_gw)
+            week_impact[k] = check
+            if not check["has_impact"]:
+                week_bench_only.append(k)
+        viable = [k for k in viable if k == 0 or k not in week_bench_only]
         chosen_k = min(viable) if viable else 0
         chosen = candidates[chosen_k]
 
@@ -286,16 +391,31 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             data_gap_note = (f"Data gap flagged: {names_txt} had a missing projection this week and was "
                               f"treated as 0 xPts so it wouldn't be silently forced out (Standing Rule #4).")
 
-        if chosen["actual_k"] == 0:
+        if chosen["actual_k"] == 0 and week_bench_only:
+            bo_k = min(week_bench_only)
+            bo = candidates[bo_k]
+            pairs_bo = _pair_moves(sim_squad, bo["squad"], this_gw_col)
+            move_bits_bo = ", ".join(f"{p['out']} → {p['in']}" for p in pairs_bo)
+            week_moves = []
+            week_summary = (f"GW{gw}: Roll — {move_bits_bo} nets {bo['net_gain']:+.1f} xPts but is bench-autosub "
+                             f"value only (no XI impact) — saving the transfer is stronger. "
+                             f"{ft_bank} FT banked → {ft_after} for GW{gw + 1}.")
+        elif chosen["actual_k"] == 0:
             week_moves = []
             week_summary = (f"GW{gw}: Roll — no free move clears the bar this week. "
                              f"{ft_bank} FT banked → {ft_after} for GW{gw + 1}.")
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
             week_moves = [{**_move_row(p, 0.0, chosen["net_gain"], True), "gw": gw} for p in pairs]
-            move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+            move_bits = ", ".join(
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+                for p in pairs)
+            shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}"
+                          for s in week_impact.get(chosen_k, {}).get("shifts", []) if s["in"]]
+            shift_txt = f" XI shifts: {'; '.join(shift_bits)}." if shift_bits else ""
             week_summary = (f"GW{gw}: {move_bits} (free) — net {chosen['net_gain']:+.1f} xPts over the "
-                             f"remaining horizon. {ft_bank - ft_used} FT left banked → {ft_after} for GW{gw + 1}.")
+                             f"remaining horizon. {ft_bank - ft_used} FT left banked → {ft_after} for "
+                             f"GW{gw + 1}.{shift_txt}")
             sim_squad = chosen["squad"]
 
         if data_gap_note:
@@ -341,7 +461,9 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        forced_count: int | None = None,
                        meaningful_bar: float | None = None,
                        bench_codes: set | None = None,
-                       chip_advisory: str | None = None) -> dict:
+                       chip_advisory: str | None = None,
+                       bb_play_gw: int | None = None,
+                       chip_capped_gw_list: list[int] | None = None) -> dict:
     """Patch 3 — joint multi-transfer optimization (Standing Rules #28/#30/
     #34/#35/#36), replacing the old pairwise best-single-swap-per-slot
     heuristic entirely:
@@ -439,7 +561,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     # specific ambiguity doesn't apply to them.
     if hit_stance == "No hits" and horizon_n > 1:
         return plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank,
-                                       current_gw, gw_list, meaningful_bar, chip_advisory)
+                                       current_gw, gw_list, meaningful_bar, chip_advisory,
+                                       bb_play_gw=bb_play_gw)
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
     # anywhere in these columns turns a pandas comparison into a TypeError
@@ -551,11 +674,63 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
 
         tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
         viable = [k for k in tied_ks if clears_bar(candidates[k])]
+
+        # Patch 34 — Starting-XI Impact Check (manager report): a candidate
+        # that only clears the bar via bench-autosub-discounted value, with
+        # no transferred-in player ever reaching the starting XI across the
+        # horizon (and no Bench-Boost-specific override), isn't a real
+        # week-to-week scoring change — filtered out here before selection,
+        # same tier as Rule #34's margin-of-error filter just above.
+        impact_notes: dict[int, dict] = {}
+        bench_only_ks: list[int] = []
+
+        def _passes_impact(k):
+            if k == 0:
+                return True
+            c = candidates[k]
+            in_codes = set(c["squad"]["code"]) - out_codes_all
+            # Uses the FULL gw_list here, not chip_capped_gw_list — that cap
+            # is reserved for the separate "Chip-aware alt" comparison below
+            # (a genuinely different question: "is this still worth it if a
+            # rebuild chip is coming", not "does it ever have XI impact").
+            check = starting_xi_impact_check(squad_df, c["squad"], in_codes, gw_list, cfg,
+                                              bb_play_gw=bb_play_gw)
+            impact_notes[k] = check
+            if not check["has_impact"]:
+                bench_only_ks.append(k)
+            return check["has_impact"]
+
+        viable_real = [k for k in viable if _passes_impact(k)]
+        bench_only_viable = viable and not viable_real  # something cleared the bar, but only via bench value
+        viable = viable_real
         chosen_k = min(viable) if viable else 0
         chosen = candidates[chosen_k]
         chosen_net_gain = chosen["net_gain"]
 
-        if chosen["actual_k"] == 0:
+        if chosen["actual_k"] == 0 and bench_only_viable:
+            bo_k = min(bench_only_ks)
+            bo = candidates[bo_k]
+            pairs_bo = _pair_moves(squad_df, bo["squad"], this_gw_col)
+            move_bits_bo = ", ".join(f"{p['out']} → {p['in']}" for p in pairs_bo)
+            summary.append(f"Roll — {move_bits_bo} nets {bo['net_gain']:+.1f} xPts, but that's entirely bench-"
+                            f"autosub value: no incoming player reaches your starting XI over this horizon. "
+                            f"Saving the transfer is the stronger play.")
+            plan.append(f"GW{current_gw}: Roll — {move_bits_bo} clears the materiality/margin-of-error bars "
+                        f"({bo['net_gain']:+.2f} xPts) purely via Rule #12's autosub-discounted bench value; the "
+                        f"Starting-XI Impact Check (Patch 34) found no transferred-in player entering the best "
+                        f"XI in any checked GW, and no Bench Boost override applied. Not a real scoring change — "
+                        f"banking the transfer is preferred.")
+            # Chip-aware alt (manager request): if a Bench Boost play verdict
+            # sits inside this horizon and IS what the bench-only candidate
+            # would have helped, surface that as an alternate angle rather
+            # than silently vetoing it — the manager may still want it for
+            # that specific week.
+            bo_check = impact_notes.get(bo_k, {})
+            if bo_check.get("bench_boost_gw"):
+                summary.append(f"Chip-aware alt: Play {move_bits_bo} — helps your GW{bo_check['bench_boost_gw']} "
+                                f"Bench Boost specifically (full bench value that week, not autosub-discounted).")
+
+        elif chosen["actual_k"] == 0:
             best_alt_k = max((k for k in candidates if k != 0), key=lambda k: candidates[k]["net_gain"], default=None)
             if best_alt_k is not None and candidates[best_alt_k]["actual_k"] > 0:
                 alt = candidates[best_alt_k]
@@ -590,7 +765,12 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes_all,
                                     {p["in_code"] for p in pairs})
             moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
-            move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+            # Patch 33 — xM rotation-risk badge inline on both legs, so a
+            # good net-xPts number doesn't quietly hide an incoming player
+            # who isn't actually a confirmed starter.
+            move_bits = ", ".join(
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+                for p in pairs)
             hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
             summary.append(f"{move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over {horizon_n} GW(s).")
             hit_note2 = (f" — {chosen['hit_cost']:.0f}-pt hit taken, clears the {profile_name} profile's "
@@ -602,6 +782,34 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                         f"GW(s){hit_note2}{eo_note}. Fewest-transfers tie-break applied within the {moe:.1f} "
                         f"xPts margin-of-error band (Rules #34/#35). Scored on realized (bench-discounted) "
                         f"value per Standing Rule #12.")
+
+            # Patch 34 — minimal "XI shifts" disclosure: which players'
+            # starting-XI membership actually changes, and when, rather than
+            # re-showing the whole squad (manager request: "just mentioning
+            # the changes not the full squad").
+            chosen_check = impact_notes.get(chosen_k, {})
+            shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in chosen_check.get("shifts", []) if s["in"]]
+            if shift_bits:
+                summary.append(f"XI shifts: {'; '.join(shift_bits)}.")
+
+            # Patch 34 — chip-aware alt: if a planned full-rebuild chip GW
+            # truncates this horizon (chip_capped_gw_list), re-check whether
+            # THIS candidate still clears its bar over just the pre-rebuild
+            # window — cheap (reuses the already-solved squads, no new MILP
+            # solve) and surfaces a genuinely different angle rather than
+            # silently using one horizon or the other.
+            if chip_capped_gw_list is not None and chip_capped_gw_list != gw_list:
+                old_trunc = opt.realized_horizon_value(squad_df, chip_capped_gw_list, cfg) if chip_capped_gw_list \
+                    else 0.0
+                new_trunc = opt.realized_horizon_value(chosen["squad"], chip_capped_gw_list, cfg) \
+                    if chip_capped_gw_list else 0.0
+                net_trunc = round(new_trunc - old_trunc - chosen["hit_cost"], 2)
+                bar_trunc = threshold if chosen["hit_cost"] > 0 else meaningful_bar
+                if not chip_capped_gw_list or net_trunc < bar_trunc:
+                    summary.append(f"Chip-aware alt: Roll — a full-rebuild chip is planned before this horizon "
+                                    f"ends, and this move doesn't clear its bar over just the pre-rebuild window "
+                                    f"({net_trunc:+.1f} xPts) — the rebuild would replace this player anyway.")
+
             used_free = min(chosen["actual_k"], free_transfers)
             rolled = free_transfers - used_free
             if rolled > 0:
@@ -818,7 +1026,9 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         cheapest = candidates[cheapest_k]
         pairs = _pair_moves(squad_df, cheapest["squad"], this_gw_col)
         moves = [_move_row(p, cheapest["hit_cost"], cheapest["net_gain"], False) for p in pairs]
-        move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+        move_bits = ", ".join(
+            f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+            for p in pairs)
         summary = [f"No hit-free way to add this player this run — your sidebar stance is 'No hits', and every "
                     f"legal route found needs at least a {cheapest['hit_cost']:.0f}-pt hit.",
                    f"Informational only, not recommended under 'No hits': the cheapest hit-requiring route — "
@@ -843,12 +1053,30 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
 
     pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
     moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], clears) for p in pairs]
-    move_bits = ", ".join(f"{p['out']} → {p['in']}" for p in pairs)
+    move_bits = ", ".join(
+        f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+        for p in pairs)
     hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
     verdict_note = ("clears its bar — a genuine improvement" if clears else
                      f"doesn't clear the {bar} xPts bar this move needs — not worth it as evaluated")
     summary = [f"Your scenario — {move_bits}{hit_note}: net {chosen['net_gain']:+.1f} xPts over "
                f"{horizon_n} GW(s), {verdict_note}."]
+
+    # Patch 34 — Starting-XI Impact Check, disclosure only here (not a gate
+    # like suggest_transfers()/plan_transfer_schedule(): this is a manager-
+    # chosen target, so the model states what it found rather than
+    # overriding an explicit choice with Roll).
+    in_codes_scenario = set(chosen["squad"]["code"]) - out_codes_all
+    scenario_check = starting_xi_impact_check(squad_df, chosen["squad"], in_codes_scenario, gw_list, cfg)
+    if not scenario_check["has_impact"]:
+        summary.append(f"Note: {target_row['web_name']} isn't projected to reach your starting XI at any point "
+                        f"in this horizon — this net gain is entirely bench-autosub value (Standing Rule #12), "
+                        f"not a real week-to-week scoring change.")
+    else:
+        shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in scenario_check.get("shifts", []) if s["in"]]
+        if shift_bits:
+            summary.append(f"XI shifts: {'; '.join(shift_bits)}.")
+
     if chosen["actual_k"] > 1:
         # Say WHY more than one swap was needed using the diagnostic actually
         # computed above (budget/club-limit/data-gap), never a generic guess
@@ -892,6 +1120,30 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
             "chosen_k": chosen["actual_k"]}
 
 
+def _xm_badge(xm: float | None, cfg: dict | None = None) -> str:
+    """Patch 33 (manager report: a transfer's xPts already bakes in expected
+    minutes via `xm`, but that was never disclosed next to the recommendation
+    itself, so a rotation risk masquerading as a good net-xPts number was
+    invisible without opening the raw projection). Tiers below are a
+    disclosed, manager-directed display extension — not a doc-specified
+    threshold, same pattern as chip_advisor_thresholds/chip_shape_test
+    elsewhere — anchored on the xM Floor Rule's own 0.88 "confirmed nailed"
+    figure (`xm_heuristic.confirmed_current_season_start_floor` in
+    model_config.yaml) as the top of the "nailed" band."""
+    if xm is None or pd.isna(xm):
+        return ""
+    nailed_floor = (cfg or {}).get("xm_heuristic", {}).get("confirmed_current_season_start_floor", 0.88)
+    if xm >= nailed_floor - 0.08:  # a little below the strict "confirmed nailed" floor still reads as safe
+        cls, label = "nailed", "nailed"
+    elif xm >= 0.5:
+        cls, label = "rotation", "rotation risk"
+    else:
+        cls, label = "risk", "bench risk"
+    return (f' <span class="xm-badge {cls}" title="Expected-minutes multiplier (xM) {xm:.2f} — already priced '
+            f'into this player\'s xPts above, shown here so rotation risk isn\'t hidden behind a good net number.">'
+            f'xM {xm:.2f} {label}</span>')
+
+
 def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dict:
     """One pair (from `_pair_moves`/`_apply_eo_pull`) -> a move-table row.
     `hit_cost`/`net_gain` are the BATCH total for the whole chosen transfer
@@ -900,8 +1152,8 @@ def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dic
     so splitting it across rows would misstate what any single row cost on
     its own. The accompanying plan-text line states the batch total once."""
     return {
-        "out": p["out"], "out_team": p["out_team"], "out_price": p["out_price"],
-        "in": p["in"], "in_team": p["in_team"], "in_price": p["in_price"],
+        "out": p["out"], "out_team": p["out_team"], "out_price": p["out_price"], "out_xm": p.get("out_xm"),
+        "in": p["in"], "in_team": p["in_team"], "in_price": p["in_price"], "in_xm": p.get("in_xm"),
         "position": p["position"],
         "xpts_gain": round(p["in_xpts"] - p["out_xpts"], 2),
         "xpts_gain_this_gw": round(p["in_gw"] - p["out_gw"], 2),

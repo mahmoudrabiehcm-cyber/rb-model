@@ -174,6 +174,43 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .gauge-ring::before{ content:""; position:absolute; inset:5px; border-radius:50%; background:var(--bg); }
 .gauge-ring .gauge-val{ position:relative; z-index:1; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700; }
 
+/* Patch 33 — Chip Signal cards become <details>/<summary> so the "why this
+   GW" per-GW breakdown (manager report: "why GW9 ... this isn't clear")
+   expands in place, no JS needed. The card's existing top/stat/sub markup
+   moves inside <summary>; a small CSS bar-chart of the scanned window sits
+   in the revealed body, winning GW highlighted. */
+details.signal-card{ padding:0; }
+details.signal-card summary{ padding:12px 14px; list-style:none; cursor:pointer; }
+details.signal-card summary::-webkit-details-marker{ display:none; }
+details.signal-card summary::after{ content:"▾ breakdown"; display:block; font-family:"IBM Plex Mono";
+  font-size:9px; color:var(--ink-faint); margin-top:6px; text-transform:uppercase; letter-spacing:.04em; }
+details.signal-card[open] summary::after{ content:"▴ hide"; }
+.gw-bars{ display:flex; gap:5px; align-items:flex-end; height:56px; padding:18px 14px 20px; }
+.gw-bars .bar{ flex:1; background:var(--surface-2); border-radius:2px 2px 0 0; position:relative; min-height:2px; }
+.gw-bars .bar.win{ background:var(--accent-strong); }
+.gw-bars .bar .val{ position:absolute; top:-15px; left:0; right:0; text-align:center;
+  font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-muted); white-space:nowrap; }
+.gw-bars .bar .lbl{ position:absolute; bottom:-16px; left:0; right:0; text-align:center;
+  font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-faint); }
+
+/* Patch 33 — xM rotation-risk badge, inline on a transfer recommendation
+   (manager report: a transfer's xPts already factors in expected minutes,
+   but that wasn't disclosed next to the recommendation itself). Reuses the
+   existing .badge tiers rather than inventing new colors. */
+.xm-badge{ font-family:"IBM Plex Mono"; font-size:8.5px; font-weight:700; letter-spacing:.02em;
+  padding:1px 5px; border-radius:10px; margin-left:4px; white-space:nowrap; display:inline-block;
+  vertical-align:middle; cursor:help; }
+.xm-badge.nailed{ background:var(--accent-tint); color:var(--accent-strong); }
+.xm-badge.rotation{ background:var(--gold-tint); color:#7A5A16; }
+.xm-badge.risk{ background:var(--coral-tint); color:var(--coral); }
+
+/* Patch 33 — post-transfer preview, promoted out of the "Why" expander to
+   sit directly under each recommendation (manager: this already existed
+   but was buried and read as missing). */
+.tx-preview{ font-size:12.5px; color:var(--ink-muted); background:var(--surface-2);
+  border-left:3px solid var(--accent); padding:7px 12px; margin:2px 0 10px 0; }
+.tx-preview b{ color:var(--accent-strong); }
+
 /* Patch 4 — captaincy-on-pitch caption, replacing the old standalone
    "Captaincy Pick" metric section entirely. */
 .cap-caption{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--gold);
@@ -227,18 +264,36 @@ def _photo_url(code) -> str:
 
 
 def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str,
-                  tooltip: str, card_cls: str = "") -> str:
+                  tooltip: str, card_cls: str = "", by_gw: dict | None = None,
+                  best_gw: int | None = None) -> str:
     """Patch 31 — one compact scannable "Chip Signals" card, replacing a
     paragraph of Chip Advisor/Chip Strategy prose. Rule/step citations and
     the full quantified reasoning move into the card's `title` tooltip
     (hover-hidden, same pattern as the header's .info-dot) instead of
     sitting as permanent visible text — the visible surface is just a
-    name, a status badge, one headline stat, and a one-line sub-caption."""
-    return (f'<div class="signal-card {card_cls}" title="{tooltip}">'
-            f'<div class="top"><span class="name">{name}</span>'
+    name, a status badge, one headline stat, and a one-line sub-caption.
+
+    Patch 33 (manager report: "why GW9 ... this isn't clear" — a static
+    tooltip only ever named the winning GW's margin over the runner-up, never
+    the actual per-GW numbers). When `by_gw` ({gw: value}, 2+ entries) is
+    given, the card becomes a <details>/<summary> — click to reveal a small
+    CSS bar-chart of every scanned GW, the winning one highlighted, so "why
+    this GW" is answered by the numbers themselves, not just a sentence."""
+    body = (f'<div class="top"><span class="name">{name}</span>'
             f'<span class="badge {badge_cls}">{badge_text}</span></div>'
             f'<div class="stat">{stat}</div>'
-            f'<div class="sub">{sub}</div></div>')
+            f'<div class="sub">{sub}</div>')
+    if by_gw and len(by_gw) >= 2:
+        max_v = max(max(by_gw.values()), 0.01)
+        bars = "".join(
+            f'<div class="bar{" win" if gw == best_gw else ""}" '
+            f'style="height:{max(4, round((v / max_v) * 100))}%;">'
+            f'<span class="val">{v:.1f}</span><span class="lbl">GW{gw}</span></div>'
+            for gw, v in sorted(by_gw.items())
+        )
+        return (f'<details class="signal-card {card_cls}"><summary title="{tooltip}">{body}</summary>'
+                f'<div class="gw-bars">{bars}</div></details>')
+    return f'<div class="signal-card {card_cls}" title="{tooltip}">{body}</div>'
 
 
 def _flag_pill(text: str, tooltip: str = "") -> str:
@@ -871,11 +926,24 @@ with st.spinner("Fetching live data and computing xPts..."):
     # render even if this section fails). Uses `transfer_gw_list`, not the
     # sidebar's raw `gw_list` — Patch 28/Rule #41 may have capped it short of
     # a planned full-rebuild chip for a currently-disrupted squad player.
+    # Patch 34 — feeds the Starting-XI Impact Check's chip-context overrides:
+    # `bb_play_gw` lets a bench-only swap still count as real impact if it
+    # helps a Bench Boost week specifically; `chip_capped_gw_list` (only set
+    # when a manager-planned full-rebuild chip actually falls inside this
+    # horizon) drives the "Chip-aware alt: Roll" comparison against just the
+    # pre-rebuild window. Neither changes anything when absent/inapplicable.
+    _bb_play_gw = int(bb_advisor["verdict"].split("gw")[1]) \
+        if bb_advisor and bb_advisor["verdict"].startswith("play_gw") else None
+    _chip_capped_gw_list = None
+    if planned_chip_gw is not None and transfer_gw_list and planned_chip_gw <= transfer_gw_list[-1]:
+        _chip_capped_gw_list = [g for g in transfer_gw_list if g < planned_chip_gw]
+
     transfer_error = None
     try:
         rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
                                            ft["free_transfers"], bank, planning_gw, transfer_gw_list, forced_count,
-                                           meaningful_bar_override, set(bench_df["code"]), chip_advisory)
+                                           meaningful_bar_override, set(bench_df["code"]), chip_advisory,
+                                           bb_play_gw=_bb_play_gw, chip_capped_gw_list=_chip_capped_gw_list)
     except Exception as e:
         transfer_error = str(e)
         rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,
@@ -1001,21 +1069,32 @@ def _advisor_card(label: str, adv: dict | None) -> str:
     if adv is None or adv.get("best_gw") is None:
         return _signal_card(label, "N/A", "used", "—", "no data this run",
                              f"No candidate gameweek available for this chip across {_win}.")
+    # Free Hit's by_gw is {gw: {"current":.., "rebuild":.., "gap":..}} (a
+    # rebuild-vs-hold comparison, not a single number) — Bench Boost/Triple
+    # Captain's is already {gw: float}. Normalize to the bar-chart-relevant
+    # number in each case: the rebuild's net gap for Free Hit, the raw value
+    # for the other two.
+    raw_by_gw = adv.get("by_gw") or {}
+    if raw_by_gw and isinstance(next(iter(raw_by_gw.values())), dict):
+        by_gw = {gw: v.get("gap", 0.0) for gw, v in raw_by_gw.items()}
+    else:
+        by_gw = raw_by_gw
     if adv["verdict"].startswith("play_gw"):
-        gw = adv["verdict"].split("gw")[1]
+        gw = int(adv["verdict"].split("gw")[1])
         margin = adv.get("margin", adv.get("threshold", 0))
         return _signal_card(
-            label, f"PLAY GW{gw}", "play", f"GW{gw}", f"+{margin:.1f} xPts clear of next-best",
+            label, f"PLAY GW{gw}", "play", f"GW{gw}", f"+{margin:.1f} xPts clear of next-best — click for the "
+            f"per-GW breakdown",
             f"The single best GW across a {_win} scan (Patch 32 — independent of the sidebar's transfer "
             f"Horizon slider, extended further if a confirmed Double/Blank fell just past it). Clears "
             f"margin-of-error by {margin:.1f} xPts over the next-best GW in that window "
             f"(threshold {adv['threshold']:.1f} xPts) — Standing Rule #34 margin-of-error gate.",
-            "is-play")
+            "is-play", by_gw=by_gw, best_gw=gw)
     return _signal_card(
-        label, "HOLD", "hold", f"GW{adv['best_gw']}", "best candidate, statistical tie",
+        label, "HOLD", "hold", f"GW{adv['best_gw']}", "best candidate, statistical tie — click for the breakdown",
         f"No GW across a {_win} scan clears margin-of-error over the others (best candidate GW{adv['best_gw']}, "
         f"threshold {adv['threshold']:.1f} xPts) — Standing Rule #34. A statistical tie, not a reason to rule "
-        f"it out later.")
+        f"it out later.", by_gw=by_gw, best_gw=adv.get("best_gw"))
 
 wc_card_tooltip = (wc_flag or (f"Wildcard trigger: not active — {much_more}." if much_more else
                                 "Insufficient data to evaluate the trigger this run."))
@@ -1196,6 +1275,127 @@ if cap_caption:
     st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
+# Multi-GW pitch navigator (Patch 34, manager request: "i want the team pitch
+# visuals to read the starting xi for each GW and an arrow to move to the
+# next GWs ... with/without applying the transfer recommendations ... this
+# will change rate%, xpts on the top"). Confirmed scope: range = the WIDER
+# Chip Advisor window (chip_adv_window), not the narrower sidebar Horizon —
+# "make it wider and aligned with the chip strategy." Re-solves a fresh
+# best_starting_xi() PER (GW, toggle-state) pair rather than reusing
+# planning_gw's XI/bench split for every displayed GW — that reuse was a
+# real staleness bug (a GW several weeks out can have a totally different
+# optimal XI once rotation/fixtures/doubles are accounted for). Only the
+# projected header tiles (Team Rating %, GW xPts) below move with
+# navigation; Overall rank and Season points stay put everywhere else on the
+# page since those are live actuals from the FPL API, not projections for a
+# future GW — never implied to change by navigating here.
+# ---------------------------------------------------------------------------
+st.markdown('<div class="section-h">GW Navigator</div>', unsafe_allow_html=True)
+_nav_gw_list = chip_adv_window["gw_list"] if chip_adv_window else gw_list
+if not _nav_gw_list or squad_df.empty:
+    st.caption("No GW window available to navigate this run (need at least one active chip signal or a live squad).")
+else:
+    if "nav_gw_idx" not in st.session_state or st.session_state.get("nav_gw_list") != _nav_gw_list:
+        st.session_state.nav_gw_idx = _nav_gw_list.index(planning_gw) if planning_gw in _nav_gw_list else 0
+        st.session_state.nav_gw_list = _nav_gw_list
+    st.session_state.nav_gw_idx = max(0, min(st.session_state.nav_gw_idx, len(_nav_gw_list) - 1))
+
+    # "After recommended transfer" needs a single-decision move set (moves) —
+    # not the "No hits" chained weekly schedule, where "which week's squad"
+    # is itself ambiguous (same scope restriction as the Patch 33 preview
+    # above). Re-projected onto the WIDE chip_adv_proj window, not the
+    # narrower sidebar-horizon `proj`, so it has xPts for every GW in range.
+    _nav_moves_df = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
+    _nav_can_toggle = (not rec.get("is_weekly_schedule") and not _nav_moves_df.empty
+                       and "out_code" in _nav_moves_df.columns and "in_code" in _nav_moves_df.columns)
+    _nav_squad_after = None
+    if _nav_can_toggle:
+        _nav_out_codes = set(_nav_moves_df["out_code"])
+        _nav_in_codes = set(_nav_moves_df["in_code"])
+        _nav_squad_after = pd.concat([
+            squad_df_adv[~squad_df_adv["code"].isin(_nav_out_codes)],
+            chip_adv_proj[chip_adv_proj["code"].isin(_nav_in_codes)],
+        ], ignore_index=True, sort=False)
+        if "code" in _nav_squad_after.columns:
+            _nav_squad_after = _nav_squad_after.drop_duplicates(subset=["code"], keep="first")
+
+    nav_c1, nav_c2 = st.columns([2, 2])
+    with nav_c1:
+        nav_mode = st.radio("Squad", ["Current squad", "After recommended transfer"],
+                             index=0, horizontal=True, key="nav_mode",
+                             disabled=not _nav_can_toggle,
+                             help=None if _nav_can_toggle else
+                             "No single-decision transfer this run to preview (either nothing recommended, "
+                             "or a No-hits chained weekly schedule where 'which week's squad' isn't a single answer).")
+    with nav_c2:
+        pb1, pb2, pb3 = st.columns([1, 3, 1])
+        with pb1:
+            if st.button("◀", key="nav_prev", disabled=st.session_state.nav_gw_idx == 0):
+                st.session_state.nav_gw_idx -= 1
+        with pb2:
+            st.markdown(f'<div style="text-align:center;font-weight:600;padding-top:0.4rem;">'
+                        f'GW{_nav_gw_list[st.session_state.nav_gw_idx]} '
+                        f'({st.session_state.nav_gw_idx + 1}/{len(_nav_gw_list)})</div>', unsafe_allow_html=True)
+        with pb3:
+            if st.button("▶", key="nav_next", disabled=st.session_state.nav_gw_idx == len(_nav_gw_list) - 1):
+                st.session_state.nav_gw_idx += 1
+
+    nav_gw = _nav_gw_list[st.session_state.nav_gw_idx]
+    nav_col = f"xpts_gw{nav_gw}"
+    nav_squad = squad_df_adv if (nav_mode == "Current squad" or _nav_squad_after is None) else _nav_squad_after
+
+    if nav_col not in nav_squad.columns:
+        st.caption(f"No projection data for GW{nav_gw} this run.")
+    else:
+        nav_xi_result = opt.best_starting_xi(nav_squad, nav_col)
+        if nav_xi_result is None:
+            st.caption(f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
+        else:
+            nav_starters = nav_xi_result["xi"]
+            nav_bench = nav_squad[~nav_squad["code"].isin(nav_starters["code"])]
+            nav_gw_xpts = round(nav_xi_result["total"], 1)
+
+            # Header tiles — same mechanic as the main Team Rating % (Patch 20/24):
+            # current squad's best XI (captain doubled, bench autosub-discounted)
+            # over a genuinely unconstrained optimal squad for THIS GW specifically.
+            nav_optimal_result = data_pipeline.solve_free_hit_optimal_squad(cfg, chip_adv_proj, team_value, nav_gw)
+            nav_current_val = opt.rating_gw_value(nav_squad, nav_col, cfg)["total_realized"]
+            nav_optimal_val = opt.rating_gw_value(nav_optimal_result["squad"], nav_col, cfg)["total_realized"] \
+                if nav_optimal_result else 0.0
+            nav_rating = eng.team_rating_pct(nav_current_val, nav_optimal_val, "")
+
+            nt1, nt2 = st.columns(2)
+            with nt1:
+                st.metric(f"GW{nav_gw} xPts (best XI)", f"{nav_gw_xpts:.1f}")
+            with nt2:
+                st.metric(f"Team Rating % (GW{nav_gw})",
+                          f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—")
+            st.caption("Projected for this GW only — Overall rank and Season points elsewhere on this page are "
+                       "your live actuals and don't change with navigation.")
+
+            if nav_starters.empty:
+                st.warning("No starting XI data for this GW.")
+            else:
+                nav_cap_row = nav_starters.sort_values(nav_col, ascending=False).iloc[0]
+                nav_html = '<div class="pitch">'
+                for pos in ["GK", "DEF", "MID", "FWD"]:
+                    rows = nav_starters[nav_starters["position"] == pos].sort_values(nav_col, ascending=False)
+                    if rows.empty:
+                        continue
+                    nav_html += '<div class="prow">'
+                    for _, r in rows.iterrows():
+                        nav_html += _player_card(r, is_captain=(r["code"] == nav_cap_row["code"]),
+                                                  xp_col=nav_col, opp_col=f"opp_gw{nav_gw}")
+                    nav_html += '</div>'
+                if not nav_bench.empty:
+                    nav_html += '<div class="bench-strip"><div class="side-note">BENCH</div><div class="prow">'
+                    for _, r in nav_bench.sort_values(nav_col, ascending=False).iterrows():
+                        nav_html += _player_card(r, xp_col=nav_col, opp_col=f"opp_gw{nav_gw}")
+                    nav_html += '</div></div>'
+                nav_html += '</div>'
+                st.markdown(nav_html, unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
 # GW Breakdown table (Patch 2) — opponent + per-GW xPts split out instead of
 # blended into one horizon number. Only shown when horizon > 1; at horizon=1
 # the pitch view's opponent chip + xp already tell the whole story. Uses
@@ -1242,10 +1442,44 @@ if rec.get("summary"):
 else:
     st.info("No squad/pool data to plan against this run.")
 
+# Patch 33 (manager report: this preview already existed — Patch 23 — but sat
+# buried inside the "Why" expander below, so it read as missing). Promoted
+# to sit directly under the recommendation itself, always visible. Same
+# scope/logic as before: only the single-decision recommendation (not the
+# "No hits" chained weekly schedule, where "which week's squad" is itself
+# ambiguous), and never touches the header stats above — a local preview only.
+_moves_df_preview = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
+if not rec.get("is_weekly_schedule") and not _moves_df_preview.empty \
+        and "out_code" in _moves_df_preview.columns and "in_code" in _moves_df_preview.columns:
+    _move_out_codes = set(_moves_df_preview["out_code"])
+    _move_in_codes = set(_moves_df_preview["in_code"])
+    _post_transfer_squad = pd.concat([
+        squad_df[~squad_df["code"].isin(_move_out_codes)],
+        proj[proj["code"].isin(_move_in_codes)],
+    ], ignore_index=True, sort=False)
+    if "code" in _post_transfer_squad.columns:
+        _post_transfer_squad = _post_transfer_squad.drop_duplicates(subset=["code"], keep="first")
+
+    _new_xi_result = opt.best_starting_xi(_post_transfer_squad, fh_auto_col) \
+        if fh_auto_col in _post_transfer_squad.columns else None
+    _new_gw_xpts = round(_new_xi_result["total"], 1) if _new_xi_result else None
+    _new_current_val = opt.rating_gw_value(_post_transfer_squad, fh_auto_col, cfg)["total_realized"]
+    _new_rating = eng.team_rating_pct(_new_current_val, fh_auto_optimal_val, "")
+
+    if _new_gw_xpts is not None and _new_rating["rating_pct"] is not None:
+        st.markdown(f'<div class="tx-preview">📈 If you make this move — new GW{planning_gw} xPts: '
+                    f'<b>{_new_gw_xpts:.1f}</b> (was {gw_xpts_total:.1f}) · new Team Rating: '
+                    f'<b>{_new_rating["rating_pct"]}%</b> (was {fh_auto_rating["rating_pct"]}%, vs. the same '
+                    f'GW{planning_gw} Free Hit optimal shown at the top). Local preview only — the header stats '
+                    f'above are unaffected until you actually make the transfer and re-run.</div>',
+                    unsafe_allow_html=True)
+
 st.caption(f"Two separate bars gate a transfer: a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar "
            f"(is the gain worth spending a free transfer at all) and a **{rec.get('margin_of_error', 2.0):.1f} xPts** "
            f"margin-of-error floor (is the gain distinguishable from this model's own known projection noise — "
-           f"Standing Rule #34, not adjustable via the sidebar slider). A move must clear BOTH to be recommended.")
+           f"Standing Rule #34, not adjustable via the sidebar slider). A move must clear BOTH to be recommended. "
+           f"xM badges above show each player's expected-minutes multiplier — already priced into their xPts, "
+           f"surfaced here so a rotation risk doesn't hide behind a good net number.")
 
 with st.expander("Why — full trace, rule references, and move-by-move detail"):
     st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
@@ -1275,47 +1509,10 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
         show_cols = [c for c in ["gw", "out", "in", "position", "xpts_gain_this_gw", "xpts_gain", "in_eo",
                                   "hit_cost", "net_gain", "justified", "setpiece_flag"] if c in moves_df.columns]
         st.dataframe(moves_df[show_cols], hide_index=True, use_container_width=True)
-
-        # "New numbers if you make this move" (2026-09-07 discussion, Patch
-        # 23). Scoped to the single-decision recommendation only for now
-        # ("Hit if worth it"/"Force" at any horizon, or "No hits" at
-        # horizon=1) — the "No hits" chained multi-week schedule
-        # (rec["is_weekly_schedule"]) isn't covered yet, since "which
-        # week's squad" is itself ambiguous there in a way it isn't here.
-        # Per the manager's explicit design: the header stats above are
-        # NEVER touched by this — this is a separate, local preview. The
-        # post-transfer squad's GW xPts and its rating are both re-derived
-        # from scratch (best XI re-solved on the changed 15, per Standing
-        # Rule #18 -- never assume the old XI just carries over), and the
-        # rating is compared against the SAME Free Hit optimal total
-        # already computed for planning_gw this run (Patch 22) -- not a
-        # fresh reachable-ceiling solve, per the manager's own direction.
-        if not rec.get("is_weekly_schedule") and "out_code" in moves_df.columns and "in_code" in moves_df.columns:
-            move_out_codes = set(moves_df["out_code"])
-            move_in_codes = set(moves_df["in_code"])
-            post_transfer_squad = pd.concat([
-                squad_df[~squad_df["code"].isin(move_out_codes)],
-                proj[proj["code"].isin(move_in_codes)],
-            ], ignore_index=True, sort=False)
-            if "code" in post_transfer_squad.columns:
-                post_transfer_squad = post_transfer_squad.drop_duplicates(subset=["code"], keep="first")
-
-            new_xi_result = opt.best_starting_xi(post_transfer_squad, fh_auto_col) \
-                if fh_auto_col in post_transfer_squad.columns else None
-            new_gw_xpts = round(new_xi_result["total"], 1) if new_xi_result else None
-            new_current_val = opt.rating_gw_value(post_transfer_squad, fh_auto_col, cfg)["total_realized"]
-            new_rating = eng.team_rating_pct(new_current_val, fh_auto_optimal_val, "")
-
-            if new_gw_xpts is not None and new_rating["rating_pct"] is not None:
-                st.markdown(f'<div class="tx-reco">📈 If you make this move — new GW{planning_gw} xPts: '
-                            f'**{new_gw_xpts:.1f}** (was {gw_xpts_total:.1f}) · new Free Hit rating: '
-                            f'**{new_rating["rating_pct"]}%** (was {fh_auto_rating["rating_pct"]}%, vs. the same '
-                            f'GW{planning_gw} Free Hit optimal shown at the top). These are a local preview for '
-                            f'this recommendation only — the header stats above are unaffected until you actually '
-                            f'make the transfer and re-run.</div>', unsafe_allow_html=True)
-            else:
-                st.info("Couldn't compute the post-transfer preview this run (no valid XI for the resulting "
-                        "squad this gameweek).")
+        # "New numbers if you make this move" (Patch 23) now renders directly
+        # under the main recommendation above (Patch 33) instead of here —
+        # see `_moves_df_preview`/`_post_transfer_squad` just above this
+        # expander. Kept out of this expander to avoid computing it twice.
 
 # ---------------------------------------------------------------------------
 # Evaluate your own scenario (Patch 6) — manager-directed what-ifs, always
