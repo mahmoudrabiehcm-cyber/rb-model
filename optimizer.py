@@ -408,6 +408,28 @@ def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, x
     return round(total, 2)
 
 
+def realized_horizon_breakdown(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_col: str = "xm",
+                                bench_weight_scale: float = 1.0, bb_play_gw: int | None = None) -> dict:
+    """Patch 38 (manager report, 2026-09-14: "we spent the whole day
+    explaining the logic and still the same issue" — every dispute in that
+    thread took multiple screenshot round-trips to resolve because the
+    starting-XI swap value and the bench-autosub credit were only ever
+    visible bundled together as one net-gain number). Same per-GW loop as
+    `realized_horizon_value()`, but keeps the xi_total and bench_total
+    components separate across the whole horizon instead of summing them
+    into one number — lets a disclosure line show the direct swap and the
+    (now near-zero, per Patch 37) bench credit as two auditable figures
+    instead of one black-box total."""
+    xi_sum, bench_sum = 0.0, 0.0
+    for gw in gw_list:
+        scale = 1.0 if (bb_play_gw is not None and gw == bb_play_gw) else bench_weight_scale
+        gv = realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale)
+        xi_sum += gv["xi_total"]
+        bench_sum += gv["bench_total"]
+    return {"xi_total": round(xi_sum, 2), "bench_total": round(bench_sum, 2),
+            "total": round(xi_sum + bench_sum, 2)}
+
+
 def rating_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm") -> dict:
     """§1a Team Rating % ONLY (Patch 20, 2026-09-07 discussion) — a single
     GW's contribution to Squad_xPts/Ceiling_xPts, "with captaincy applied

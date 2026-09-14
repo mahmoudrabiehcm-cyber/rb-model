@@ -300,6 +300,41 @@ meta:
                           # +2.9 recommendation.
                           # NOTE (2026-09-14): rb_model_app_patch37.zip is CUMULATIVE: Patch 29 through
                           # 37 together, on top of the manager's Patch 28 baseline.
+                          # Patch 38 (2026-09-14, manager report: "we spent the whole day explaining the
+                          # logic and still the same issue" -- after Patch 37 was deployed, the same
+                          # Foden->Damsgaard scenario still showed a net gain, now +2.5 instead of +2.9,
+                          # and still recommended the transfer): traced by sweeping Damsgaard's possible
+                          # live projection through suggest_transfers() directly. At his assumed ~5.0
+                          # (the manager's own earlier estimate), the code correctly Rolls (net 0.0) --
+                          # Patch 37 works. At his ACTUAL live projection, ~6.1, the code correctly nets
+                          # +2.53 and recommends the move, because 6.1 - Gomez's 3.6 = a genuine +2.5 xPts
+                          # direct swap, comfortably above the 2.0 xPts bar. Conclusion: Patch 37 was
+                          # never broken -- the "5 xPts" figure used throughout the earlier discussion was
+                          # an eyeballed estimate, not Damsgaard's real number, and +2.5 is the CORRECT
+                          # answer for his true projection. The whole day's friction traced back to one
+                          # structural gap: neither of us could tell, from a screenshot alone, whether (a)
+                          # a fix had actually redeployed, or (b) a number was legitimately different due
+                          # to fresh live data -- every dispute took a full round-trip of synthetic
+                          # reconstruction to resolve. Two permanent fixes, not another logic patch:
+                          # (1) app.py now carries a `PATCH_VERSION` constant stamped directly into the
+                          # sidebar brand tag ("v5.0 engine · patch 38 · live · zero-cost") -- bump it with
+                          # every future patch so "is this even the patch you sent" is answerable from any
+                          # screenshot, instantly, with no back-and-forth. (2) The winning transfer
+                          # recommendation's summary now includes an "Arithmetic" line disclosing the
+                          # ACTUAL numbers behind the headline net-gain figure: the starting-XI value
+                          # before/after (the direct swap, e.g. "49.2 -> 51.7 (direct swap +2.5 xPts)") and
+                          # the bench-autosub credit separately (near-zero per Patch 37, e.g. "+0.03
+                          # xPts"), so the two components that used to require a screenshot-and-
+                          # reconstruction cycle to separate are now visible on every single
+                          # recommendation, every run. Implemented via new
+                          # optimizer.realized_horizon_breakdown() (same per-GW loop as
+                          # realized_horizon_value(), keeping xi_total/bench_total separate instead of
+                          # summed) and realistic_baseline_value() now returning baseline_xi/baseline_bench
+                          # alongside baseline_total. Verified the disclosed arithmetic sums exactly to the
+                          # headline net_gain in the manager's real GW5 scenario (direct swap +2.5, bench
+                          # credit +0.03, net +2.53) via a new Patch 38 unit test.
+                          # NOTE (2026-09-14): rb_model_app_patch38.zip is CUMULATIVE: Patch 29 through
+                          # 38 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

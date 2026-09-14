@@ -22,6 +22,15 @@ import chip_protocol
 import transfers
 import recommend
 
+# Patch 38 (2026-09-14, manager report: "we spent the whole day explaining
+# the logic and still the same issue" — the real cause across that whole day
+# was never being able to tell, from a screenshot alone, whether a fix had
+# actually been redeployed or whether a number was legitimately different
+# live data): a permanent, visible version stamp so that question is
+# answerable at a glance, without another round of screenshots. Bump this
+# with every patch that ships to the manager.
+PATCH_VERSION = "Patch 38"
+
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
 # Crest mark (Patch 2) — replaces the pawn icon everywhere it appeared inline
@@ -451,7 +460,7 @@ entry_id = st.session_state.team_id
 with st.sidebar:
     st.markdown(f'<div class="brand-row">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div class="brand-tag">v5.0 engine · live · zero-cost</div><br>',
+                f'<div class="brand-tag">v5.0 engine · {PATCH_VERSION.lower()} · live · zero-cost</div><br>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="side-note">TEAM ID</div>'
                 f'<div style="font-family:\'IBM Plex Mono\'; color:var(--accent-strong); '

@@ -688,8 +688,14 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         # autosub-discounted bench), not the MILP's raw xpts_horizon_sum —
         # the MILP objective is only a search heuristic for finding
         # candidate squads, the realized value is what actually decides.
-        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg, bench_weight_scale=bench_w,
-                                                bb_play_gw=bb_play_gw)
+        # Patch 38: breakdown (not just the summed total) so the disclosure
+        # below can show the direct starting-XI swap and the (near-zero,
+        # per Patch 37) bench-autosub credit as two separate, auditable
+        # numbers instead of one combined figure a manager has to take on
+        # faith.
+        new_breakdown = opt.realized_horizon_breakdown(new_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                        bb_play_gw=bb_play_gw)
+        new_total = new_breakdown["total"]
         # Patch 36 (manager report, 2026-09-14: "Foden dead at 0 xPts, this
         # doesn't make sense") — the comparison baseline for THIS candidate
         # is no longer always the squad's plain current total. A nailed
@@ -713,7 +719,10 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                      "data_gap_codes": result.get("data_gap_codes", []),
                                      "baseline_total": baseline_total,
                                      "baseline_adjusted": baseline_info["adjusted"],
-                                     "baseline_zeroed_names": baseline_info["zeroed_names"]}
+                                     "baseline_zeroed_names": baseline_info["zeroed_names"],
+                                     "new_xi": new_breakdown["xi_total"], "new_bench": new_breakdown["bench_total"],
+                                     "baseline_xi": baseline_info.get("baseline_xi", baseline_total),
+                                     "baseline_bench": baseline_info.get("baseline_bench", 0.0)}
 
     # `plan`: full technical trace (rule citations, candidate math) — kept
     # for the "How this was worked out" detail expander. `summary`: the
@@ -908,6 +917,22 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                 f"rotation/bench risk), so the net-gain above compares the incoming player against "
                                 f"what your best XI would score with {zeroed_txt} benched for free — not against "
                                 f"{zeroed_txt}'s own live-discounted number.")
+
+            # Patch 38 (manager report, 2026-09-14: "we spent the whole day
+            # explaining the logic and still the same issue" — every dispute
+            # took a full round-trip of screenshots and manual reconstruction
+            # to settle): show the actual arithmetic behind the headline
+            # net-gain number directly, so a disagreement can be checked from
+            # this one line instead of another round of "is this really the
+            # patch you sent." Splits the direct starting-XI swap from the
+            # (near-zero, per Patch 37) bench-autosub credit.
+            xi_delta = round(chosen.get("new_xi", 0.0) - chosen.get("baseline_xi", 0.0), 2)
+            bench_delta = round(chosen.get("new_bench", 0.0) - chosen.get("baseline_bench", 0.0), 2)
+            arith_hit_txt = f" after the {chosen['hit_cost']:.0f}-pt hit" if chosen["hit_cost"] > 0 else ""
+            summary.append(f"Arithmetic: starting-XI value {chosen.get('baseline_xi', 0.0):.1f} → "
+                            f"{chosen.get('new_xi', 0.0):.1f} (direct swap {xi_delta:+.1f} xPts); bench-autosub "
+                            f"credit {bench_delta:+.2f} xPts (capped near-zero unless Bench Boost is this week's "
+                            f"play); combined net {chosen['net_gain']:+.2f} xPts{arith_hit_txt}.")
 
             # Minimal "XI shifts" disclosure: an EXISTING squad player (never
             # the incoming transfer target — that's the headline move above,
@@ -1344,10 +1369,13 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
     shouldn't be able to inflate the comparison via bench-autosub credit)."""
     bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
     if squad_df is None or squad_df.empty or not out_codes or not gw_list:
-        total = opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
-                                            bb_play_gw=bb_play_gw) if squad_df is not None and not squad_df.empty \
-            else 0.0
-        return {"baseline_total": total, "adjusted": False, "zeroed_names": []}
+        if squad_df is not None and not squad_df.empty:
+            bd = opt.realized_horizon_breakdown(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
+                                                 bb_play_gw=bb_play_gw)
+        else:
+            bd = {"xi_total": 0.0, "bench_total": 0.0, "total": 0.0}
+        return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
+                "adjusted": False, "zeroed_names": []}
 
     non_nailed = []
     for code in out_codes:
@@ -1359,8 +1387,9 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
             non_nailed.append((code, row.iloc[0].get("web_name")))
 
     if not non_nailed:
-        return {"baseline_total": opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
-                                                               bb_play_gw=bb_play_gw),
+        bd = opt.realized_horizon_breakdown(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
+                                             bb_play_gw=bb_play_gw)
+        return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
                 "adjusted": False, "zeroed_names": []}
 
     zeroed_squad = squad_df.copy()
@@ -1369,8 +1398,9 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
             col = f"xpts_gw{gw}"
             if col in zeroed_squad.columns:
                 zeroed_squad.loc[zeroed_squad["code"] == code, col] = 0.0
-    return {"baseline_total": opt.realized_horizon_value(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w,
-                                                           bb_play_gw=bb_play_gw),
+    bd = opt.realized_horizon_breakdown(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                         bb_play_gw=bb_play_gw)
+    return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
             "adjusted": True, "zeroed_names": [n for _, n in non_nailed]}
 
 
