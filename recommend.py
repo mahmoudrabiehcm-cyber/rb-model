@@ -378,10 +378,22 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             if actual_k == 0:
                 continue  # nothing worth swapping at this k — already covered by k=0
             new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg)
-            net_gain = round(new_total - old_total, 2)  # never a hit cost in this no-hits path
+            # Patch 36 — same nailed-gate baseline as suggest_transfers(),
+            # applied per week: a non-nailed out-player's projection is
+            # zeroed across the remaining weeks before the baseline is
+            # recomputed, so the incoming player is judged against the free
+            # bench replacement, not the outgoing player's own (possibly
+            # near-zero) live number.
+            out_codes_this = out_codes_all - set(new_squad["code"])
+            baseline_info = realistic_baseline_value(sim_squad, out_codes_this, remaining_gws, cfg)
+            baseline_total = baseline_info["baseline_total"]
+            net_gain = round(new_total - baseline_total, 2)  # never a hit cost in this no-hits path
             if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
                 candidates[actual_k] = {"squad": new_squad, "total": new_total, "net_gain": net_gain,
-                                         "actual_k": actual_k, "data_gap_codes": result.get("data_gap_codes", [])}
+                                         "actual_k": actual_k, "data_gap_codes": result.get("data_gap_codes", []),
+                                         "baseline_total": baseline_total,
+                                         "baseline_adjusted": baseline_info["adjusted"],
+                                         "baseline_zeroed_names": baseline_info["zeroed_names"]}
 
         best_net = max(c["net_gain"] for c in candidates.values())
         tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
@@ -453,9 +465,14 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             shift_bits = [f"{', '.join(s['in'])} in GW{s['gw']}" for s in week_check.get("shifts", []) if s["in"]]
             shift_txt = (f" Side effect (already on your bench, no transfer needed): "
                          f"{'; '.join(shift_bits)}." if shift_bits else "")
+            baseline_txt = ""
+            if chosen.get("baseline_adjusted"):
+                zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
+                baseline_txt = (f" Baseline note: {zeroed_txt} isn't nailed over the remaining horizon, so net-gain "
+                                 f"compares the incoming player against {zeroed_txt} benched for free.")
             week_summary = (f"GW{gw}: {move_bits} (free) — net {chosen['net_gain']:+.1f} xPts over the "
                              f"remaining horizon. {ft_bank - ft_used} FT left banked → {ft_after} for "
-                             f"GW{gw + 1}.{reason_txt}{shift_txt}")
+                             f"GW{gw + 1}.{reason_txt}{shift_txt}{baseline_txt}")
             sim_squad = chosen["squad"]
 
         if data_gap_note:
@@ -661,13 +678,30 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         # the MILP objective is only a search heuristic for finding
         # candidate squads, the realized value is what actually decides.
         new_total = opt.realized_horizon_value(new_squad, gw_list, cfg)
-        net_gain = round(new_total - old_total - hit_cost, 2)
+        # Patch 36 (manager report, 2026-09-14: "Foden dead at 0 xPts, this
+        # doesn't make sense") — the comparison baseline for THIS candidate
+        # is no longer always the squad's plain current total. A nailed
+        # out-player's own live-discounted projection is trusted as-is (a
+        # single bad-fixture week is fairly reflected already). A non-nailed
+        # out-player (rotation/bench-risk xM tier) has his projection zeroed
+        # for the checked GWs and the baseline is recomputed — i.e. the
+        # incoming player is judged against what the free bench replacement
+        # would have delivered, not against the outgoing player's own
+        # (possibly near-zero) number. Per the manager's explicit choice,
+        # this IS the real net-gain math now, not a side display.
+        out_codes_this = out_codes_all - set(new_squad["code"])
+        baseline_info = realistic_baseline_value(squad_df, out_codes_this, gw_list, cfg)
+        baseline_total = baseline_info["baseline_total"]
+        net_gain = round(new_total - baseline_total - hit_cost, 2)
         # keyed by actual_k so two requested k's that land on the same real
         # swap count don't create a spurious "tie" against themselves
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
                                      "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k,
-                                     "data_gap_codes": result.get("data_gap_codes", [])}
+                                     "data_gap_codes": result.get("data_gap_codes", []),
+                                     "baseline_total": baseline_total,
+                                     "baseline_adjusted": baseline_info["adjusted"],
+                                     "baseline_zeroed_names": baseline_info["zeroed_names"]}
 
     # `plan`: full technical trace (rule citations, candidate math) — kept
     # for the "How this was worked out" detail expander. `summary`: the
@@ -703,6 +737,11 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             plan.append(f"GW{current_gw}: Forced {chosen['actual_k']} transfer(s) — bypasses the materiality bar "
                         f"by design; net {chosen['net_gain']:+.2f} xPts after the {chosen['hit_cost']:.0f}-pt "
                         f"hit ({old_total:.1f} → {chosen['total']:.1f} xPts over {horizon_n} GW(s)).")
+            if chosen.get("baseline_adjusted"):
+                zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
+                summary.append(f"Baseline note: {zeroed_txt} isn't a nailed starter over this horizon, so net-gain "
+                                f"compares the incoming player against {zeroed_txt} benched for free, not his own "
+                                f"live-discounted number.")
 
     else:
         best_net = max(c["net_gain"] for c in candidates.values())
@@ -845,6 +884,18 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                     f"(full value that week, not autosub-discounted)")
             if reason_bits:
                 summary.append(f"Why this counts as a real change: {'; '.join(reason_bits)}.")
+
+            # Patch 36 disclosure: if the outgoing player wasn't nailed, the
+            # net-gain figure above already compares the incoming player
+            # against the free bench replacement he'd have gotten anyway,
+            # not against his own (possibly near-zero) live projection —
+            # say so explicitly rather than leaving the number unexplained.
+            if chosen.get("baseline_adjusted"):
+                zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
+                summary.append(f"Baseline note: {zeroed_txt} isn't a nailed starter over this horizon (xM tier: "
+                                f"rotation/bench risk), so the net-gain above compares the incoming player against "
+                                f"what your best XI would score with {zeroed_txt} benched for free — not against "
+                                f"{zeroed_txt}'s own live-discounted number.")
 
             # Minimal "XI shifts" disclosure: an EXISTING squad player (never
             # the incoming transfer target — that's the headline move above,
@@ -1195,28 +1246,103 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
             "chosen_k": chosen["actual_k"]}
 
 
+def _xm_tier(xm: float | None, cfg: dict | None = None) -> str | None:
+    """Shared nailed/rotation/bench-risk classification (Patch 33's display
+    tiers, split out in Patch 36 so the SAME threshold that decides the
+    xM badge also decides whether an OUT candidate's own projection can be
+    trusted as this week's baseline — see `realistic_baseline_value()`).
+    Anchored on the xM Floor Rule's own 0.88 "confirmed nailed" figure
+    (`xm_heuristic.confirmed_current_season_start_floor` in
+    model_config.yaml) as the top of the "nailed" band. Returns None for a
+    missing xm (caller decides the fail-open behavior)."""
+    if xm is None or pd.isna(xm):
+        return None
+    nailed_floor = (cfg or {}).get("xm_heuristic", {}).get("confirmed_current_season_start_floor", 0.88)
+    if xm >= nailed_floor - 0.08:  # a little below the strict "confirmed nailed" floor still reads as safe
+        return "nailed"
+    elif xm >= 0.5:
+        return "rotation"
+    return "risk"
+
+
 def _xm_badge(xm: float | None, cfg: dict | None = None) -> str:
     """Patch 33 (manager report: a transfer's xPts already bakes in expected
     minutes via `xm`, but that was never disclosed next to the recommendation
     itself, so a rotation risk masquerading as a good net-xPts number was
-    invisible without opening the raw projection). Tiers below are a
-    disclosed, manager-directed display extension — not a doc-specified
-    threshold, same pattern as chip_advisor_thresholds/chip_shape_test
-    elsewhere — anchored on the xM Floor Rule's own 0.88 "confirmed nailed"
-    figure (`xm_heuristic.confirmed_current_season_start_floor` in
-    model_config.yaml) as the top of the "nailed" band."""
-    if xm is None or pd.isna(xm):
+    invisible without opening the raw projection). Tiers are a disclosed,
+    manager-directed display extension — not a doc-specified threshold, same
+    pattern as chip_advisor_thresholds/chip_shape_test elsewhere."""
+    tier = _xm_tier(xm, cfg)
+    if tier is None:
         return ""
-    nailed_floor = (cfg or {}).get("xm_heuristic", {}).get("confirmed_current_season_start_floor", 0.88)
-    if xm >= nailed_floor - 0.08:  # a little below the strict "confirmed nailed" floor still reads as safe
-        cls, label = "nailed", "nailed"
-    elif xm >= 0.5:
-        cls, label = "rotation", "rotation risk"
-    else:
-        cls, label = "risk", "bench risk"
+    label = {"nailed": "nailed", "rotation": "rotation risk", "risk": "bench risk"}[tier]
+    cls = {"nailed": "nailed", "rotation": "rotation", "risk": "risk"}[tier]
     return (f' <span class="xm-badge {cls}" title="Expected-minutes multiplier (xM) {xm:.2f} — already priced '
             f'into this player\'s xPts above, shown here so rotation risk isn\'t hidden behind a good net number.">'
             f'xM {xm:.2f} {label}</span>')
+
+
+def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: list[int], cfg: dict) -> dict:
+    """Patch 36 (manager report, 2026-09-14, following the Foden->Damsgaard
+    case): "if the model chosen someone to be replaced ... the model needs
+    to check maybe the recommended player [i.e. the OUT candidate] is a good
+    pick on the horizon so we should keep him on the bench for just 1GW, if
+    he isn't nailed for 3 GWs then the model should choose the starting xi
+    without this player ... then compare the recommended player replacement
+    with the starting xi to confirm if it's worth it."
+
+    Two-step check, confirmed with the manager:
+    1. A NAILED out-player (xM tier, same threshold as the xM badges) keeps
+       his own real per-GW projection as the baseline — his number already
+       fairly reflects a genuine fixture-driven dip, so second-guessing it
+       would be wrong. A single bad GW for an otherwise-secure starter is
+       not, on its own, a reason to distrust the model's number for him.
+    2. A NON-NAILED out-player (rotation/bench risk) may still carry a
+       live-data-driven projection that's more optimistic than reality
+       (the same gap `fpl_engine.free_lineup_fix_check()` surfaces for a
+       disruption-flagged player, generalized here to ANY shaky starter,
+       and now feeding the transfer's own net-gain math directly per the
+       manager's explicit choice, not just sitting beside it as a
+       footnote): this recomputes the no-transfer baseline with that
+       player's projection zeroed for the checked GWs, so the incoming
+       transfer target is judged against what you'd already get for free
+       from your own bench, not against a possibly-generous number.
+
+    Applied per GW across the whole checked window (manager: "check the
+    horizon if the side bar is for more than on GW") via
+    `opt.realized_horizon_value()`'s own per-GW best-XI selection — zeroing
+    a non-nailed player for the GWs he's actually being evaluated over,
+    never just GW1.
+
+    Returns {"baseline_total": float, "adjusted": bool, "zeroed_names":
+    [name, ...]}. "adjusted": False means every out-player was nailed, so
+    `baseline_total` is just the plain, unmodified realized value."""
+    if squad_df is None or squad_df.empty or not out_codes or not gw_list:
+        total = opt.realized_horizon_value(squad_df, gw_list, cfg) if squad_df is not None and not squad_df.empty \
+            else 0.0
+        return {"baseline_total": total, "adjusted": False, "zeroed_names": []}
+
+    non_nailed = []
+    for code in out_codes:
+        row = squad_df[squad_df["code"] == code]
+        if row.empty:
+            continue
+        tier = _xm_tier(row.iloc[0].get("xm"), cfg)
+        if tier in ("rotation", "risk"):
+            non_nailed.append((code, row.iloc[0].get("web_name")))
+
+    if not non_nailed:
+        return {"baseline_total": opt.realized_horizon_value(squad_df, gw_list, cfg),
+                "adjusted": False, "zeroed_names": []}
+
+    zeroed_squad = squad_df.copy()
+    for code, _ in non_nailed:
+        for gw in gw_list:
+            col = f"xpts_gw{gw}"
+            if col in zeroed_squad.columns:
+                zeroed_squad.loc[zeroed_squad["code"] == code, col] = 0.0
+    return {"baseline_total": opt.realized_horizon_value(zeroed_squad, gw_list, cfg),
+            "adjusted": True, "zeroed_names": [n for _, n in non_nailed]}
 
 
 def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dict:

@@ -223,6 +223,45 @@ meta:
                           # makes revisiting an already-viewed GW instant instead of a fresh MILP solve).
                           # NOTE (2026-09-14): rb_model_app_patch35.zip is CUMULATIVE: Patch 29 through
                           # 35 together, on top of the manager's Patch 28 baseline.
+                          # Patch 36 (2026-09-14, same-day manager follow-up: "Foden is already dead
+                          # with 0 xPts, the model needs to see who Damsgaard actually replaces and
+                          # compare their xPts"): changes what a transfer's net gain is measured
+                          # AGAINST, not just how it's disclosed. Previously every candidate's net gain
+                          # was new_total - (squad's plain current realized total) - hit_cost, which
+                          # let an outgoing player's OWN discounted-but-live projection quietly stand in
+                          # as "what you'd lose" even when he wasn't a real starter going forward. The
+                          # manager's own two-part algorithm, confirmed via two rounds of explicit sign-
+                          # off (xM tiers reused as the nailed/non-nailed test; the new baseline becomes
+                          # the REAL net-gain math, not a side comparison): (1) if the outgoing player
+                          # is a NAILED starter (xM tier via the existing xm_heuristic floor, same
+                          # threshold as the Patch 33 xM badges), his own real per-GW projection is
+                          # trusted unchanged as the baseline -- a single bad-fixture week is already
+                          # fairly reflected; (2) if he is NOT nailed (rotation/bench-risk xM tier), his
+                          # projection is zeroed across every GW being checked and the baseline is
+                          # RECOMPUTED via optimizer.realized_horizon_value() -- i.e. the incoming player
+                          # is judged against what the best XI would score with him benched for free
+                          # (the replacement already on the bench), not against his own near-dead
+                          # number. Implemented as recommend.realistic_baseline_value(squad_df,
+                          # out_codes, gw_list, cfg); recommend._xm_tier() was split out of _xm_badge()
+                          # so both the badge display and this gating logic share one threshold, never
+                          # two that could silently drift apart. Wired into BOTH transfer-recommendation
+                          # candidate loops -- suggest_transfers() (per candidate, over the full
+                          # horizon) and plan_transfer_schedule() (per week, over that week's remaining
+                          # horizon) -- so every net-gain number shown anywhere already reflects this;
+                          # the k=0 "Roll / no transfer" baseline is deliberately left unadjusted (no
+                          # transfer is being proposed there, and the existing free_lineup_fix_check()
+                          # display already surfaces the "bench him for free" case separately). A new
+                          # "Baseline note" line is appended to the recommendation summary/plan whenever
+                          # a candidate's baseline was adjusted, naming the non-nailed player(s) so the
+                          # comparison is never silent. Net effect on the Foden/Damsgaard case: if Foden
+                          # is genuinely non-nailed, Damsgaard's projection is now compared against
+                          # Foden's own bench replacement's free value, not Foden's own near-zero
+                          # number -- so a marginal transfer that used to look artificially inflated (by
+                          # comparing against a already-discounted "loss") will correctly show a smaller,
+                          # more honest net gain, and may fall below the materiality bar into a Roll
+                          # where it previously would have cleared it.
+                          # NOTE (2026-09-14): rb_model_app_patch36.zip is CUMULATIVE: Patch 29 through
+                          # 36 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
