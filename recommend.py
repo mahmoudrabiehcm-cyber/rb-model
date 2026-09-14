@@ -362,7 +362,12 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         current_codes = list(sim_squad["code"])
         out_codes_all = set(current_codes)
         team_value = round(bank + (sim_squad["price"].sum(skipna=True) or 0.0), 1)
-        old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg)
+        # Patch 37: same near-zero bench weight (except bb_play_gw) as
+        # suggest_transfers() — applied here too so the weekly pacing plan
+        # doesn't let bench-quality alone carry a marginal move.
+        bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+        old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
+                                                bb_play_gw=bb_play_gw)
         moe = eng.margin_of_error_threshold(old_total, cfg)
 
         candidates = {0: {"squad": sim_squad, "total": old_total, "net_gain": 0.0,
@@ -377,7 +382,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             actual_k = len(out_codes_all - set(new_squad["code"]))
             if actual_k == 0:
                 continue  # nothing worth swapping at this k — already covered by k=0
-            new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg)
+            new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
+                                                    bb_play_gw=bb_play_gw)
             # Patch 36 — same nailed-gate baseline as suggest_transfers(),
             # applied per week: a non-nailed out-player's projection is
             # zeroed across the remaining weeks before the baseline is
@@ -385,7 +391,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             # bench replacement, not the outgoing player's own (possibly
             # near-zero) live number.
             out_codes_this = out_codes_all - set(new_squad["code"])
-            baseline_info = realistic_baseline_value(sim_squad, out_codes_this, remaining_gws, cfg)
+            baseline_info = realistic_baseline_value(sim_squad, out_codes_this, remaining_gws, cfg,
+                                                      bb_play_gw=bb_play_gw)
             baseline_total = baseline_info["baseline_total"]
             net_gain = round(new_total - baseline_total, 2)  # never a hit cost in this no-hits path
             if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
@@ -642,7 +649,11 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     # horizon) — never a raw sum of all 15 players' full projections, which
     # is exactly the number that let a bench-only swap look like a genuine
     # upgrade in Patch 3.
-    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg)
+    # Patch 37: near-zero bench weight (except the specific bb_play_gw week)
+    # for every net-gain comparison in this function — a stronger bench
+    # alone should not be able to carry a marginal transfer over the bar.
+    bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
     team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
 
     full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
@@ -677,7 +688,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         # autosub-discounted bench), not the MILP's raw xpts_horizon_sum —
         # the MILP objective is only a search heuristic for finding
         # candidate squads, the realized value is what actually decides.
-        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg)
+        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                bb_play_gw=bb_play_gw)
         # Patch 36 (manager report, 2026-09-14: "Foden dead at 0 xPts, this
         # doesn't make sense") — the comparison baseline for THIS candidate
         # is no longer always the squad's plain current total. A nailed
@@ -690,7 +702,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         # (possibly near-zero) number. Per the manager's explicit choice,
         # this IS the real net-gain math now, not a side display.
         out_codes_this = out_codes_all - set(new_squad["code"])
-        baseline_info = realistic_baseline_value(squad_df, out_codes_this, gw_list, cfg)
+        baseline_info = realistic_baseline_value(squad_df, out_codes_this, gw_list, cfg, bb_play_gw=bb_play_gw)
         baseline_total = baseline_info["baseline_total"]
         net_gain = round(new_total - baseline_total - hit_cost, 2)
         # keyed by actual_k so two requested k's that land on the same real
@@ -972,7 +984,8 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
                               profile_name: str, hit_stance: str, free_transfers: int,
                               bank: float, current_gw: int, gw_list: list[int],
                               target_code, default_net_gain: float | None = None,
-                              disrupted_codes: set | None = None) -> dict:
+                              disrupted_codes: set | None = None,
+                              bb_play_gw: int | None = None) -> dict:
     """Manager-directed what-if (Patch 6): "if I bring THIS specific player
     in, is it worth it?" — auto-solving the cheapest legal way to fund him
     (`optimizer.solve_squad`'s `must_include_codes`), scored the exact same
@@ -1026,7 +1039,11 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
 
     current_codes = list(squad_df["code"])
     out_codes_all = set(current_codes)
-    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg)
+    # Patch 37: same near-zero bench weight (except bb_play_gw) as
+    # suggest_transfers() — a manager-named target shouldn't clear the bar on
+    # bench-quality credit alone any more than a model-picked one should.
+    bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
     team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
     moe = eng.margin_of_error_threshold(old_total, cfg)
 
@@ -1109,7 +1126,8 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         if actual_k == 0 or target_code not in set(new_squad["code"]):
             continue  # solver couldn't actually fit the target in at this k
         hit_cost = hit_cost_per * max(0, actual_k - free_transfers)
-        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg)
+        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                bb_play_gw=bb_play_gw)
         net_gain = round(new_total - old_total - hit_cost, 2)
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
@@ -1282,7 +1300,8 @@ def _xm_badge(xm: float | None, cfg: dict | None = None) -> str:
             f'xM {xm:.2f} {label}</span>')
 
 
-def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: list[int], cfg: dict) -> dict:
+def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: list[int], cfg: dict,
+                              bb_play_gw: int | None = None) -> dict:
     """Patch 36 (manager report, 2026-09-14, following the Foden->Damsgaard
     case): "if the model chosen someone to be replaced ... the model needs
     to check maybe the recommended player [i.e. the OUT candidate] is a good
@@ -1316,9 +1335,17 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
 
     Returns {"baseline_total": float, "adjusted": bool, "zeroed_names":
     [name, ...]}. "adjusted": False means every out-player was nailed, so
-    `baseline_total` is just the plain, unmodified realized value."""
+    `baseline_total` is just the plain, unmodified realized value.
+
+    Patch 37: uses the same near-zero-except-bb_play_gw bench weighting as
+    the rest of the transfer-recommendation net-gain math (manager report:
+    a stronger bench alone — e.g. a non-nailed OUT player who was already
+    benched at 0, so THIS function's own zeroing has no effect on the XI —
+    shouldn't be able to inflate the comparison via bench-autosub credit)."""
+    bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
     if squad_df is None or squad_df.empty or not out_codes or not gw_list:
-        total = opt.realized_horizon_value(squad_df, gw_list, cfg) if squad_df is not None and not squad_df.empty \
+        total = opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
+                                            bb_play_gw=bb_play_gw) if squad_df is not None and not squad_df.empty \
             else 0.0
         return {"baseline_total": total, "adjusted": False, "zeroed_names": []}
 
@@ -1332,7 +1359,8 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
             non_nailed.append((code, row.iloc[0].get("web_name")))
 
     if not non_nailed:
-        return {"baseline_total": opt.realized_horizon_value(squad_df, gw_list, cfg),
+        return {"baseline_total": opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
+                                                               bb_play_gw=bb_play_gw),
                 "adjusted": False, "zeroed_names": []}
 
     zeroed_squad = squad_df.copy()
@@ -1341,7 +1369,8 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
             col = f"xpts_gw{gw}"
             if col in zeroed_squad.columns:
                 zeroed_squad.loc[zeroed_squad["code"] == code, col] = 0.0
-    return {"baseline_total": opt.realized_horizon_value(zeroed_squad, gw_list, cfg),
+    return {"baseline_total": opt.realized_horizon_value(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                           bb_play_gw=bb_play_gw),
             "adjusted": True, "zeroed_names": [n for _, n in non_nailed]}
 
 

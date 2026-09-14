@@ -262,6 +262,44 @@ meta:
                           # where it previously would have cleared it.
                           # NOTE (2026-09-14): rb_model_app_patch36.zip is CUMULATIVE: Patch 29 through
                           # 36 together, on top of the manager's Patch 28 baseline.
+                          # Patch 37 (2026-09-14, same-day manager follow-up against a REAL GW5 squad
+                          # screenshot, not synthetic data): Patch 36's fix didn't apply here because
+                          # Foden was already ON THE BENCH at 0.0 xPts, not a starter -- zeroing an
+                          # already-zero bench player's projection changes nothing about the best XI, so
+                          # the +2.9 net gain shown was untouched by that fix. The manager traced the
+                          # real driver by hand: Damsgaard (5.0) actually displaces Gomez, the weakest
+                          # midfielder ACTUALLY STARTING (3.6) -- a genuine +1.4 xPts swap -- but the
+                          # model's total also credited a SECOND, separate gain from Gomez migrating to
+                          # the bench in Foden's place (Rule #12 bench-autosub value: a real 3.6-xPts
+                          # player insuring the bench is worth more than a dead 0.0 one), stacking to the
+                          # reported +2.9. Rule #12's bench-value math isn't wrong on its own terms, but
+                          # letting it inflate a transfer's PASS/FAIL materiality verdict lets bench
+                          # quality alone carry a move that the direct starting-XI swap wouldn't. Fix,
+                          # confirmed with the manager (near-zero bench weight outside a confirmed Bench
+                          # Boost week; full weight is restored automatically for a GW where the
+                          # incoming/displaced player genuinely rotates INTO the starting XI, since that
+                          # is already counted as xi_total, never bench_total, in that GW's own
+                          # calculation -- no special-casing needed for genuine rotation):
+                          # optimizer.realized_gw_value()/realized_horizon_value() gained
+                          # `bench_weight_scale` (default 1.0, unchanged for every pre-existing caller)
+                          # and `bb_play_gw` (forces the scale back to a full 1.0 for that one GW only).
+                          # New config key `transfer.bench_weight_non_bb_gw: 0.08` (near-zero, per the
+                          # manager's explicit choice) is now threaded through EVERY transfer net-gain
+                          # computation in recommend.py -- suggest_transfers(), plan_transfer_schedule(),
+                          # evaluate_target_transfer() (app.py's call site updated to pass bb_play_gw
+                          # through), and Patch 36's realistic_baseline_value() -- so a stronger bench can
+                          # no longer, on its own, carry a marginal transfer over the materiality bar
+                          # outside a genuine Bench Boost week. Deliberately NOT applied to
+                          # chip_protocol.py's Wildcard-trigger/rebuild-vs-hold comparisons or the §1a
+                          # Team Rating % calc -- those are whole-squad ongoing-quality assessments, a
+                          # different question from a specific transfer's marginal net gain, and keep
+                          # full bench weight. Verified against the manager's own real GW5 squad shape
+                          # (reconstructed from the screenshot): the Foden(bench,0.0)->Damsgaard(5.0)
+                          # scenario now nets +1.43 xPts (matching the manager's own by-hand math) and
+                          # correctly Rolls under the 2.0 xPts materiality bar, instead of the previous
+                          # +2.9 recommendation.
+                          # NOTE (2026-09-14): rb_model_app_patch37.zip is CUMULATIVE: Patch 29 through
+                          # 37 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -487,6 +525,22 @@ transfer:
   # (there is only ever one starting GK, and a club's own #1 missing a match
   # entirely is rare — this is NOT the outfield exposure formula).
   bench_gk_autosub_prob: 0.05
+  # Patch 37 (manager report, 2026-09-14: "the weight of the bench and auto
+  # subs shouldn't be that much" for a transfer's net-gain math, "especially
+  # if we are not planning for the bench boost soon"): scales DOWN just the
+  # bench-autosub component of a transfer's net gain in
+  # recommend.suggest_transfers()/plan_transfer_schedule()/
+  # evaluate_target_transfer()/realistic_baseline_value() to near-zero, so a
+  # stronger bench alone can no longer carry a marginal transfer over the
+  # materiality bar — a transfer must win almost entirely on the direct
+  # starting-XI swap it causes. Overridden back to a full 1.0 for the one
+  # specific GW a Bench Boost play-verdict falls on (bb_play_gw) — full bench
+  # value genuinely counts that week. Does NOT apply to
+  # optimizer.realized_gw_value()/realized_horizon_value()'s OTHER callers
+  # (chip_protocol.py's Wildcard-trigger/rebuild-vs-hold comparisons, §1a
+  # Team Rating %) — those are whole-squad ongoing-quality assessments, not a
+  # specific transfer's marginal net gain, and keep full bench weight.
+  bench_weight_non_bb_gw: 0.08
   # How many gameweeks ahead to look when checking whether a Wildcard/Free
   # Hit is coming up soon enough that banking a transfer for it beats
   # spending it on an incremental swap now.

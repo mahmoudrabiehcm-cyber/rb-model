@@ -344,7 +344,8 @@ def bench_autosub_prob(position: str, bench_rank: int, starters_xi: pd.DataFrame
     return round(exposure * decay, 3)
 
 
-def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm") -> dict:
+def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
+                       bench_weight_scale: float = 1.0) -> dict:
     """Standing Rule #12 (Bench Value Rule): "a bench player's value in any
     comparison is P(autosub triggers) x their points in that scenario, never
     their full 'if they started every week' xPts — and this must actually be
@@ -354,7 +355,17 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
     Rule, same mechanic as `best_starting_xi`), then values the 4 remaining
     bench slots at their autosub-discounted rate (`bench_autosub_prob`)
     instead of their raw projection, so the returned total is a squad's
-    REALIZED value for this week — not a fantasy "everyone started" total."""
+    REALIZED value for this week — not a fantasy "everyone started" total.
+
+    `bench_weight_scale` (Patch 37, manager report 2026-09-14: a transfer
+    that only won on bench-quality credit — Gomez displacing a dead Foden on
+    the bench, not a real starting-XI upgrade — was inflating a 1.4-1.6 xPts
+    direct swap into a reported +2.9 net gain) further scales DOWN just the
+    bench_total component, leaving xi_total (a real starting-XI swap) always
+    counted in full. Defaults to 1.0 (unchanged) for every existing caller —
+    only the transfer-recommendation net-gain math in recommend.py opts into
+    a reduced scale via `realized_horizon_value`'s own `bench_weight_scale`/
+    `bb_play_gw` params."""
     empty = {"xi_total": 0.0, "bench_total": 0.0, "total_realized": 0.0}
     if squad is None or squad.empty or gw_col not in squad.columns:
         return empty
@@ -372,19 +383,28 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
             pts = 0.0 if pd.isna(pts) else float(pts)
             prob = bench_autosub_prob(pos, rank, xi, xm_col, cfg)
             bench_total += prob * pts
+    bench_total *= bench_weight_scale
     return {"xi_total": round(xi_total, 2), "bench_total": round(bench_total, 2),
             "total_realized": round(xi_total + bench_total, 2)}
 
 
-def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_col: str = "xm") -> float:
+def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_col: str = "xm",
+                            bench_weight_scale: float = 1.0, bb_play_gw: int | None = None) -> float:
     """Sums `realized_gw_value()`'s total across every GW in the horizon —
     the Rule #12-compliant replacement for a raw `xpts_horizon_sum` sum
     whenever squads/transfer-candidates are being SCORED against each other.
     Never used to display a single player's own projection — only to decide
-    which candidate squad actually wins a comparison."""
+    which candidate squad actually wins a comparison.
+
+    Patch 37: `bench_weight_scale` (default 1.0, unchanged) lets a caller
+    de-weight bench-autosub credit uniformly across the horizon; `bb_play_gw`,
+    when given, forces the scale back to a full 1.0 for that ONE gameweek
+    only — Bench Boost genuinely counts full bench value that specific week,
+    every other GW in `gw_list` uses `bench_weight_scale`."""
     total = 0.0
     for gw in gw_list:
-        total += realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col)["total_realized"]
+        scale = 1.0 if (bb_play_gw is not None and gw == bb_play_gw) else bench_weight_scale
+        total += realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale)["total_realized"]
     return round(total, 2)
 
 

@@ -1601,7 +1601,7 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
             target_eval = recommend.evaluate_target_transfer(
                 squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
                 planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
-                disrupted_codes=_disrupted_codes)
+                disrupted_codes=_disrupted_codes, bb_play_gw=_bb_play_gw)
             st.markdown("**Target player scenario**")
             if target_eval["summary"]:
                 for line in target_eval["summary"]:
