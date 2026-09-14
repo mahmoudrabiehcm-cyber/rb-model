@@ -69,9 +69,13 @@ constraint) and the same new `margin_of_error_threshold()` helper:
   Standing Rule #25) against your team's total value for each horizon GW
   and compares it to your own best starting XI that week — only solved for
   chips you haven't already played, since each check is a fresh MILP solve.
-  Wildcard deliberately has no verdict here (Standing Rule #24) — it's
-  flag-only, now with the quantified squad-vs-ceiling gap folded into that
-  flag's text as one more disclosed data point, never a trigger.
+  Wildcard has no "play GW{n}" line here — since Patch 30 its own trigger
+  CONDITION is genuinely mechanical (`fpl_engine.wildcard_trigger_check()`,
+  v6.4's actual Team Rating %/cumulative-gap thresholds), it just never
+  resolves to a single date, because the 8-GW decay-weighted build horizon
+  keeps that a rolling re-test rather than a one-week pick (Standing Rule
+  #32 — corrected from an earlier mislabeling of this as Rule #24, which is
+  actually about ordinary transfer timing).
 - **Alt-captain is now style-aware.** It used to always show the
   lowest-EO shortlisted player, which made no sense for "Template Hugger /
   Rank Protector" (a profile about avoiding risk, not surfacing a
@@ -284,8 +288,10 @@ conceptually separate changes:
   not a remembered role-change timestamp (the free tier has no database).
   See the docstring in `setpiece.py` for the exact mechanism and how to
   upgrade it later if you add persistent storage.
-- **Wildcard timing is always a flag, never a verdict** — by design
-  (Standing Rule #24), not a limitation to fix.
+- **Wildcard's trigger condition is mechanical (Patch 30), the play date isn't** —
+  by design (Standing Rule #32 — the actual chip-timing rule; an earlier
+  version of this app mis-cited #24, which is about ordinary transfer
+  timing and was never about Wildcard), not a limitation to fix.
 - **`current_gw` vs `planning_gw`** (fixed, documented here since it's easy
   to reintroduce). `fpl_data.py`'s `FplSnapshot` carries both: `current_gw`
   is the last COMPLETED/locked gameweek (the official API's `is_current`

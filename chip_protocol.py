@@ -2,9 +2,17 @@
 chip_protocol.py
 Step 9 — Chip Timing Protocol (FPL Projection Model v4.0).
 
-Two mechanical pieces (chip status tracking, DGW/BGW detection) plus one
-deliberately non-mechanical piece (Wildcard timing — always a flag, never
-a verdict, per Standing Rule #24).
+Mechanical pieces (chip status tracking, DGW/BGW detection, and — since
+Patch 30 — the v6.4 Wildcard trigger itself) plus one piece that stays
+deliberately non-mechanical: the specific GW a Wildcard actually gets
+played on, which stays a rolling re-test rather than a one-week pick, per
+Standing Rule #32 (Dynamic Chip Timing Rule — "a planned chip date is a
+working hypothesis, not a fixed commitment"). Patch 30 corrected an
+app-code mislabeling that had cited Standing Rule #24 (the Transfer Timing
+Discipline Rule — about ordinary transfers, not Wildcard at all) as the
+reason Wildcard stayed flag-only; #32 is the actual governing rule, and it
+never forbade computing the trigger condition mechanically, only forbade
+treating a chosen date as locked in.
 """
 from __future__ import annotations
 import pandas as pd
@@ -105,40 +113,36 @@ def chip_recommendations(status_rows: list[dict], dgw_bgw: dict, squad_teams: li
     return notes
 
 
-def wildcard_flag(rank_history: list[int], flagged_player_count: int,
-                   squad_xpts_total: float | None = None,
-                   reachable_ceiling_total: float | None = None,
-                   moe_threshold: float | None = None) -> str | None:
-    """NEVER a verdict — Standing Rule #24. Surfaces a flag with its trigger
-    stated explicitly; the decision stays with the manager. rank_history:
-    overall rank for the last few gameweeks, oldest first (lower = better).
-    Optional squad_xpts_total/reachable_ceiling_total/moe_threshold (v4.6+)
-    add the quantified squad-vs-reachable-ceiling gap as an extra disclosed
-    data point alongside the existing rank-trend/flagged-player triggers —
-    still just another number on the flag, never a mechanical trigger of
-    its own (that would contradict Rule #24)."""
-    triggers = []
-    if len(rank_history) >= 3:
+def wildcard_trigger_flag(trigger: dict, rank_history: list[int] | None = None) -> str | None:
+    """Patch 30 (2026-09-14) — REPLACES the old wildcard_flag(), which ran an
+    ad hoc rank-decline + flagged-player-count heuristic that pre-dated v6.4
+    and was never updated once the doc gave Wildcard a real numeric trigger.
+    `trigger` is fpl_engine.wildcard_trigger_check()'s result — the doc's
+    actual mechanical condition (average Team Rating % below ~78-80% OR a
+    cumulative gap to the bounded-ceiling optimal of ~15+ xPts over the 3-4
+    GW detection window). Returns None when `trigger["active"]` is False —
+    no manufactured flag just because rank happened to dip or a bench player
+    picked up a knock; those aren't in the doc's own trigger condition.
+
+    `rank_history` is now supplementary COLOR ONLY, never a trigger input —
+    included in the message when a genuine 2-GW worsening trend happens to
+    coincide with an active trigger, since that's still true and relevant
+    context, just no longer part of deciding whether the flag fires at all.
+
+    Still a flag, not a play verdict — v6.4's 8-GW decay-weighted build
+    horizon means Wildcard timing stays a rolling re-test (Standing Rule
+    #32), never a single best-week pick the way Free Hit gets one."""
+    if not trigger or not trigger.get("active"):
+        return None
+    rank_note = ""
+    if rank_history and len(rank_history) >= 3:
         recent = rank_history[-3:]
         if recent[0] < recent[1] < recent[2]:
-            triggers.append(f"overall rank has worsened for 2 consecutive gameweeks "
-                             f"({recent[0]:,} -> {recent[1]:,} -> {recent[2]:,})")
-    if flagged_player_count >= 3:
-        triggers.append(f"{flagged_player_count} squad players currently carry a "
-                         f"data-quality or availability flag")
-    if not triggers:
-        return None
-    gap_note = ""
-    if squad_xpts_total is not None and reachable_ceiling_total is not None and reachable_ceiling_total > 0:
-        gap = reachable_ceiling_total - squad_xpts_total
-        if moe_threshold is not None and gap < moe_threshold:
-            gap_note = (f" (for reference: your squad is within margin-of-error of its own reachable "
-                        f"ceiling right now — {gap:.1f} xPts gap — so a Wildcard's upside here is limited "
-                        f"to whatever a full rebuild alone would add)")
-        else:
-            gap_note = f" (for reference: {gap:.1f} xPts gap to your own reachable ceiling)"
-    return ("Consider a Wildcard — " + "; ".join(triggers) + gap_note +
-            ". This is a flag, not a recommendation: the timing call is yours.")
+            rank_note = (f" Overall rank has also worsened for 2 consecutive gameweeks "
+                          f"({recent[0]:,} -> {recent[1]:,} -> {recent[2]:,}), for context.")
+    return (f"Wildcard trigger ACTIVE (v6.4 mechanical condition): {trigger['reason']}.{rank_note} "
+            f"This is a genuine trigger, not a play verdict — the specific GW to actually play it stays your "
+            f"call, re-tested every run (Standing Rule #32).")
 
 
 # ---------------------------------------------------------------------------
@@ -146,8 +150,11 @@ def wildcard_flag(rank_history: list[int], flagged_player_count: int,
 # Boost, Triple Captain and Free Hit within the manager's chosen horizon,
 # gated by Standing Rule #34's margin-of-error threshold so a difference
 # inside demonstrated weekly noise is reported as a tie ("hold"), never
-# dressed up as a clear verdict. Wildcard deliberately has no function here
-# — it stays flag-only per Rule #24, handled by wildcard_flag() above.
+# dressed up as a clear verdict. Wildcard's own trigger CONDITION is now
+# mechanical too (Patch 30, wildcard_trigger_check()) — what stays
+# deliberately non-mechanical here is which single GW to actually play it
+# on, per Standing Rule #32, so it still isn't part of this "which GW"
+# advisor block.
 # ---------------------------------------------------------------------------
 def evaluate_bench_boost(bench_df: pd.DataFrame, gw_list: list[int], moe_fn) -> dict:
     """Scans the horizon for the single best Bench Boost gameweek: sums the
@@ -200,13 +207,14 @@ def evaluate_wildcard_whatif(current_squad_future_proj: pd.DataFrame, future_poo
     freshly-solved rebuild at a candidate date), run against a manager-
     chosen date instead of only the model's currently-planned one.
 
-    Standing Rule #24 applies in full: this is INFORMATION, never a
-    mechanical go/no-go verdict — the caller must present the gap as a
-    disclosed number for the manager's own judgment, exactly like
-    `wildcard_flag()` above, never as "play"/"hold" wording (that framing
+    Standing Rule #32 applies in full: for a MANAGER-CHOSEN candidate date
+    like this one, the caller must present the gap as a disclosed number for
+    the manager's own judgment, never as "play"/"hold" wording (that framing
     is reserved for the Chip Advisor's Bench Boost/Triple Captain/Free Hit
-    verdicts, which are genuinely mechanical per Rule #34; Wildcard timing
-    is deliberately excluded from that treatment by Rule #24).
+    verdicts, which are genuinely mechanical per Rule #34). This is
+    separate from wildcard_trigger_check()'s own ACTIVE/not-active
+    condition (Patch 30) — that one IS mechanical, it just never names a
+    date either, for the same Rule #32 reason.
 
     Unlike Free Hit (Standing Rule #25), a Wildcard squad does NOT revert —
     so the rebuild is optimized on the full `future_gw_list` horizon sum,
@@ -273,10 +281,10 @@ def wildcard_freehit_shape_test(current_squad: pd.DataFrame, full_pool: pd.DataF
     doc names the shape-test procedure but gives no numeric overlap
     threshold, same pattern as `chip_advisor_thresholds` and the Team-
     Stability gaps. Returns {"classification": str, "by_gw": {gw: overlap},
-    "spike_gws": [gw,...], "notes": [str,...]} — never a mechanical
-    Wildcard trigger of its own (Rule #24 still applies to Wildcard); this is
-    a cross-check attached to whichever chip's own flag/verdict already
-    fired."""
+    "spike_gws": [gw,...], "notes": [str,...]} — not itself the Wildcard
+    trigger (that's wildcard_trigger_check(), Patch 30); this is a
+    cross-check that decides WHICH chip a fired trigger actually points to,
+    Wildcard or Free Hit."""
     import optimizer as opt
 
     shape_cfg = cfg.get("chip_shape_test", {})
@@ -362,3 +370,107 @@ def evaluate_free_hit(squad_df: pd.DataFrame, gw_list: list[int], rebuild_fn, mo
     threshold = round(moe_fn(by_gw[best_gw]["rebuild"]), 2)
     verdict = f"play_gw{best_gw}" if gap >= threshold else "hold"
     return {"verdict": verdict, "best_gw": best_gw, "by_gw": by_gw, "threshold": threshold}
+
+
+# ---------------------------------------------------------------------------
+# Chip Strategy — combined view (Patch 29, 2026-09-14 manager request). A
+# PRESENTATION-LAYER SYNTHESIS ONLY: every number here was already computed
+# by wildcard_trigger_check()/wildcard_trigger_flag()/wildcard_freehit_shape_
+# test()/evaluate_bench_boost()/evaluate_triple_captain()/evaluate_free_hit()
+# above — this function adds no new math, it reads those results together
+# and orders them into one narrative, because the manager found the
+# individual pieces scattered across the page hard to act on together.
+#
+# Standing Rule #32 still applies in full: Wildcard's trigger CONDITION is
+# genuinely mechanical since Patch 30 (unlike Bench Boost/Triple Captain/
+# Free Hit, it never resolves to one specific "play GW{n}" — v6.4's 8-GW
+# decay-weighted build horizon keeps the actual date a rolling re-test, per
+# Rule #32). Wildcard appears here as that trigger's own message (already
+# phrased as ACTIVE/not, never "play") plus its shape-test cross-reference.
+# ---------------------------------------------------------------------------
+def chip_strategy_summary(wc_flag: str | None, shape_test: dict | None,
+                           bb_advisor: dict | None, tc_advisor: dict | None, fh_advisor: dict | None,
+                           chip_rows: list[dict], disruption_notes: list[str] | None = None,
+                           wc_trigger: dict | None = None) -> list[str]:
+    """Returns an ordered list of plain-language strategy lines for a single
+    combined "Chip Strategy" panel. Section order: (1) near-term mechanical
+    plays (BB/TC/FH verdicts that actually fired, soonest GW first) — these
+    are the closest thing to a genuine "do this" this tool ever gives; (2)
+    Wildcard's own v6.4 mechanical trigger (Patch 30 — `wc_flag` here is
+    wildcard_trigger_flag()'s output, already stating the real Team
+    Rating %/cumulative-gap numbers, not the old rank/flagged-count
+    heuristic), cross-referenced against the shape-test so its Wildcard-vs-
+    Free-Hit caveat travels with it; (3) a same-week chip-clash caution when
+    a mechanical play verdict and an active Wildcard trigger land in a way
+    that would waste one of them; (4) the v6.4 chip-chaining reminder (bench
+    strength for Bench Boost, a nailed premium's run for Triple Captain) —
+    this tool can't compute that reminder's actual numbers outside a real
+    Wildcard-build scenario, so it points at the "Evaluate a scenario" panel
+    rather than fabricating a check; (5) any live Rule #41 disruption notes,
+    since a disrupted player can itself be a reason a chip's timing shifts."""
+    lines = []
+
+    # (1) Near-term mechanical plays, soonest first.
+    plays = []
+    for name, adv in (("Bench Boost", bb_advisor), ("Triple Captain", tc_advisor), ("Free Hit", fh_advisor)):
+        if adv and isinstance(adv.get("verdict"), str) and adv["verdict"].startswith("play_gw"):
+            gw = adv.get("best_gw")
+            plays.append((gw, name))
+    plays.sort(key=lambda t: (t[0] is None, t[0]))
+    if plays:
+        play_bits = "; ".join(f"{name} at GW{gw}" for gw, name in plays)
+        lines.append(f"Near-term plays this horizon, soonest first: {play_bits}. These are genuinely mechanical "
+                      f"verdicts (Rule #34) — the closest thing to a \"do this\" call this tool makes.")
+    else:
+        lines.append("No Bench Boost / Triple Captain / Free Hit play verdict fired this run — everything still "
+                      "available is a statistical hold for now (see Chip Advisor above for each one's own margin).")
+
+    # (2) Wildcard — its own v6.4 mechanical trigger (Patch 30), cross-
+    # referenced with the shape-test. Explicit "no trigger" line so its
+    # absence isn't mistaken for "not checked."
+    if wc_flag:
+        wc_line = f"Wildcard: {wc_flag}"
+        if shape_test and shape_test.get("classification") == "wildcard_shaped":
+            wc_line += (" The shape-test backs this up as a persistent, structural gap, not a fixture spike — "
+                        "the case for a Wildcard (over a one-week Free Hit) builds the longer this holds.")
+        elif shape_test and shape_test.get("classification") == "freehit_shaped":
+            spike = ", ".join(f"GW{g}" for g in shape_test.get("spike_gws", []))
+            wc_line += (f" CAUTION — the shape-test reads this as fixture-shaped, concentrated at {spike}, not a "
+                        f"sustained gap: worth checking whether Free Hit covers it before committing a Wildcard "
+                        f"here (Step 8c).")
+        elif shape_test and shape_test.get("classification") == "no_signal":
+            wc_line += " The shape-test found no clean structural-vs-spike pattern yet either way this run."
+        lines.append(wc_line)
+    elif wc_trigger and wc_trigger.get("avg_rating_pct") is not None:
+        lines.append(f"Wildcard: no trigger this run — {wc_trigger['reason']}.")
+    else:
+        lines.append("Wildcard: no trigger this run (insufficient data to evaluate — see Chip Rack for detail).")
+
+    # (3) Same-week clash caution — a mechanical play verdict landing on the
+    # same GW an active Wildcard flag is live is worth a plain heads-up,
+    # since a Wildcard resets the whole squad and would make that separate
+    # chip's build largely redundant that week.
+    if wc_flag and plays:
+        clash_gws = {gw for gw, _ in plays}
+        if clash_gws:
+            lines.append(f"If you're weighing playing the Wildcard around GW{min(clash_gws)}–GW{max(clash_gws)}, "
+                          f"note the mechanical play verdict(s) above land in that same window — playing both "
+                          f"the same week is redundant (a Wildcard already rebuilds everything). Sequencing "
+                          f"between them is your call, not something this tool decides.")
+
+    # (4) Chip-chaining reminder (v6.4) — genuinely can't be computed here
+    # (needs an actual built Wildcard squad), so this points at the tool that
+    # can rather than fabricating a check.
+    wc_available = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in (chip_rows or []))
+    if wc_flag and wc_available:
+        lines.append("Chip-chaining checklist (Step 8c, v6.4) — before playing a Wildcard, check its build's "
+                      "bench strength (does it make a near-term Bench Boost live?) and captain ceiling (does it "
+                      "include a nailed premium worth a near-term Triple Captain?). Run \"Evaluate a scenario\" "
+                      "for a candidate Wildcard GW below to see the actual build and check both.")
+
+    # (5) Disruption notes (Rule #41) — a disrupted player can itself shift
+    # chip timing (e.g. tip toward Wildcard now rather than waiting).
+    for note in (disruption_notes or []):
+        lines.append(note)
+
+    return lines

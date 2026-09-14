@@ -490,8 +490,9 @@ def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int
 
     Rule #41: `planned_chip_gw` is a manager-stated "next full-rebuild
     chip" GW (there is nowhere in the live API data for this app to infer
-    a still-unplayed chip's intended date on its own -- Wildcard/Free Hit
-    timing is deliberately never mechanical, Standing Rule #24). When a
+    a still-unplayed chip's intended DATE on its own -- that stays a
+    rolling re-test per Standing Rule #32, even though Patch 30 made
+    Wildcard's own trigger CONDITION mechanical). When a
     disruption is found AND that GW falls inside or at the start of
     `gw_list`, the ordinary transfer net-gain horizon is capped to stop
     before it -- gains projected for weeks the chip will already have
@@ -562,3 +563,95 @@ def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int
                       f"magnitude threshold).")
 
     return {"players": players, "capped_gw_list": capped_gw_list, "notes": notes}
+
+
+def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squad_df: pd.DataFrame,
+                            detect_gw_list: list, cfg: dict) -> dict:
+    """Patch 30 (2026-09-14, manager-flagged correction) — v6.4's ACTUAL
+    documented Wildcard trigger, replacing the app's old ad hoc rank-decline
+    +flagged-player-count heuristic entirely (that heuristic pre-dated v6.4
+    and had never been updated once the doc gave Wildcard real numbers).
+
+    Corrects a real mislabeling found in this same review: the old code
+    cited "Standing Rule #24" as the reason Wildcard stays non-mechanical.
+    Rule #24 is the Transfer Timing Discipline Rule (ordinary transfers,
+    hold-until-deadline default) — it says nothing about Wildcard. The rule
+    that actually governs Wildcard timing is Standing Rule #32 (Dynamic
+    Chip Timing Rule): "a planned chip date is a working hypothesis, not a
+    fixed commitment... re-test at every Step 0 review." That rule blocks
+    treating a DATE as locked in — it does not block the model from
+    computing whether the trigger CONDITION itself currently holds.
+
+    v6.4's literal trigger text: "average Team Rating % across [the 3-4 GW
+    detection] horizon below ~78-80%, or a cumulative xPts gap of ~15+
+    points versus the bounded-ceiling optimal over the same window."
+    "Bounded-ceiling optimal" = the squad actually reachable using the free
+    transfers on hand (data_pipeline.solve_reachable_ceiling()) — the same
+    ceiling the app's own Team Rating % header stat already compares
+    against — never the fully unconstrained pool ceiling (that one measures
+    something else: how far even a Wildcard's own rebuild sits from a
+    fantasy-ideal squad, not whether ordinary transfers can already close
+    the gap without one).
+
+    `squad_df`/`reachable_squad_df` must both already carry `xpts_gw{n}`
+    columns for every GW in `detect_gw_list` (i.e. both projected onto the
+    SAME window) — same Rule #22 Systematic Application discipline as the
+    Team Rating % header stat: identical calculation
+    (`optimizer.rating_gw_value`) on both sides, every GW.
+
+    Config: `wildcard_trigger.team_rating_pct_ceiling` (default 79.0, the
+    doc's own "~78-80%" band's midpoint) and
+    `wildcard_trigger.cumulative_gap_threshold` (default 15.0, the doc's own
+    "~15+" figure) — both ARE the doc's stated numbers, not a manager-
+    directed extension like chip_advisor_thresholds; the "~" in the doc's
+    own text is why a single midpoint/floor value stands in for a range.
+
+    Returns {"active": bool, "avg_rating_pct": float|None, "cumulative_gap":
+    float|None, "by_gw": {gw: {"squad": v, "reachable": v, "rating_pct": v}},
+    "reason": str}. "active" is a genuinely mechanical yes/no on the trigger
+    CONDITION — it is still never a single-GW "play" verdict (v6.4's 8-GW
+    decay-weighted build horizon means Wildcard timing stays a rolling
+    re-test per Rule #32, not a one-week pick the way Free Hit gets)."""
+    import optimizer as opt
+
+    empty = {"active": False, "avg_rating_pct": None, "cumulative_gap": None, "by_gw": {},
+             "reason": "insufficient data to evaluate this run"}
+    if squad_df is None or squad_df.empty or reachable_squad_df is None or reachable_squad_df.empty \
+            or not detect_gw_list:
+        return empty
+
+    wt_cfg = cfg.get("wildcard_trigger", {})
+    rating_ceiling = wt_cfg.get("team_rating_pct_ceiling", 79.0)
+    gap_threshold = wt_cfg.get("cumulative_gap_threshold", 15.0)
+
+    by_gw = {}
+    for gw in detect_gw_list:
+        col = f"xpts_gw{gw}"
+        if col not in squad_df.columns or col not in reachable_squad_df.columns:
+            continue
+        squad_val = opt.rating_gw_value(squad_df, col, cfg)["total_realized"]
+        reachable_val = opt.rating_gw_value(reachable_squad_df, col, cfg)["total_realized"]
+        rating = team_rating_pct(squad_val, reachable_val, "")["rating_pct"]
+        by_gw[gw] = {"squad": round(squad_val, 2), "reachable": round(reachable_val, 2), "rating_pct": rating}
+
+    if not by_gw:
+        return empty
+
+    valid_ratings = [v["rating_pct"] for v in by_gw.values() if v["rating_pct"] is not None]
+    avg_rating = round(sum(valid_ratings) / len(valid_ratings), 1) if valid_ratings else None
+    cumulative_gap = round(sum(v["reachable"] - v["squad"] for v in by_gw.values()), 2)
+
+    triggers = []
+    if avg_rating is not None and avg_rating < rating_ceiling:
+        triggers.append(f"average Team Rating % across GW{min(by_gw)}-GW{max(by_gw)} is {avg_rating}%, "
+                          f"below the {rating_ceiling:.0f}% ceiling")
+    if cumulative_gap >= gap_threshold:
+        triggers.append(f"cumulative gap to your bounded-ceiling optimal over that window is {cumulative_gap:.1f} "
+                          f"xPts, at/above the {gap_threshold:.0f}-point threshold")
+
+    active = bool(triggers)
+    reason = ("; ".join(triggers) if triggers else
+              f"average Team Rating % ({avg_rating}%) and cumulative gap ({cumulative_gap:.1f} xPts) over "
+              f"GW{min(by_gw)}-GW{max(by_gw)} both stay inside the doc's noise band — no trigger this run")
+    return {"active": active, "avg_rating_pct": avg_rating, "cumulative_gap": cumulative_gap,
+            "by_gw": by_gw, "reason": reason}

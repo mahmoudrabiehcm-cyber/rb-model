@@ -10,7 +10,9 @@
 # =============================================================================
 
 meta:
-  model_version: "6.4"
+  model_version: "6.4"   # Patch 30 (2026-09-14) implements v6.4's Wildcard trigger for the
+                          # first time -- previously the doc was at 6.4 but the app still ran
+                          # a pre-v6.4 heuristic. See the changelog note above.
   base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
                           # v3.3 -- see the model doc's changelog (v4.0 -> v6.3) for the deltas.
@@ -53,6 +55,45 @@ meta:
                           # chip_shape_test: section below for its two threshold values --
                           # disclosed EST extensions, same pattern as chip_advisor_thresholds and
                           # the captaincy team_stability_* gaps above.
+                          # Patch 29 (2026-09-14, manager request via app screenshot annotation):
+                          # chip_protocol.chip_strategy_summary() -- a pure presentation-layer
+                          # synthesis (no new math) combining the Wildcard flag, the v6.4 shape-
+                          # test, the Bench Boost/Triple Captain/Free Hit verdicts and any Rule #41
+                          # disruption notes into one "Chip Strategy" panel.
+                          # Patch 30 (2026-09-14, same-day manager follow-up): replaces the app's
+                          # old ad hoc rank-decline/flagged-player-count Wildcard heuristic with
+                          # v6.4's actual documented trigger (average Team Rating % below ~78-80%,
+                          # or a cumulative gap to the bounded-ceiling optimal of ~15+ xPts, over
+                          # the 3-4 GW detection window -- see fpl_engine.wildcard_trigger_check()
+                          # and the wildcard_trigger: section below). Also corrects an app-code
+                          # mislabeling: Wildcard's non-mechanical piece (which single GW it's
+                          # actually played on) is governed by Standing Rule #32 (Dynamic Chip
+                          # Timing Rule), not #24 (Transfer Timing Discipline Rule, which is about
+                          # ordinary transfers and was never about Wildcard at all) -- every
+                          # in-code citation of #24 for Wildcard's non-mechanical framing has been
+                          # corrected to #32.
+                          # Patch 31 (2026-09-14, manager request: "more visuals more than words" +
+                          # "if any chip strategy triggered i need a section for the model full
+                          # analysis and team recommendation"). Presentation-layer only, no model/
+                          # rule changes: (1) Team Rating % header stat is now a color-coded radial
+                          # gauge; (2) Chip Rack's stacked note paragraphs are now compact hoverable
+                          # flag-pills; (3) the old Chip Advisor + Chip Strategy expanders are
+                          # replaced by one "Chip Signals" card grid (Wildcard/Bench Boost/Triple
+                          # Captain/Free Hit), with every rule citation moved into each card's hover
+                          # tooltip instead of sitting as visible body text -- the full Patch 29
+                          # narrative is kept, unedited, inside a collapsed "Full chip analysis"
+                          # expander; (4) new auto-built "Team Recommendation" section that appears
+                          # only when a signal is actually live (Wildcard trigger active, or a BB/TC/
+                          # FH "play" verdict) and automatically solves + displays the real squad --
+                          # no manual GW-picking step required. Reuses the existing solver functions
+                          # (evaluate_wildcard_whatif, solve_free_hit_optimal_squad,
+                          # apply_style_to_wildcard_squad) the manual "Evaluate a scenario" panel
+                          # already called; see app.py's "Team Recommendation" block.
+                          # NOTE (2026-09-14): the manager's live deployment was still on Patch 28
+                          # when Patch 31 was built -- Patches 29 and 30 were never uploaded
+                          # separately. This zip (rb_model_app_patch31.zip) is CUMULATIVE and
+                          # self-contained: it carries Patch 29 + Patch 30 + Patch 31 together in
+                          # one deploy, on top of the manager's current Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -347,14 +388,37 @@ setpiece_signal:
 # -----------------------------------------------------------------------------
 # Step 9 — Chip Timing Protocol (v4.0, new). Thresholds for surfacing a
 # Bench Boost / Triple Captain / Free Hit note against a confirmed DGW/BGW —
-# see chip_protocol.py. Wildcard timing has no threshold here by design: it
-# is always a flag (Standing Rule #24), never a mechanical trigger.
+# see chip_protocol.py. Wildcard's TRIGGER condition is mechanical since
+# Patch 30 (see wildcard_trigger: below) — what stays a manager call is only
+# which single GW to actually play it on (Standing Rule #32).
 # -----------------------------------------------------------------------------
 chip_timing:
   bench_boost_min_double_exposure_frac: 0.25   # >= this fraction of your 15 in a double
   free_hit_min_blank_exposure_frac: 0.35        # >= this fraction of your 15 in a blank
+  # LEGACY / SUPERSEDED (Patch 30) — these two drove the old pre-v6.4
+  # rank-decline/flagged-player-count Wildcard heuristic, replaced by
+  # wildcard_trigger: below. Left in place, same pattern as
+  # transfer.bench_autosub_discount above; no longer read by the live
+  # code path (wildcard_trigger_flag() uses rank history only as
+  # supplementary color text now, not a trigger input).
   wildcard_flag_rank_decline_gws: 2             # consecutive worsening GWs to flag
   wildcard_flag_min_flagged_players: 3          # squad players with a status/data flag
+
+# -----------------------------------------------------------------------------
+# Wildcard trigger (Patch 30 / v6.4) — see fpl_engine.wildcard_trigger_check().
+# DISCLOSURE: unlike chip_advisor_thresholds/chip_shape_test above, these two
+# numbers ARE the doc's own stated figures (v6.4: "average Team Rating %
+# across that horizon below ~78-80%, or a cumulative xPts gap of ~15+
+# points"), not a manager-directed extension — the "~" in the doc's own text
+# is why a single value stands in for each stated range/floor.
+#   - team_rating_pct_ceiling: midpoint of the doc's "~78-80%" band.
+#   - cumulative_gap_threshold: the doc's own "~15+" floor.
+# detection_window_gws is shared with chip_shape_test above (both come from
+# the same "Wildcard — detection and build horizons (v6.4)" 3-4 GW figure).
+# -----------------------------------------------------------------------------
+wildcard_trigger:
+  team_rating_pct_ceiling: 79.0
+  cumulative_gap_threshold: 15.0
 
 # -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A

@@ -137,6 +137,43 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .bench-strip .card{ opacity:.68; width:clamp(56px, 13vw, 96px); }
 .side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
 
+/* Patch 31 — Chip Signals grid: replaces the old paragraph-per-rule Chip
+   Advisor/Chip Strategy text with compact scannable cards. Rule/step
+   citations move into the card's `title` tooltip (hover-hidden, same
+   pattern as .info-dot above) instead of sitting in visible text. */
+.signal-grid{ display:flex; gap:12px; flex-wrap:wrap; margin:4px 0 18px; }
+.signal-card{ background:var(--surface); border:1px solid var(--rule); border-left:4px solid var(--rule);
+  box-shadow:var(--shadow); padding:12px 14px; min-width:150px; flex:1 1 150px; cursor:help; }
+.signal-card.is-play{ border-left-color:var(--accent); }
+.signal-card.is-active{ border-left-color:var(--gold); }
+.signal-card.is-caution{ border-left-color:var(--coral); }
+.signal-card.is-used{ opacity:.55; }
+.signal-card .top{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; }
+.signal-card .name{ font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:.04em; color:var(--ink-muted); }
+.signal-card .stat{ font-family:"Fraunces"; font-weight:800; font-size:1.4rem; color:var(--accent-strong); line-height:1; }
+.signal-card .sub{ font-size:10.5px; color:var(--ink-faint); margin-top:4px; }
+.badge{ font-family:"IBM Plex Mono"; font-size:9px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
+  padding:2px 7px; border-radius:20px; display:inline-block; white-space:nowrap; }
+.badge.play{ background:var(--accent-tint); color:var(--accent-strong); }
+.badge.active{ background:var(--gold-tint); color:#7A5A16; }
+.badge.hold{ background:var(--surface-2); color:var(--ink-faint); }
+.badge.caution{ background:var(--coral-tint); color:var(--coral); }
+.badge.used{ background:var(--surface-2); color:var(--ink-faint); }
+
+.flag-row{ display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 16px; }
+.flag-pill{ display:flex; align-items:center; gap:6px; background:var(--coral-tint); border:1px solid var(--coral);
+  color:#7A2E18; font-family:"IBM Plex Mono"; font-size:11px; padding:4px 10px; border-radius:20px; cursor:help; }
+
+/* Team Rating % radial gauge (Patch 31) — conic-gradient ring, no SVG/JS
+   library needed. Percentage is still the same number the tooltip/expander
+   already computed; this only changes how it's presented. */
+.gauge-wrap{ display:flex; align-items:center; gap:10px; }
+.gauge-ring{ width:44px; height:44px; border-radius:50%; flex:none;
+  display:flex; align-items:center; justify-content:center; position:relative; }
+.gauge-ring::before{ content:""; position:absolute; inset:5px; border-radius:50%; background:var(--bg); }
+.gauge-ring .gauge-val{ position:relative; z-index:1; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700; }
+
 /* Patch 4 — captaincy-on-pitch caption, replacing the old standalone
    "Captaincy Pick" metric section entirely. */
 .cap-caption{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--gold);
@@ -187,6 +224,31 @@ def _team_color(short_name: str) -> str:
 
 def _photo_url(code) -> str:
     return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{int(code)}.png"
+
+
+def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str,
+                  tooltip: str, card_cls: str = "") -> str:
+    """Patch 31 — one compact scannable "Chip Signals" card, replacing a
+    paragraph of Chip Advisor/Chip Strategy prose. Rule/step citations and
+    the full quantified reasoning move into the card's `title` tooltip
+    (hover-hidden, same pattern as the header's .info-dot) instead of
+    sitting as permanent visible text — the visible surface is just a
+    name, a status badge, one headline stat, and a one-line sub-caption."""
+    return (f'<div class="signal-card {card_cls}" title="{tooltip}">'
+            f'<div class="top"><span class="name">{name}</span>'
+            f'<span class="badge {badge_cls}">{badge_text}</span></div>'
+            f'<div class="stat">{stat}</div>'
+            f'<div class="sub">{sub}</div></div>')
+
+
+def _flag_pill(text: str, tooltip: str = "") -> str:
+    """Patch 31 — a single compact pill for Chip Rack notes (Wildcard flag,
+    shape-test, disruption, price-drop-flow) that used to render as a full
+    <p class="side-note"> paragraph each. Full detail stays available on
+    hover rather than being deleted."""
+    icon = "⚠️" if any(k in text for k in ("CAUTION", "flagged", "Disruption")) else "●"
+    short = text if len(text) <= 70 else text[:67] + "…"
+    return f'<span class="flag-pill" title="{tooltip or text}">{icon} {short}</span>'
 
 
 def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool = False,
@@ -357,10 +419,12 @@ with st.sidebar:
 
     # Patch 28 (v6.4 / Standing Rule #41) — this app has no persistent memory
     # between runs (fresh container each time, Step 2), so it cannot discover
-    # a still-unplayed chip's PLANNED date on its own — Wildcard/Free Hit
-    # timing is deliberately never mechanical (Rule #24) either way. State it
-    # here if you have one in mind; leave "Not set" and Rule #41's horizon
-    # cap simply doesn't apply this run (no different from before this patch).
+    # a still-unplayed chip's PLANNED date on its own — the actual GW a
+    # Wildcard/Free Hit gets played on stays a rolling re-test, never a fixed
+    # commitment (Standing Rule #32), even though Patch 30 made Wildcard's
+    # own trigger CONDITION fully mechanical. State a date here if you have
+    # one in mind; leave "Not set" and Rule #41's horizon cap simply doesn't
+    # apply this run (no different from before Patch 28).
     planned_chip_gw_choice = st.selectbox(
         "Next planned full-rebuild chip GW (optional)", options=["Not set"] + list(range(1, 39)),
         index=0, help="Only used for Standing Rule #41 (Disruption-Horizon Rule): if a current squad "
@@ -659,14 +723,42 @@ with st.spinner("Fetching live data and computing xPts..."):
     squad_team_ids = squad_df["team_id"].tolist() if "team_id" in squad_df.columns else []
     chip_notes = chip_protocol.chip_recommendations(chip_rows, dgw_bgw, squad_team_ids, max(len(squad_df), 1))
     flagged_players = squad_df[(squad_df["status"] != "a") | (squad_df["est_rescue_needed"])]
-    wc_flag = chip_protocol.wildcard_flag(rank_history_display, len(flagged_players),
-                                           squad_xpts_total=squad_total,
-                                           reachable_ceiling_total=reachable_total,
-                                           moe_threshold=moe)
+
+    # Patch 30 (2026-09-14) — REPLACES the old ad hoc rank-decline/flagged-
+    # player-count heuristic with v6.4's actual documented Wildcard trigger
+    # (average Team Rating % below ~78-80%, or a cumulative gap to the
+    # bounded-ceiling optimal of ~15+ xPts, over a 3-4 GW detection window).
+    # Also corrects a mislabeling: the old code cited "Standing Rule #24"
+    # (Transfer Timing Discipline Rule — about ordinary transfers, not
+    # Wildcard) as the reason Wildcard stayed non-mechanical; the actual
+    # governing rule is #32 (Dynamic Chip Timing Rule), which blocks locking
+    # in a DATE, not computing the trigger condition. Needs a squad+
+    # reachable-ceiling pair projected onto the detection window specifically
+    # (may be wider than the sidebar horizon), computed once here and reused
+    # by both the trigger and the Step 8c shape-test below.
+    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
+    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
+    wc_trigger = None
+    shape_test = None
+    detect_gw_list = None
+    shape_proj = None
+    if (_wc_available_now or _fh_available_now) and not squad_df.empty:
+        shape_cfg = cfg.get("chip_shape_test", {})
+        detect_window = shape_cfg.get("detection_window_gws", 4)
+        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
+        shape_proj = _project(snap, hist_df, overrides, cfg, detect_gw_list)
+
+    if _wc_available_now and shape_proj is not None:
+        squad_detect = shape_proj[shape_proj["code"].isin(squad_codes)]
+        reachable_detect = data_pipeline.solve_reachable_ceiling(cfg, shape_proj, squad_codes, ft["free_transfers"])
+        wc_trigger = eng.wildcard_trigger_check(
+            squad_detect, reachable_detect["squad"] if reachable_detect else None, detect_gw_list, cfg)
+
+    wc_flag = chip_protocol.wildcard_trigger_flag(wc_trigger, rank_history_display) if wc_trigger else None
 
     # Patch 28 (v6.4 / Standing Rule #41 + its Rule #24 override) — reuses
-    # the same `flagged_players` definition as the Wildcard flag above so the
-    # two never disagree. Only produces a capped horizon / note when a
+    # the same `flagged_players` definition as the Wildcard trigger above so
+    # the two never disagree. Only produces a capped horizon / note when a
     # squad player is actually currently disrupted; a silent no-op otherwise.
     disruption = eng.disruption_check(squad_df, gw_list, planned_chip_gw)
     transfer_gw_list = gw_list
@@ -676,20 +768,11 @@ with st.spinner("Fetching live data and computing xPts..."):
     # Patch 28 (v6.4 / Step 8c shape-test) — cross-checks whatever Wildcard/
     # Free Hit signal already fired above against a genuine multi-GW optimal-
     # squad-shape solve, so a fixture-shaped spike is never read as sustained
-    # Wildcard evidence (or vice versa). Only run when at least one of the two
-    # chips is actually still available — same compute-only-when-actionable
-    # discipline the Chip Advisor block below already follows.
-    shape_test = None
-    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
-    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
-    if (wc_flag or _fh_available_now) and (_wc_available_now or _fh_available_now) and not squad_df.empty:
-        shape_cfg = cfg.get("chip_shape_test", {})
-        detect_window = shape_cfg.get("detection_window_gws", 4)
-        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
-        shape_proj = _project(snap, hist_df, overrides, cfg, detect_gw_list)
-        shape_full_pool = shape_proj
+    # Wildcard evidence (or vice versa). Reuses the same detect_gw_list/
+    # shape_proj the trigger above already computed.
+    if (wc_flag or _fh_available_now) and shape_proj is not None:
         shape_test = chip_protocol.wildcard_freehit_shape_test(
-            squad_df, shape_full_pool, cfg, detect_gw_list, team_value)
+            squad_df, shape_proj, cfg, detect_gw_list, team_value)
 
     # Chip Advisor (v5.0 / Patch 1) — quantified play/hold verdicts within the
     # chosen horizon for the three chips that actually have a "which GW"
@@ -729,10 +812,10 @@ with st.spinner("Fetching live data and computing xPts..."):
             lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, proj, team_value, gw),
             _chip_moe_fn("free_hit"))
 
-    # Chip-aware transfer advisory (Standing Rule #24: only from signals
-    # already computed mechanically above — never a guess at the manager's
-    # intent). Wildcard: only fires when the objective wc_flag is already
-    # active AND a Wildcard is currently available — both real, not invented.
+    # Chip-aware transfer advisory: only from signals already computed
+    # mechanically above — never a guess at the manager's intent. Wildcard:
+    # only fires when its own v6.4 trigger (Patch 30) is already active AND
+    # a Wildcard is currently available — both real, not invented.
     # Free Hit: only fires when chip_notes already surfaced genuine blank
     # exposure — reuses that evidence rather than re-deriving it.
     advisory_bits = []
@@ -804,10 +887,18 @@ with col2:
     prov_badge = ("" if gw_final else
                   ' <span class="info-dot" title="GW' + str(squad_gw) + ' points/bonus not yet finalized by FPL — '
                   'this number can still move (same as the official site right now).">prov.</span>')
+    _rp = fh_auto_rating['rating_pct']
+    if _rp is not None:
+        _gcol = "var(--accent-strong)" if _rp >= 79 else ("var(--gold)" if _rp >= 65 else "var(--coral)")
+        _gauge_html = (f'<div class="gauge-wrap"><div class="gauge-ring" title="{fh_auto_tooltip}" '
+                       f'style="background:conic-gradient({_gcol} {_rp*3.6:.0f}deg, var(--rule) 0deg);">'
+                       f'<span class="gauge-val">{_rp:.0f}%</span></div></div>')
+    else:
+        _gauge_html = '<span class="info-dot" title="Not enough data this run">—</span>'
     st.markdown(f"""<div class="stat-row">
       <div class="stat"><div class="n">{rank_disp} {trend}{prov_badge}</div><div class="l">Overall rank</div></div>
       <div class="stat rating">
-        <div class="n">{fh_auto_rating['rating_pct'] if fh_auto_rating['rating_pct'] is not None else '—'}% <span class="info-dot" title="{fh_auto_tooltip}">i</span></div>
+        <div class="n">{_gauge_html}</div>
         <div class="l">Team rating</div>
       </div>
       <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
@@ -858,45 +949,177 @@ for r in chip_rows:
     chip_html += f'<div class="chip {cls}"><span class="dot"></span><span class="name">{r["chip"]}</span><span class="win">&nbsp;{win}</span></div>'
 chip_html += '</div>'
 st.markdown(chip_html, unsafe_allow_html=True)
+much_more = wc_trigger["reason"] if (wc_trigger and not wc_flag and wc_trigger.get("avg_rating_pct") is not None) else None
+pill_items = []
 if wc_flag:
-    st.markdown(f'<p class="side-note">{wc_flag}</p>', unsafe_allow_html=True)
+    pill_items.append(_flag_pill(wc_flag))
+elif much_more:
+    pill_items.append(_flag_pill(f"Wildcard trigger: not active — {much_more}."))
 for note in chip_notes:
-    st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
-# Patch 28 (v6.4 / Step 8c shape-test) — shown right alongside the Wildcard
-# flag / DGW-BGW notes it cross-checks, not just buried in the transfer
-# advisory line.
+    pill_items.append(_flag_pill(note))
 if shape_test and shape_test["classification"] != "insufficient_data":
     for note in shape_test["notes"]:
-        st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
-# Patch 28 (v6.4 / Standing Rule #41 + Rule #24) — disruption notes shown here
-# too so they're visible even on a run with no Wildcard/Free Hit signal at all.
+        pill_items.append(_flag_pill(note))
 for note in disruption["notes"]:
-    st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
+    pill_items.append(_flag_pill(note))
+if pill_items:
+    st.markdown(f'<div class="flag-row">{"".join(pill_items)}</div>', unsafe_allow_html=True)
 
-# Chip Advisor — quantified verdicts (Standing Rule #34 margin-of-error gated)
-def _advisor_line(label: str, adv: dict | None) -> str | None:
+# Chip Signals — Patch 31 visual redesign. Replaces the old paragraph-per-
+# rule Chip Advisor + Chip Strategy expanders with one scannable card grid;
+# every card's rule/step citation and full quantified reasoning lives in its
+# hover tooltip (same hover-hidden pattern as the header's .info-dot),
+# instead of sitting as permanent visible body text.
+def _advisor_card(label: str, adv: dict | None) -> str:
     if adv is None or adv.get("best_gw") is None:
-        return None
+        return _signal_card(label, "N/A", "used", "—", "no horizon data this run",
+                             "No candidate gameweek available for this chip in the current horizon.")
     if adv["verdict"].startswith("play_gw"):
         gw = adv["verdict"].split("gw")[1]
-        return (f"**{label}: play in GW{gw}** — clears margin-of-error by "
-                f"{adv.get('margin', adv.get('threshold', 0)):.1f} xPts over the next-best GW in your horizon "
-                f"(threshold {adv['threshold']:.1f} xPts).")
-    return (f"{label}: hold — no GW in your horizon clears margin-of-error over the others "
-            f"(best candidate GW{adv['best_gw']}, threshold {adv['threshold']:.1f} xPts). Statistical tie, not a "
-            f"reason to rule it out later.")
+        margin = adv.get("margin", adv.get("threshold", 0))
+        return _signal_card(
+            label, f"PLAY GW{gw}", "play", f"GW{gw}", f"+{margin:.1f} xPts clear of next-best",
+            f"Clears margin-of-error by {margin:.1f} xPts over the next-best GW in your horizon "
+            f"(threshold {adv['threshold']:.1f} xPts) — Standing Rule #34 margin-of-error gate.",
+            "is-play")
+    return _signal_card(
+        label, "HOLD", "hold", f"GW{adv['best_gw']}", "best candidate, statistical tie",
+        f"No GW in your horizon clears margin-of-error over the others (best candidate GW{adv['best_gw']}, "
+        f"threshold {adv['threshold']:.1f} xPts) — Standing Rule #34. A statistical tie, not a reason to rule "
+        f"it out later.")
 
-advisor_lines = [l for l in (
-    _advisor_line("Bench Boost", bb_advisor),
-    _advisor_line("Triple Captain", tc_advisor),
-    _advisor_line("Free Hit", fh_advisor),
-) if l]
-if advisor_lines:
-    with st.expander("Chip Advisor — quantified play/hold verdicts for this horizon"):
-        for line in advisor_lines:
-            st.markdown(line)
-        st.caption("Wildcard timing is always your call, never a verdict — see the flag above instead. "
-                   "Verdicts here only compute for chips you haven't already played this season.")
+wc_card_tooltip = (wc_flag or (f"Wildcard trigger: not active — {much_more}." if much_more else
+                                "Insufficient data to evaluate the trigger this run."))
+wc_card_tooltip += " Wildcard's trigger condition is mechanical (Standing Rule #24/#41), but the specific play " \
+                    "date is never a mechanical verdict — it's a rolling re-test per Standing Rule #32."
+if wc_flag:
+    wc_stat = f'{wc_trigger["avg_rating_pct"]}%' if wc_trigger and wc_trigger.get("avg_rating_pct") is not None else "ACTIVE"
+    wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
+                            "structural gap detected — date is your call", wc_card_tooltip, "is-active")
+elif much_more:
+    wc_card = _signal_card("Wildcard", "HOLD", "hold", f'{wc_trigger["avg_rating_pct"]}%',
+                            "inside noise band — no trigger", wc_card_tooltip)
+else:
+    wc_card = _signal_card("Wildcard", "N/A", "used", "—", "insufficient data this run", wc_card_tooltip)
+
+signal_html = '<div class="signal-grid">' + wc_card + _advisor_card("Bench Boost", bb_advisor) + \
+    _advisor_card("Triple Captain", tc_advisor) + _advisor_card("Free Hit", fh_advisor) + '</div>'
+st.markdown(signal_html, unsafe_allow_html=True)
+
+# Full analysis — Patch 29's synthesis narrative, kept in full (nothing
+# deleted per manager instruction) but moved behind an opt-in expander now
+# that the cards above carry the at-a-glance read (2026-09-14 redesign).
+strategy_lines = chip_protocol.chip_strategy_summary(
+    wc_flag, shape_test, bb_advisor, tc_advisor, fh_advisor, chip_rows, disruption["notes"], wc_trigger)
+with st.expander("Full chip analysis — combined narrative, rule-by-rule"):
+    for line in strategy_lines:
+        st.markdown(f"- {line}")
+    st.caption("A synthesis of the Wildcard trigger, shape-test, Chip Advisor verdicts and any disruption notes "
+               "above — computes nothing new itself. Wildcard's trigger is mechanical (Patch 30) but never names "
+               "a single play GW — the date stays a rolling re-test (Standing Rule #32).")
+
+# ---------------------------------------------------------------------------
+# Team Recommendation — auto-built the moment any chip signal fires (Patch 31,
+# manager request: "if any chip strategy triggered i need a section for the
+# model full analysis and team recommendation"). No manual GW-picking step —
+# this reuses the exact same solves the manual "Evaluate a scenario" panel
+# below already offers, just triggered automatically and shown visually.
+# ---------------------------------------------------------------------------
+_bb_play = bb_advisor and bb_advisor["verdict"].startswith("play_gw")
+_tc_play = tc_advisor and tc_advisor["verdict"].startswith("play_gw")
+_fh_play = fh_advisor and fh_advisor["verdict"].startswith("play_gw")
+_wc_active = bool(wc_flag)
+if _wc_active or _bb_play or _tc_play or _fh_play:
+    st.markdown('<div class="section-h">🎯 Team Recommendation — active signals, auto-built</div>',
+                unsafe_allow_html=True)
+
+    if _wc_active:
+        wc_rebuild_gw = detect_gw_list[0] if detect_gw_list else planning_gw
+        _wc_col = f"xpts_gw{wc_rebuild_gw}"
+        _full_pool_now = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
+        if "code" in _full_pool_now.columns:
+            _full_pool_now = _full_pool_now.drop_duplicates(subset=["code"], keep="first")
+        wc_eval_auto = chip_protocol.evaluate_wildcard_whatif(
+            squad_df, pool_df, cfg, team_value, detect_gw_list or gw_list)
+        with st.expander(f"🃏 Wildcard rebuild — trigger active, shown for GW{wc_rebuild_gw} onward", expanded=True):
+            if not wc_eval_auto["feasible"]:
+                st.info("Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
+            else:
+                styled_wc = recommend.apply_style_to_wildcard_squad(
+                    squad_df, wc_eval_auto["rebuild_squad"], _full_pool_now, style_name, cfg, _wc_col)
+                gap = wc_eval_auto["gap"]
+                st.caption(f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
+                           f"{wc_eval_auto['hold_total']:.1f} xPts holding your current squad over this window "
+                           f"({gap:+.1f} xPts). Style profile **{style_name}** applied. Date remains your own "
+                           f"call (Standing Rule #32) — this is the model's current best rebuild if played now.")
+                if _wc_col in styled_wc.columns:
+                    xi_res = opt.best_starting_xi(styled_wc, _wc_col)
+                    cols = ["web_name", "team", "position", "price", _wc_col]
+                    rn = {"web_name": "Player", "team": "Team", "position": "Pos", "price": "£m",
+                          _wc_col: f"xPts GW{wc_rebuild_gw}"}
+                    if xi_res is not None:
+                        xi_df, wc_bench = xi_res["xi"], styled_wc[~styled_wc["code"].isin(xi_res["xi"]["code"])]
+                        d, m, f = xi_res["shape"]
+                        st.markdown(f"**Starting XI** (1-{d}-{m}-{f}, £{styled_wc['price'].sum():.1f}m)")
+                        st.dataframe(xi_df.sort_values(["position", _wc_col], ascending=[True, False])[cols]
+                                     .rename(columns=rn), hide_index=True, use_container_width=True)
+                        if not xi_df.empty:
+                            cap = xi_df.sort_values(_wc_col, ascending=False).iloc[0]
+                            st.caption(f"Suggested captain: **{cap['web_name']}** ({cap[_wc_col]:.1f} xPts).")
+                        st.markdown("**Bench**")
+                        st.dataframe(wc_bench.sort_values(["position", _wc_col], ascending=[True, False])[cols]
+                                     .rename(columns=rn), hide_index=True, use_container_width=True)
+
+    if _fh_play:
+        _fh_gw = int(fh_advisor["verdict"].split("gw")[1])
+        _fh_col = f"xpts_gw{_fh_gw}"
+        _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw])
+        fh_res_auto = data_pipeline.solve_free_hit_optimal_squad(cfg, _fh_proj_auto, team_value, _fh_gw)
+        with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=True):
+            if fh_res_auto is None:
+                st.info("Couldn't solve an optimal Free Hit squad this run.")
+            else:
+                fh_sq, fh_xi = fh_res_auto["squad"], None
+                fh_xi = fh_sq[fh_sq["code"].isin(fh_res_auto["xi_codes"])]
+                fh_bn = fh_sq[~fh_sq["code"].isin(fh_res_auto["xi_codes"])]
+                d, m, f = fh_res_auto["shape"]
+                cols = ["web_name", "team", "position", "price", _fh_col]
+                rn = {"web_name": "Player", "team": "Team", "position": "Pos", "price": "£m",
+                      _fh_col: f"xPts GW{_fh_gw}"}
+                st.markdown(f"**Starting XI** (1-{d}-{m}-{f}, £{fh_xi['price'].sum():.1f}m XI, "
+                            f"£{fh_res_auto['total_cost']:.1f}m of £{team_value:.1f}m)")
+                st.dataframe(fh_xi.sort_values(["position", _fh_col], ascending=[True, False])[cols]
+                             .rename(columns=rn), hide_index=True, use_container_width=True)
+                if not fh_xi.empty:
+                    cap = fh_xi.sort_values(_fh_col, ascending=False).iloc[0]
+                    st.caption(f"Suggested captain: **{cap['web_name']}** ({cap[_fh_col]:.1f} xPts).")
+                st.markdown("**Bench** (cheap by design — budget routed to the XI)")
+                st.dataframe(fh_bn.sort_values(["position", _fh_col], ascending=[True, False])[cols]
+                             .rename(columns=rn), hide_index=True, use_container_width=True)
+
+    if _bb_play:
+        _bb_gw = int(bb_advisor["verdict"].split("gw")[1])
+        _bb_col = f"xpts_gw{_bb_gw}"
+        with st.expander(f"🛋️ Bench Boost — PLAY GW{_bb_gw}, full 15", expanded=True):
+            if _bb_col in squad_df.columns:
+                cols = ["web_name", "team", "position", "price", _bb_col]
+                rn = {"web_name": "Player", "team": "Team", "position": "Pos", "price": "£m",
+                      _bb_col: f"xPts GW{_bb_gw}"}
+                st.caption(f"Clears margin-of-error by {bb_advisor.get('margin', bb_advisor['threshold']):.1f} "
+                           f"xPts — every one of your 15 scores this week, bench included.")
+                st.dataframe(squad_df.sort_values(["position", _bb_col], ascending=[True, False])[cols]
+                             .rename(columns=rn), hide_index=True, use_container_width=True)
+
+    if _tc_play:
+        _tc_gw = int(tc_advisor["verdict"].split("gw")[1])
+        _tc_col = f"xpts_gw{_tc_gw}"
+        with st.expander(f"👑 Triple Captain — PLAY GW{_tc_gw}", expanded=True):
+            if _tc_col in starters_df.columns and not starters_df.empty:
+                cap_row = starters_df.sort_values(_tc_col, ascending=False).iloc[0]
+                st.markdown(f"**{cap_row['web_name']}** ({cap_row.get('team','')}) — "
+                            f"{cap_row[_tc_col]:.1f} xPts, tripled to {cap_row[_tc_col]*3:.1f}.")
+                st.caption(f"Clears margin-of-error by {tc_advisor.get('margin', tc_advisor['threshold']):.1f} xPts "
+                           f"over the next-best captaincy GW in your horizon.")
 
 # ---------------------------------------------------------------------------
 # Pitch view
@@ -1136,8 +1359,9 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                 st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
                             f'{wc_eval["rebuild_total"]:.1f} xPts vs {wc_eval["hold_total"]:.1f} xPts holding your '
                             f'current squad, over the same {len(future_gw_list)}-GW window ({gap:+.1f} xPts). '
-                            f'Informational only — Wildcard timing stays your own call (Standing Rule #24), '
-                            f'never a play/hold verdict from this model.</div>', unsafe_allow_html=True)
+                            f'Informational only — this candidate GW is your own choice, and the model never '
+                            f'names a single "play" date (Standing Rule #32); see Chip Rack above for whether '
+                            f'v6.4\'s own Wildcard trigger is currently active.</div>', unsafe_allow_html=True)
 
                 wc_gw_col = f"xpts_gw{wc_gw_choice}"
                 full_pool_future = pd.concat([future_squad_proj, future_pool_proj], ignore_index=True, sort=False)
@@ -1181,7 +1405,8 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
             # Free Hit "optimal team for this GW" feature (2026-09-07
             # discussion, Patch 19). Unlike the Wildcard what-if above (a
             # non-reverting rebuild evaluated over a 3-GW-minimum horizon,
-            # Rule #24 flag-only), a Free Hit squad reverts after one week
+            # date always the manager's own choice per Rule #32), a Free Hit
+            # squad reverts after one week
             # (Standing Rule #25 / Horizon-Matching Rule) — so this is
             # single-GW only, and it deliberately optimizes differently:
             # highest-scoring legal Starting XI + cheapest legal bench
