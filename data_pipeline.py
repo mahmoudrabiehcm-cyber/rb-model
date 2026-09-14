@@ -41,7 +41,12 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
                "starts_per_90", "bonus", "now_cost", "selected_by_percent",
                "chance_of_playing_next_round", "total_points",
                "penalties_order", "corners_and_indirect_freekicks_order",
-               "direct_freekicks_order"]
+               "direct_freekicks_order",
+               # v6.4 / Standing Rule #41's Rule #24 price-drop-flow override --
+               # both already present on every bootstrap-static element, just
+               # never previously selected out into the per-player projection
+               # row (see compute_all's `rec` dict below).
+               "transfers_in_event", "transfers_out_event"]
     for c in numcols:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -253,6 +258,15 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
             "team": short, "team_id": team_id, "position": pos, "price": price(p.get("now_cost")),
             "status": p.get("status"), "news": p.get("news"),
             "selected_by_percent": p.get("selected_by_percent"),
+            # v6.4 / Rule #24 price-drop-flow override (Standing Rule #41) --
+            # net_transfers_event < 0 means more managers sold him than
+            # bought him this event, a concrete price-drop signal.
+            "transfers_in_event": p.get("transfers_in_event"),
+            "transfers_out_event": p.get("transfers_out_event"),
+            "net_transfers_event": (
+                (p.get("transfers_in_event") if pd.notna(p.get("transfers_in_event")) else 0)
+                - (p.get("transfers_out_event") if pd.notna(p.get("transfers_out_event")) else 0)
+            ) if pd.notna(p.get("transfers_in_event")) or pd.notna(p.get("transfers_out_event")) else None,
             "xm": round(xm, 3),
             "est_rescue_needed": bool(p.get("est_rescue_needed", False)),
             "setpiece_flag": sp_mult_last > 1.001,

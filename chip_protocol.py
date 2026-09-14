@@ -238,6 +238,98 @@ def evaluate_wildcard_whatif(current_squad_future_proj: pd.DataFrame, future_poo
             "gap": gap, "rebuild_squad": rebuild["squad"]}
 
 
+# ---------------------------------------------------------------------------
+# Step 8c shape-test (v6.4) — Wildcard answers a structural gap (the squad
+# is behind the optimal team persistently, regardless of fixtures); Free Hit
+# answers a fixture-shaped gap (fine on average, one week diverges sharply
+# then reverts). Mandatory before either chip's size threshold, per the doc,
+# so a sharp one-week spike is never misread as sustained Wildcard evidence.
+# ---------------------------------------------------------------------------
+def wildcard_freehit_shape_test(current_squad: pd.DataFrame, full_pool: pd.DataFrame, cfg: dict,
+                                 detection_gw_list: list[int], team_value: float) -> dict:
+    """Solves the standalone single-GW-optimal squad (unconstrained — no
+    retain-pool tie to the current 15, since the question is "what does the
+    ideal team look like this week," not "what's reachable") for every GW in
+    the detection window, and measures its overlap with the current squad
+    (shared player codes / 15) each week — a direct read on "how far is the
+    current squad's shape from that week's optimal shape."
+
+    Classification:
+    - "wildcard_shaped": overlap stays at/below `structural_overlap_ceiling`
+      in EVERY detection-window GW — the gap doesn't revert on its own, a
+      genuine persistent structural mismatch.
+    - "freehit_shaped": one or two GWs' overlap drops to/below that same
+      ceiling while the OTHER GWs in the window sit at/above
+      `spike_overlap_floor` (i.e. close to the current squad the rest of the
+      time) — a sharp, reverting, fixture-shaped divergence, naming which
+      GW(s) spiked.
+    - "no_signal": neither pattern clears its threshold — not useful evidence
+      either way this run.
+    - "insufficient_data": couldn't solve enough of the window to classify
+      (missing projections / solver infeasible).
+
+    `structural_overlap_ceiling` / `spike_overlap_floor` (model_config.yaml
+    `chip_shape_test:`) are a disclosed, manager-directed EST extension — the
+    doc names the shape-test procedure but gives no numeric overlap
+    threshold, same pattern as `chip_advisor_thresholds` and the Team-
+    Stability gaps. Returns {"classification": str, "by_gw": {gw: overlap},
+    "spike_gws": [gw,...], "notes": [str,...]} — never a mechanical
+    Wildcard trigger of its own (Rule #24 still applies to Wildcard); this is
+    a cross-check attached to whichever chip's own flag/verdict already
+    fired."""
+    import optimizer as opt
+
+    shape_cfg = cfg.get("chip_shape_test", {})
+    structural_ceiling = shape_cfg.get("structural_overlap_ceiling", 0.7)
+    spike_floor = shape_cfg.get("spike_overlap_floor", 0.85)
+    empty = {"classification": "insufficient_data", "by_gw": {}, "spike_gws": [], "notes": []}
+
+    if current_squad is None or current_squad.empty or not detection_gw_list or full_pool is None:
+        return empty
+    current_codes = set(current_squad["code"]) if "code" in current_squad.columns else set()
+    if not current_codes:
+        return empty
+
+    by_gw = {}
+    for gw in detection_gw_list:
+        col = f"xpts_gw{gw}"
+        if col not in full_pool.columns:
+            continue
+        result = opt.solve_squad(full_pool, cfg, budget=team_value, objective_col=col)
+        if result is None or result.get("squad") is None or result["squad"].empty:
+            continue
+        optimal_codes = set(result["squad"]["code"])
+        by_gw[gw] = round(len(current_codes & optimal_codes) / 15.0, 3)
+
+    if len(by_gw) < 2:
+        return {**empty, "by_gw": by_gw}
+
+    overlaps = list(by_gw.values())
+    if all(v <= structural_ceiling for v in overlaps):
+        notes = [f"Shape-test (Step 8c, v6.4): the squad-vs-optimal gap holds at/below "
+                 f"{structural_ceiling:.0%} overlap across the whole GW{min(by_gw)}–GW{max(by_gw)} "
+                 f"detection window — a persistent, structural gap. Wildcard-shaped, not a fixture spike."]
+        return {"classification": "wildcard_shaped", "by_gw": by_gw, "spike_gws": [], "notes": notes}
+
+    spike_gws = []
+    for gw, v in by_gw.items():
+        others = [ov for g, ov in by_gw.items() if g != gw]
+        if v <= structural_ceiling and others and min(others) >= spike_floor:
+            spike_gws.append(gw)
+
+    if spike_gws:
+        notes = [f"Shape-test (Step 8c, v6.4): overlap with the current squad drops sharply only at "
+                 f"{', '.join(f'GW{g}' for g in spike_gws)} (≤{structural_ceiling:.0%}) while the rest of "
+                 f"the GW{min(by_gw)}–GW{max(by_gw)} window sits at/above {spike_floor:.0%} — a one-off, "
+                 f"reverting, fixture-shaped gap. Free-Hit-shaped, not sustained Wildcard evidence."]
+        return {"classification": "freehit_shaped", "by_gw": by_gw, "spike_gws": spike_gws, "notes": notes}
+
+    return {"classification": "no_signal", "by_gw": by_gw, "spike_gws": [],
+            "notes": [f"Shape-test (Step 8c, v6.4): overlap across GW{min(by_gw)}–GW{max(by_gw)} "
+                      f"({', '.join(f'GW{g}:{v:.0%}' for g, v in sorted(by_gw.items()))}) clears neither the "
+                      f"structural nor the spike pattern this run — no clean Wildcard/Free Hit shape signal yet."]}
+
+
 def evaluate_free_hit(squad_df: pd.DataFrame, gw_list: list[int], rebuild_fn, moe_fn) -> dict:
     """Standing Rule #25: Free Hit is only ever evaluated as a full 15-man
     rebuild against total team value, compared against the manager's OWN

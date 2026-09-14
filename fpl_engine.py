@@ -468,3 +468,97 @@ def team_stability_tiebreak(shortlist: pd.DataFrame, team_table: pd.DataFrame, c
 
     return {"narrowed": shortlist, "applied": False,
             "reason": "neither signal cleared its disclosed threshold -- no genuine separation"}
+
+
+def disruption_check(squad_df: pd.DataFrame, gw_list: list, planned_chip_gw: int | None) -> dict:
+    """Standing Rule #41 (Disruption-Horizon Rule, v6.4) + its companion
+    Rule #24 price-drop-flow override.
+
+    Automatic disruption-check (v6.4's Step 0 clarification, app-side
+    equivalent). This tool re-fetches live data every run (no cached
+    assumptions carry forward -- Step 2), so "disrupted" is read straight
+    off this run's own `status`/`est_rescue_needed` fields, the exact same
+    definition app.py already uses to build its Wildcard-flag
+    `flagged_players` set, reused here as the single source of truth so
+    the two never disagree. What this function can NOT do is the doc's
+    literal "against what was known last session" diff -- this app has no
+    persistent memory between runs (a fresh container each time) -- so a
+    genuinely NEW-this-week disruption isn't distinguished from one that's
+    been known for weeks; every currently-disrupted squad player is
+    surfaced every run, which is a strict superset of the doc's trigger,
+    never a gap that could hide a real disruption.
+
+    Rule #41: `planned_chip_gw` is a manager-stated "next full-rebuild
+    chip" GW (there is nowhere in the live API data for this app to infer
+    a still-unplayed chip's intended date on its own -- Wildcard/Free Hit
+    timing is deliberately never mechanical, Standing Rule #24). When a
+    disruption is found AND that GW falls inside or at the start of
+    `gw_list`, the ordinary transfer net-gain horizon is capped to stop
+    before it -- gains projected for weeks the chip will already have
+    reset the squad are not a real reason to transfer a disrupted player
+    now. If the chip lands on the very next gameweek itself, the capped
+    horizon is empty; that's reported as its own note (the rebuild already
+    handles it) rather than silently solving over a 0-GW horizon.
+
+    Rule #24 override: for each disrupted player, this run's
+    `net_transfers_event` (transfers_in_event - transfers_out_event, both
+    pulled fresh from bootstrap-static every run) being negative -- more
+    managers selling him than buying -- is a concrete, checkable
+    price-drop-flow signal. The doc gives no magnitude threshold, so any
+    negative net flow triggers it (disclosed EST extension, same pattern
+    as chip_advisor_thresholds): Rule #24's default-to-wait is overridden
+    the same way a price-RISE risk already overrides it in the other
+    direction, since waiting risks a further price fall before the
+    manager acts.
+
+    Returns {"players": [{code, web_name, status, news, net_transfers_event,
+    price_drop_flow: bool}, ...], "capped_gw_list": list|None, "notes":
+    [str, ...]}. Empty "players"/"notes" and capped_gw_list=None when no
+    current squad player is disrupted -- a silent no-op for an undisrupted
+    squad, same as team_stability_tiebreak's no-op when nothing is tied."""
+    empty = {"players": [], "capped_gw_list": None, "notes": []}
+    if squad_df is None or squad_df.empty or "status" not in squad_df.columns:
+        return empty
+
+    rescue_col = squad_df["est_rescue_needed"] if "est_rescue_needed" in squad_df.columns \
+        else pd.Series(False, index=squad_df.index)
+    disrupted = squad_df[(squad_df["status"] != "a") | rescue_col].copy()
+    if disrupted.empty:
+        return empty
+
+    players = []
+    price_drop_names = []
+    for _, r in disrupted.iterrows():
+        net_flow = r.get("net_transfers_event")
+        price_drop = pd.notna(net_flow) and net_flow < 0
+        players.append({
+            "code": r.get("code"), "web_name": r.get("web_name"), "status": r.get("status"),
+            "news": r.get("news"), "net_transfers_event": net_flow, "price_drop_flow": bool(price_drop),
+        })
+        if price_drop:
+            price_drop_names.append(r.get("web_name"))
+
+    notes = [f"Disruption check (Rule #41 auto-trigger): {', '.join(p['web_name'] for p in players)} "
+             f"currently carr{'ies' if len(players) == 1 else 'y'} a live status/data-quality flag."]
+
+    capped_gw_list = None
+    if planned_chip_gw is not None and gw_list:
+        if planned_chip_gw <= gw_list[0]:
+            capped_gw_list = []
+            notes.append(f"A full-rebuild chip is planned for GW{planned_chip_gw} -- at or before this run's "
+                          f"horizon start, so no separate transfer-vs-hold decision applies to the flagged "
+                          f"player(s) this run; the rebuild already replaces them (Rule #41).")
+        elif planned_chip_gw <= gw_list[-1]:
+            capped_gw_list = [g for g in gw_list if g < planned_chip_gw]
+            notes.append(f"Transfer net-gain horizon capped at GW{capped_gw_list[-1] if capped_gw_list else '-'} "
+                          f"(was GW{gw_list[-1]}) for the flagged player(s) above -- the planned GW{planned_chip_gw} "
+                          f"rebuild chip means gains projected past it aren't a real reason to move them now "
+                          f"(Standing Rule #41).")
+
+    if price_drop_names:
+        notes.append(f"Price-drop-flow override (Rule #24): {', '.join(price_drop_names)} current transfers-out "
+                      f"exceed transfers-in this run -- overrides the default to wait, the same way a price-rise "
+                      f"risk already overrides it for an incoming target (EST-tier signal, no doc-specified "
+                      f"magnitude threshold).")
+
+    return {"players": players, "capped_gw_list": capped_gw_list, "notes": notes}

@@ -355,6 +355,20 @@ with st.sidebar:
     horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=6, value=1,
                          help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture.")
 
+    # Patch 28 (v6.4 / Standing Rule #41) — this app has no persistent memory
+    # between runs (fresh container each time, Step 2), so it cannot discover
+    # a still-unplayed chip's PLANNED date on its own — Wildcard/Free Hit
+    # timing is deliberately never mechanical (Rule #24) either way. State it
+    # here if you have one in mind; leave "Not set" and Rule #41's horizon
+    # cap simply doesn't apply this run (no different from before this patch).
+    planned_chip_gw_choice = st.selectbox(
+        "Next planned full-rebuild chip GW (optional)", options=["Not set"] + list(range(1, 39)),
+        index=0, help="Only used for Standing Rule #41 (Disruption-Horizon Rule): if a current squad "
+                       "player is flagged injured/suspended/data-flagged, the transfer-vs-hold horizon "
+                       "for that decision is capped to stop before this GW, since the chip will already "
+                       "reset the squad by then.")
+    planned_chip_gw = None if planned_chip_gw_choice == "Not set" else int(planned_chip_gw_choice)
+
     meaningful_bar_override = st.slider(
         "Free-transfer materiality bar (xPts)", min_value=0.0, max_value=5.0,
         value=float(cfg["transfer"].get("minimum_meaningful_gain_free", 2.0)), step=0.25,
@@ -650,6 +664,33 @@ with st.spinner("Fetching live data and computing xPts..."):
                                            reachable_ceiling_total=reachable_total,
                                            moe_threshold=moe)
 
+    # Patch 28 (v6.4 / Standing Rule #41 + its Rule #24 override) — reuses
+    # the same `flagged_players` definition as the Wildcard flag above so the
+    # two never disagree. Only produces a capped horizon / note when a
+    # squad player is actually currently disrupted; a silent no-op otherwise.
+    disruption = eng.disruption_check(squad_df, gw_list, planned_chip_gw)
+    transfer_gw_list = gw_list
+    if disruption["capped_gw_list"] is not None:
+        transfer_gw_list = disruption["capped_gw_list"] or gw_list[:1]
+
+    # Patch 28 (v6.4 / Step 8c shape-test) — cross-checks whatever Wildcard/
+    # Free Hit signal already fired above against a genuine multi-GW optimal-
+    # squad-shape solve, so a fixture-shaped spike is never read as sustained
+    # Wildcard evidence (or vice versa). Only run when at least one of the two
+    # chips is actually still available — same compute-only-when-actionable
+    # discipline the Chip Advisor block below already follows.
+    shape_test = None
+    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
+    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
+    if (wc_flag or _fh_available_now) and (_wc_available_now or _fh_available_now) and not squad_df.empty:
+        shape_cfg = cfg.get("chip_shape_test", {})
+        detect_window = shape_cfg.get("detection_window_gws", 4)
+        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
+        shape_proj = _project(snap, hist_df, overrides, cfg, detect_gw_list)
+        shape_full_pool = shape_proj
+        shape_test = chip_protocol.wildcard_freehit_shape_test(
+            squad_df, shape_full_pool, cfg, detect_gw_list, team_value)
+
     # Chip Advisor (v5.0 / Patch 1) — quantified play/hold verdicts within the
     # chosen horizon for the three chips that actually have a "which GW"
     # question (Bench Boost, Triple Captain, Free Hit). Only solved for chips
@@ -705,15 +746,27 @@ with st.spinner("Fetching live data and computing xPts..."):
     if any("Free Hit" in n for n in chip_notes):
         advisory_bits.append("a Free Hit has genuine exposure against a confirmed blank in your horizon "
                              "(see Chip Rack) — weigh banking against spending here too")
+    # Patch 28 (v6.4 / Standing Rule #41 + Rule #24 override) — surfaced in the
+    # same chip-context advisory line as the existing Wildcard/Free Hit bits.
+    for note in disruption["notes"]:
+        advisory_bits.append(note)
+    # Patch 28 (v6.4 / Step 8c shape-test) — attached only when a shape was
+    # actually classified this run (never on "insufficient_data"), so it reads
+    # as a genuine cross-check on whichever chip signal above already fired,
+    # not a standalone claim.
+    if shape_test and shape_test["classification"] != "insufficient_data":
+        advisory_bits.extend(shape_test["notes"])
     chip_advisory = f"GW{planning_gw}: Chip context — " + "; ".join(advisory_bits) + "." if advisory_bits else None
 
     # transfer suggestions — isolated so a bad row here can't take down the
     # rest of the page (pitch view, chip rack, captaincy, ledger all still
-    # render even if this section fails).
+    # render even if this section fails). Uses `transfer_gw_list`, not the
+    # sidebar's raw `gw_list` — Patch 28/Rule #41 may have capped it short of
+    # a planned full-rebuild chip for a currently-disrupted squad player.
     transfer_error = None
     try:
         rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
-                                           ft["free_transfers"], bank, planning_gw, gw_list, forced_count,
+                                           ft["free_transfers"], bank, planning_gw, transfer_gw_list, forced_count,
                                            meaningful_bar_override, set(bench_df["code"]), chip_advisory)
     except Exception as e:
         transfer_error = str(e)
@@ -808,6 +861,16 @@ st.markdown(chip_html, unsafe_allow_html=True)
 if wc_flag:
     st.markdown(f'<p class="side-note">{wc_flag}</p>', unsafe_allow_html=True)
 for note in chip_notes:
+    st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
+# Patch 28 (v6.4 / Step 8c shape-test) — shown right alongside the Wildcard
+# flag / DGW-BGW notes it cross-checks, not just buried in the transfer
+# advisory line.
+if shape_test and shape_test["classification"] != "insufficient_data":
+    for note in shape_test["notes"]:
+        st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
+# Patch 28 (v6.4 / Standing Rule #41 + Rule #24) — disruption notes shown here
+# too so they're visible even on a run with no Wildcard/Free Hit signal at all.
+for note in disruption["notes"]:
     st.markdown(f'<p class="side-note">{note}</p>', unsafe_allow_html=True)
 
 # Chip Advisor — quantified verdicts (Standing Rule #34 margin-of-error gated)

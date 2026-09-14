@@ -10,7 +10,7 @@
 # =============================================================================
 
 meta:
-  model_version: "6.3"
+  model_version: "6.4"
   base_version: "3.3"    # Core Formula, DEFCON calibration, Data
                           # Source Hierarchy, Standing Rules #1-22 unchanged from
                           # v3.3 -- see the model doc's changelog (v4.0 -> v6.3) for the deltas.
@@ -40,6 +40,19 @@ meta:
                           # from finished-fixture scores already in the pipeline (manager's
                           # explicit choice over a new manually-researched field). See the
                           # captaincy: section below for the two threshold values.
+                          # v6.4 (Patch 28, 2026-09-13): Standing Rule #41 (Disruption-Horizon
+                          # Rule) + its Rule #24 price-drop-flow override, plus the Step 8c
+                          # Wildcard/Free Hit shape-test -- three real logic additions, not config
+                          # tuning. See fpl_engine.disruption_check() (transfer horizon capping for
+                          # a currently-disrupted squad player against a manager-stated next
+                          # full-rebuild chip GW, and the transfers_in/out_event price-drop-flow
+                          # signal -- both newly pulled per player in data_pipeline.py) and
+                          # chip_protocol.wildcard_freehit_shape_test() (per-GW optimal-squad-
+                          # overlap solve across a detection window, classifying a gap as
+                          # structural/persistent vs. fixture-shaped/reverting). See the
+                          # chip_shape_test: section below for its two threshold values --
+                          # disclosed EST extensions, same pattern as chip_advisor_thresholds and
+                          # the captaincy team_stability_* gaps above.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -388,3 +401,27 @@ chip_advisor_thresholds:
   bench_boost: {floor_points: 3.0, pct_of_total: 0.05}
   triple_captain: {floor_points: 5.0, pct_of_total: 0.08}
   free_hit: {floor_points: 6.0, pct_of_total: 0.06}
+
+# -----------------------------------------------------------------------------
+# Step 8c shape-test (Patch 28 / v6.4) — see chip_protocol.wildcard_freehit_
+# shape_test(). DISCLOSURE: the doc specifies the shape-test PROCEDURE
+# (compare each detection-window GW's standalone optimal squad against the
+# current squad) but no numeric overlap threshold for "structural" vs.
+# "spike" — both values below are a manager-directed extension, not sourced
+# from the doc itself, exactly like chip_advisor_thresholds above.
+#   - structural_overlap_ceiling: a GW's optimal-squad/current-squad overlap
+#     (shared player codes / 15) AT OR BELOW this counts as "meaningfully
+#     diverged" that week. 0.7 -> at most ~10-11 of your current 15 players
+#     appear in that week's true optimal squad.
+#   - spike_overlap_floor: for a GW to be classified a REVERTING spike (Free
+#     Hit-shaped) rather than part of a persistent gap (Wildcard-shaped), the
+#     OTHER weeks in the detection window must sit at/above this overlap —
+#     i.e. genuinely close to the current squad the rest of the time.
+# detection_window_gws mirrors the doc's own "Wildcard — detection and build
+# horizons (v6.4)" 3-4 GW figure; used by app.py to size the window it feeds
+# into the shape-test.
+# -----------------------------------------------------------------------------
+chip_shape_test:
+  detection_window_gws: 4
+  structural_overlap_ceiling: 0.7
+  spike_overlap_floor: 0.85
