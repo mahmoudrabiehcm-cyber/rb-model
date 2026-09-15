@@ -629,6 +629,23 @@ meta:
                           # Display-only change; no scoring/recommendation logic touched.
                           # NOTE (2026-09-15): rb_model_app_patch47.zip is CUMULATIVE: Patch 29 through
                           # 47 together, on top of the manager's Patch 28 baseline.
+                          # Patch 48 (2026-09-15, manager report, screenshot showing the pill cut off at
+                          # "Cross-check against your own recommended transfer plan (Hit if wort...": why is
+                          # there no visible "you don't need the Wildcard" conclusion) -- root cause was my
+                          # own Patch 46 pill text, not a missing feature: _flag_pill() truncates any pill
+                          # text past 70 characters (app.py line ~314), and the actual verdict (closes the
+                          # gap or not) was the LAST clause of a long sentence, so it was exactly the part
+                          # getting cut off in the one place the manager actually looks -- it only survived in
+                          # the hover tooltip, invisible in a screenshot or at a glance. Fixed by giving the
+                          # pill a short, verdict-FIRST headline ("Wildcard may not be needed -- transfer plan
+                          # alone projects X%" / "CAUTION: Wildcard still needed -- plan alone reaches only
+                          # X%"), verified under 70 chars across the realistic 0-150% range so it's never
+                          # truncated; the full reasoning sentence from Patch 46 is unchanged and still shown
+                          # in full as this pill's hover tooltip, the Wildcard card's own tooltip, and inside
+                          # "Full chip analysis." No change to the underlying cross-check math itself (still
+                          # covered by test_patch46_wc_crosscheck.py, which passes unchanged) -- display-only.
+                          # NOTE (2026-09-15): rb_model_app_patch48.zip is CUMULATIVE: Patch 29 through
+                          # 48 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

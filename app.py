@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 47"
+PATCH_VERSION = "Patch 48"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1111,6 +1111,20 @@ if wc_flag and reachable_detect is not None and not squad_df.empty:
                    if _closes else
                    f"still below the {_wc_ceiling:.0f}% trigger ceiling even after the plan, so this looks like "
                    f"a structural gap ordinary transfers alone won't close, not just a few weeks away."))
+            # Patch 48 (2026-09-15, manager report: the pill only ever showed
+            # "Cross-check against your own recommended transfer plan (Hit if
+            # wort…" — _flag_pill truncates any text past 70 chars, and the
+            # actual verdict (closes the gap or not) was the LAST clause of a
+            # long sentence, so it got cut off in the one place the manager
+            # actually looks (the always-visible pill row), only surviving in
+            # the hover tooltip nobody saw in a screenshot. Fix: a short,
+            # verdict-first headline for the pill itself (fits under 70 chars,
+            # so it's never truncated) — the full reasoning above is unchanged
+            # and still carried as this pill's hover tooltip and inside "Full
+            # chip analysis" / the card tooltip.
+            _wc_check_headline = (
+                f"Wildcard may not be needed — transfer plan alone projects {_avg_after}%" if _closes else
+                f"CAUTION: Wildcard still needed — plan alone reaches only {_avg_after}%")
 
 # ---------------------------------------------------------------------------
 # Header + verdict
@@ -1237,7 +1251,7 @@ pill_items = []
 if wc_flag:
     pill_items.append(_flag_pill(wc_flag))
     if _wc_check_note:
-        pill_items.append(_flag_pill(_wc_check_note))
+        pill_items.append(_flag_pill(_wc_check_headline, _wc_check_note))
 elif much_more:
     pill_items.append(_flag_pill(f"Wildcard trigger: not active — {much_more}."))
 for note in chip_notes:
