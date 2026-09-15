@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 44"
+PATCH_VERSION = "Patch 45"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -478,8 +478,34 @@ with st.sidebar:
     if hit_stance == "Force":
         forced_count = st.number_input("Transfers to force", min_value=1, max_value=5, value=2, step=1)
 
-    horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=6, value=1,
-                         help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture.")
+    # Patch 45 (2026-09-15, manager report: "what is the maximum GWs we can
+    # get to solve this issue" after benchmarking showed 4-6 GW horizons
+    # taking 1-3 minutes) — root cause is NOT the pitch navigator (which just
+    # displays whatever squad the recommendation already produced); it's
+    # `recommend.plan_transfer_schedule()`, the chained weekly planner that
+    # "No hits"/"Hit if worth it" route through at horizon>1 (Patch 39's own
+    # dispatch rule): one full k=0-5 MILP solve PER WEEK in the chain, plus
+    # the Patch 41 tie-break's full-pool scan per week — both deliberately
+    # kept at full strength per the manager's own confirmed choices in
+    # Patch 42/41. Measured end-to-end on the real ~616-player pool, cold
+    # cache: 1 GW ~2s (single solve, no chaining), 2 GW ~20s, 3 GW ~36s,
+    # 4 GW ~72s, 5 GW ~121s, 6 GW ~161s — clearly super-linear, since each
+    # week's own search cost scales with ITS remaining horizon length, and
+    # week 1 of a longer plan always faces the longest remaining horizon.
+    # Manager confirmed (2026-09-15) capping at 3 GWs — keeps every chained
+    # run under ~40s — rather than narrowing the per-week search width
+    # (a real accuracy trade-off) or leaving it uncapped with just a warning.
+    # The cap only applies to the two hit-stances that actually route through
+    # the chained planner; "Force" always does a single one-shot solve over
+    # the whole horizon regardless of length; so it keeps the full 1-6 range.
+    _horizon_max = 3 if hit_stance in ("No hits", "Hit if worth it") else 6
+    horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=_horizon_max, value=1,
+                         help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture."
+                         + ("" if _horizon_max == 6 else
+                            " Capped at 3 GWs for this hit stance — beyond that, the chained weekly planner's "
+                            "own full-strength search (k=0-5 every week, plus the near-tie full-pool scan) "
+                            "takes 1-3+ minutes per run (measured, Patch 45); switch to \"Force\" for a longer "
+                            "one-shot horizon instead."))
 
     # Patch 28 (v6.4 / Standing Rule #41) — this app has no persistent memory
     # between runs (fresh container each time, Step 2), so it cannot discover

@@ -567,6 +567,27 @@ meta:
                           # not a manager-directed extension. Full regression suite unchanged/still passing.
                           # NOTE (2026-09-15): rb_model_app_patch44.zip is CUMULATIVE: Patch 29 through
                           # 44 together, on top of the manager's Patch 28 baseline.
+                          # Patch 45 (2026-09-15, manager report: "if the navigator is the main reason for
+                          # this slowness, what is the maximum GWs we can get to solve this issue!!!") --
+                          # benchmarked end-to-end (not guessed) on the real ~616-player pool, cold cache:
+                          # the pitch navigator itself is not the cost (it only displays a squad the
+                          # recommendation already produced); the real cost is recommend.plan_transfer_
+                          # schedule(), the chained weekly planner "No hits"/"Hit if worth it" route through
+                          # at horizon > 1 GW (Patch 39's dispatch rule) -- one full k=0-5 MILP solve PER WEEK
+                          # in the chain, plus the Patch 41 tie-break's full-pool scan per week, both kept at
+                          # full strength per the manager's own earlier confirmed choices. Measured: 1 GW
+                          # ~2s (single solve, no chaining), 2 GW ~20s, 3 GW ~36s, 4 GW ~72s, 5 GW ~121s,
+                          # 6 GW ~161s -- clearly super-linear, since each week's own search cost scales with
+                          # ITS remaining horizon length (week 1 of a longer plan always faces the longest
+                          # remaining horizon). Manager confirmed capping the sidebar Horizon slider at 3 GWs
+                          # for "No hits"/"Hit if worth it" specifically (every chained run then stays under
+                          # ~40s), over narrowing the per-week search width (a real accuracy trade-off) or
+                          # leaving it uncapped with just a spinner/warning. "Force" is unaffected -- it's
+                          # always a single one-shot solve over the whole horizon regardless of length, so it
+                          # keeps the full 1-6 GW range. No scoring/recommendation logic changed; this is a UI
+                          # guardrail only (dynamic slider max_value based on the selected hit stance).
+                          # NOTE (2026-09-15): rb_model_app_patch45.zip is CUMULATIVE: Patch 29 through
+                          # 45 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
