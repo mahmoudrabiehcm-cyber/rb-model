@@ -457,6 +457,43 @@ meta:
                           # regression from this patch).
                           # NOTE (2026-09-14): rb_model_app_patch41.zip is CUMULATIVE: Patch 29 through
                           # 41 together, on top of the manager's Patch 28 baseline.
+                          # Patch 42 (2026-09-15, manager report: "the performance is too too slow" + "if
+                          # it's for 2 or 3 GWs the navigator isn't working as expected"): two separate
+                          # fixes. (1) PERFORMANCE — root-caused to Patch 39's own weekly-planner hit-cost
+                          # extension: routing "Hit if worth it" through the chained weekly pacing plan at
+                          # horizon > 1 GW means the full k=0-5 MILP search now runs ONCE PER WEEK instead
+                          # of once total, roughly tripling optimizer.solve_squad() calls for a 3-GW run —
+                          # a real regression introduced by that patch, not a pre-existing issue. Manager
+                          # confirmed keeping the full k-range (declined narrowing search power) and fixing
+                          # via caching instead: solve_squad() is now wrapped in st.cache_data (falls back
+                          # to uncached if streamlit isn't importable, so bare test scripts still work) —
+                          # a cache hit requires byte-identical inputs (the full player-pool DataFrame's
+                          # content, cfg, budget, retain-set, k, objective column), so this is PURE caching
+                          # with zero change to what gets recommended; a genuine data refresh or a
+                          # genuinely different search always re-solves. Verified a ~7x speedup on a
+                          # repeated identical synthetic solve; the real win on the live app is larger,
+                          # since Streamlit reruns the whole script on nearly every widget click and most
+                          # of those reruns don't actually change the pool/budget/retain-set being solved.
+                          # (2) NAVIGATOR — root cause: the "After recommended transfer" pitch-navigator
+                          # toggle was disabled outright whenever `rec["is_weekly_schedule"]` was True,
+                          # reasoning that "which week's squad" was ambiguous across a multi-week chain.
+                          # Patch 39 made this combination (weekly schedule + a clear headline move) far
+                          # more common by routing "Hit if worth it" through the same weekly planner "No
+                          # hits" already used — so the toggle started disappearing in exactly the cases
+                          # the manager hits most (e.g. 3-GW horizon, "Hit if worth it", a clear GW5 move).
+                          # Fix: for a weekly schedule, the toggle now previews `weekly_plan[0]["moves"]`
+                          # specifically — THIS week's move only, which is just as unambiguous as the
+                          # single-decision case — rather than the flattened `rec["moves"]` (which would
+                          # wrongly merge every week's swaps together as if they all happened at once) or
+                          # disabling the toggle altogether. Later weeks' hypothetical chained moves stay
+                          # out of scope for this preview, same as before. Label reads "After recommended
+                          # transfer (this week's move)" for a weekly schedule so it's clear what's being
+                          # previewed. Full regression suite (test_patch28/29/30/34_unit/35/36/37/
+                          # 38(_horizon,_open_pool)/39_hits/41_tiebreak) passes unchanged after both fixes;
+                          # test_patch34_impact_check.py Test 1 still fails on the same pre-existing,
+                          # unrelated fixture issue flagged since Patch 36/37.
+                          # NOTE (2026-09-15): rb_model_app_patch42.zip is CUMULATIVE: Patch 29 through
+                          # 42 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

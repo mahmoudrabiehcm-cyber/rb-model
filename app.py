@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 41"
+PATCH_VERSION = "Patch 42"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1304,14 +1304,28 @@ def _render_pitch_navigator():
         st.session_state.nav_gw_list = _nav_gw_list
     st.session_state.nav_gw_idx = max(0, min(st.session_state.nav_gw_idx, len(_nav_gw_list) - 1))
 
-    # "After recommended transfer" needs a single-decision move set (moves) —
-    # not the "No hits" chained weekly schedule, where "which week's squad"
-    # is itself ambiguous (same scope restriction as the Patch 33 preview
-    # below). Fixed (Patch 34 follow-up): _move_row() previously dropped
-    # out_code/in_code entirely, which silently disabled this toggle every
-    # run regardless of whether a transfer was recommended.
-    _nav_moves_df = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
-    _nav_can_toggle = (not rec.get("is_weekly_schedule") and not _nav_moves_df.empty
+    # "After recommended transfer" needs an UNAMBIGUOUS single set of moves
+    # for the CURRENT planning GW specifically. For a single-decision
+    # recommendation that's just `rec["moves"]`. For the chained weekly
+    # pacing plan (Patch 39 routes "Hit if worth it" through this too, not
+    # just "No hits" — manager report 2026-09-15: this made the toggle
+    # disappear far more often than before, since that combination is now
+    # common, not rare), using the FULL flattened `rec["moves"]` would wrongly
+    # merge every week's swaps together as if they all happened at once — so
+    # this only ever previews THIS WEEK's move (`weekly_plan[0]`), which is
+    # itself a concrete, unambiguous move exactly like the single-decision
+    # case; later weeks' hypothetical chained moves stay out of scope for
+    # this preview, same as they always were. Fixed (Patch 34 follow-up):
+    # _move_row() previously dropped out_code/in_code entirely, which
+    # silently disabled this toggle every run regardless of whether a
+    # transfer was recommended.
+    if rec.get("is_weekly_schedule"):
+        _wk_plan = rec.get("weekly_plan") or []
+        _this_week_moves = _wk_plan[0]["moves"] if _wk_plan and _wk_plan[0].get("gw") == planning_gw else []
+        _nav_moves_df = pd.DataFrame(_this_week_moves) if _this_week_moves else pd.DataFrame()
+    else:
+        _nav_moves_df = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
+    _nav_can_toggle = (not _nav_moves_df.empty
                        and "out_code" in _nav_moves_df.columns and "in_code" in _nav_moves_df.columns)
     _nav_squad_after = None
     if _nav_can_toggle:
@@ -1352,16 +1366,18 @@ def _render_pitch_navigator():
                     _nav_squad_scenario = _nav_squad_scenario.drop_duplicates(subset=["code"], keep="first")
 
     _nav_options = ["Current squad"]
+    _after_tx_label = ("After recommended transfer (this week's move)" if rec.get("is_weekly_schedule")
+                        else "After recommended transfer")
     if _nav_can_toggle:
-        _nav_options.append("After recommended transfer")
+        _nav_options.append(_after_tx_label)
     if _nav_squad_scenario is not None:
         _nav_options.append(f"After evaluated scenario ({_scenario_label})")
 
-    # Dynamic options (the 3rd one's label carries the evaluated player's
-    # name, which can change run to run) — a stale session_state value that
-    # no longer matches any current option would otherwise raise a
-    # Streamlit exception on the widget below, so reset it defensively
-    # rather than let a changed scenario label crash the whole page.
+    # Dynamic options (both the 2nd option's wording and the 3rd option's
+    # label can change run to run) — a stale session_state value that no
+    # longer matches any current option would otherwise raise a Streamlit
+    # exception on the widget below, so reset it defensively rather than
+    # let a changed label crash the whole page.
     if st.session_state.get("nav_mode") not in _nav_options:
         st.session_state["nav_mode"] = "Current squad"
 
@@ -1371,9 +1387,8 @@ def _render_pitch_navigator():
                              index=0, horizontal=True, key="nav_mode",
                              disabled=len(_nav_options) == 1,
                              help=None if len(_nav_options) > 1 else
-                             "No single-decision transfer this run to preview (either nothing recommended, "
-                             "or a No-hits chained weekly schedule where 'which week's squad' isn't a single "
-                             "answer) and no scenario evaluated below yet.")
+                             "No recommended transfer this run to preview for the current planning GW, "
+                             "and no scenario evaluated below yet.")
     with nav_c2:
         pb1, pb2, pb3 = st.columns([1, 3, 1])
         with pb1:
@@ -1391,7 +1406,7 @@ def _render_pitch_navigator():
     nav_col = f"xpts_gw{nav_gw}"
     if nav_mode.startswith("After evaluated scenario") and _nav_squad_scenario is not None:
         nav_squad = _nav_squad_scenario
-    elif nav_mode == "After recommended transfer" and _nav_squad_after is not None:
+    elif nav_mode.startswith("After recommended transfer") and _nav_squad_after is not None:
         nav_squad = _nav_squad_after
     else:
         nav_squad = squad_df_adv

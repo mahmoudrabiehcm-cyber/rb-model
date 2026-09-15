@@ -17,7 +17,36 @@ try:
 except ImportError:  # pragma: no cover
     pulp = None
 
+try:
+    import streamlit as st
+except ImportError:  # pragma: no cover — keeps this module importable from a
+    # plain, non-Streamlit test script even if streamlit somehow isn't
+    # installed in that environment; falls back to an uncached passthrough.
+    st = None
 
+
+def _cache_decorator(fn):
+    """Patch 42 (manager, 2026-09-15: "the performance is too too slow" —
+    traced to Patch 39's own weekly-planner hit-cost extension, which made
+    "Hit if worth it" run the full k=0-5 MILP search PER WEEK of the
+    horizon instead of once, roughly tripling solver calls for a 3-GW run.
+    Manager-confirmed fix (kept the full k-range rather than narrowing
+    search power): cache solve_squad() itself, so re-running the exact same
+    MILP problem — which happens constantly, since Streamlit reruns the
+    whole script on nearly every widget interaction and many of those
+    reruns don't actually change the pool/budget/retain-set — returns
+    instantly instead of re-solving. Pure caching, zero change to what gets
+    recommended: a cache hit requires byte-identical inputs (players'
+    content, cfg's content, and every other argument), so a genuine data
+    refresh or a genuinely different candidate search always gets a fresh
+    solve. Falls back to uncached if streamlit isn't importable (e.g. a
+    bare test script run without it installed) rather than breaking."""
+    if st is None:
+        return fn
+    return st.cache_data(show_spinner=False, max_entries=1024)(fn)
+
+
+@_cache_decorator
 def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
                  must_include_codes: list | None = None,
                  exclude_codes: list | None = None,
