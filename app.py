@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 42"
+PATCH_VERSION = "Patch 44"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -557,7 +557,63 @@ with st.spinner("Fetching live data and computing xPts..."):
     planning_gw = cfg["meta"].get("current_gw_override") or snap.planning_gw
     gw_list = list(range(planning_gw, planning_gw + horizon))
 
-    proj = _project(snap, hist_df, overrides, cfg, gw_list)
+    # Patch 43 (2026-09-15, performance) — chip-availability status and the
+    # GW *windows* the chip shape-test / Chip Advisor need are computed here,
+    # BEFORE the (expensive, non-vectorized) first compute_all() run, so all
+    # three GW ranges can be unioned into ONE shared projection instead of up
+    # to 3 separate, heavily-overlapping compute_all() calls on every script
+    # execution. None of this — chip_status, the window sizes below — reads
+    # `proj`/`squad_df`; the only things that genuinely need the SQUAD (which
+    # isn't built until after `proj` exists) are the "not squad_df.empty"
+    # gates on actually USING these windows further down (wc_trigger /
+    # shape_test / Chip Advisor tables) — those guards are preserved exactly
+    # where they were, just decoupled from the (harmless, squad-independent)
+    # list computation itself. compute_all()'s per-player set-piece-decay
+    # state (sp_mult_last) is carried forward SEQUENTIALLY within one call —
+    # verified safe here because the union list is one ascending run starting
+    # at planning_gw, so xpts_gw{n} for any n comes out identical to what the
+    # old separate calls produced (each of those also started fresh at
+    # planning_gw with sp_mult_last=1.0 and walked forward in the same order).
+    boot_chips = fpl_data.fetch_bootstrap_chips(snap.raw_boot) if snap.raw_boot else []
+    chips_played = history.get("chips", []) if history else []
+    chip_rows = chip_protocol.chip_status(boot_chips, chips_played)
+    all_team_ids = snap.teams["id"].tolist() if "id" in snap.teams.columns else []
+    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
+    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
+    available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
+
+    detect_gw_list = None
+    if _wc_available_now or _fh_available_now:
+        shape_cfg = cfg.get("chip_shape_test", {})
+        detect_window = shape_cfg.get("detection_window_gws", 4)
+        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
+
+    chip_adv_window = None
+    chip_adv_gw_list = None
+    if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names):
+        chip_adv_window = chip_protocol.chip_advisor_gw_window(planning_gw, snap.fixtures, all_team_ids, cfg)
+        chip_adv_gw_list = chip_adv_window["gw_list"]
+
+    # Patch 44 (2026-09-15, manager report: Damsgaard-vs-Tavernier tie-break
+    # still not firing at a 1-GW horizon, even though it correctly fires once
+    # the horizon is widened to 2 GWs) — root cause: before this patch, `proj`
+    # only ever carried columns for whatever GW range was actually requested.
+    # At horizon=1, that's a single GW; recommend._position_tie_break()'s
+    # extended-horizon comparison needs `xpts_gw{max(gw_list)+1}` to break a
+    # near-tie, and when a chip window happened to widen `proj` anyway (this
+    # week's Wildcard/Free Hit/Bench Boost/Triple Captain all still available)
+    # that extra GW was present as a side effect of Patch 43's merge — but a
+    # week with every chip already used would have silently gone back to
+    # missing that data and the tie-break bailing out ("keeping the model's
+    # original pick"). Manager confirmed (2026-09-15) this should be
+    # guaranteed, not a lucky side effect: `gw_list[-1] + 1` is now always
+    # folded into the shared projection union, independent of chip
+    # availability — one extra GW's worth of xPts columns, not a second
+    # compute_all() call or a new MILP solve.
+    _tie_break_lookahead_gw = gw_list[-1] + 1
+    _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
+                        | {_tie_break_lookahead_gw})
+    proj = _project(snap, hist_df, overrides, cfg, _gw_union)
     picks = _picks(entry_id, squad_gw)
 
     id_to_code = proj.set_index("id")["code"].to_dict() if "id" in proj.columns else {}
@@ -778,11 +834,9 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     # chip status + timing — computed before transfer suggestions so the
     # transfer plan can factor in "a chip is coming, banking may beat spending"
-    boot_chips = fpl_data.fetch_bootstrap_chips(snap.raw_boot) if snap.raw_boot else []
-    chips_played = history.get("chips", []) if history else []
-    chip_rows = chip_protocol.chip_status(boot_chips, chips_played)
+    # (chip_rows / all_team_ids themselves now computed earlier, Patch 43 —
+    # see the comment above the first _project() call)
     fixture_counts = chip_protocol.fixture_counts_by_team(snap.fixtures, gw_list)
-    all_team_ids = snap.teams["id"].tolist() if "id" in snap.teams.columns else []
     dgw_bgw = chip_protocol.dgw_bgw_flags(fixture_counts, all_team_ids)
     squad_team_ids = squad_df["team_id"].tolist() if "team_id" in squad_df.columns else []
     chip_notes = chip_protocol.chip_recommendations(chip_rows, dgw_bgw, squad_team_ids, max(len(squad_df), 1))
@@ -800,17 +854,13 @@ with st.spinner("Fetching live data and computing xPts..."):
     # reachable-ceiling pair projected onto the detection window specifically
     # (may be wider than the sidebar horizon), computed once here and reused
     # by both the trigger and the Step 8c shape-test below.
-    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
-    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
+    # _wc_available_now / _fh_available_now / detect_gw_list computed earlier
+    # (Patch 43); shape_proj is now just a view into the shared `proj` (which
+    # already contains every GW column detect_gw_list needs, since it was
+    # folded into the union before the first — and only — compute_all() run).
     wc_trigger = None
     shape_test = None
-    detect_gw_list = None
-    shape_proj = None
-    if (_wc_available_now or _fh_available_now) and not squad_df.empty:
-        shape_cfg = cfg.get("chip_shape_test", {})
-        detect_window = shape_cfg.get("detection_window_gws", 4)
-        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
-        shape_proj = _project(snap, hist_df, overrides, cfg, detect_gw_list)
+    shape_proj = proj if (detect_gw_list is not None and not squad_df.empty) else None
 
     if _wc_available_now and shape_proj is not None:
         squad_detect = shape_proj[shape_proj["code"].isin(squad_codes)]
@@ -844,7 +894,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     # that are actually still available this season — each Free Hit check is
     # a fresh MILP solve per horizon GW, so it's skipped entirely once that
     # chip is used, rather than burning compute on a verdict nobody can act on.
-    available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
+    # available_chip_names computed earlier (Patch 43)
     # Chip-specific margin-of-error thresholds (Patch 5). Standing Rule #34
     # itself only defines ONE blanket band (max(2.0, 2%)) — the model doc
     # does not specify separate numeric thresholds per chip. Using a single
@@ -874,17 +924,15 @@ with st.spinner("Fetching live data and computing xPts..."):
     # window while keeping the SAME player-identity split (who's bench vs.
     # XI, who's in the squad) that the sidebar-horizon view already settled
     # on for this planning_gw.
-    chip_adv_window = None
+    # chip_adv_window / chip_adv_gw_list computed earlier (Patch 43); the
+    # projection itself is just the shared `proj` now (already contains every
+    # GW column this window needs), so this only re-derives the bench/XI/
+    # squad slices — no second compute_all() call.
     bench_df_adv, starters_df_adv, squad_df_adv, chip_adv_proj = bench_df, starters_df, squad_df, proj
-    if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names) \
-            and not squad_df.empty:
-        chip_adv_window = chip_protocol.chip_advisor_gw_window(planning_gw, snap.fixtures, all_team_ids, cfg)
-        chip_adv_gw_list = chip_adv_window["gw_list"]
-        if chip_adv_gw_list != gw_list:
-            chip_adv_proj = _project(snap, hist_df, overrides, cfg, chip_adv_gw_list)
-            bench_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(bench_df["code"])]
-            starters_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(starters_df["code"])]
-            squad_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(squad_codes)]
+    if chip_adv_window is not None and not squad_df.empty and chip_adv_gw_list != gw_list:
+        bench_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(bench_df["code"])]
+        starters_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(starters_df["code"])]
+        squad_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(squad_codes)]
 
     bb_advisor = None
     if any(c.startswith("Bench Boost") for c in available_chip_names):

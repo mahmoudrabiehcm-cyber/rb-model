@@ -199,7 +199,6 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         gw_xpts = {}
         gw_opp = {}
         gw_fdr = {}
-        sp_mult_last = 1.0
         fdr_rank = {"easy": 0, "mid": 1, "hard": 2}
         for gw in gw_list:
             fixtures = get_fixture_for_gw(snap.fixtures, team_id, gw)
@@ -232,7 +231,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                 npxg = eng.blend_rate(p.get("npxg90_hist"), p.get("npxg90_cur"), gw, cfg,
                                        metric="npxg",
                                        current_sample_matches=int(p.get("starts", 0) or 0))
-                npxg, sp_mult_last = setpiece.apply_to_npxg(npxg, p, gw, cfg)
+                npxg, _sp_mult_this_gw = setpiece.apply_to_npxg(npxg, p, gw, cfg)
                 xa = eng.blend_rate(p.get("xa90_hist"), p.get("xa90_cur"), gw, cfg,
                                      metric="xa",
                                      current_sample_matches=int(p.get("starts", 0) or 0))
@@ -253,6 +252,23 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
             # ticker (Patch 4) shows the worst-case dot, not an averaged one
             gw_fdr[gw] = max(fdr_tiers, key=lambda t: fdr_rank.get(t, 1)) if fdr_tiers else ""
 
+        # Patch 43 (2026-09-15) — the setpiece_flag/setpiece_multiplier badge
+        # is now pinned to the NEAREST requested gameweek (gw_list[0], i.e.
+        # planning_gw for every caller in this app) rather than "whichever gw
+        # happened to be last in whatever gw_list this particular call was
+        # given." setpiece.setpiece_multiplier() is a pure function of
+        # (player, gw, cfg) — it does not actually accumulate state across
+        # gws, it's just recomputed fresh each iteration — so the old
+        # "value after the loop" approach silently changed the badge whenever
+        # a caller passed a longer gw_list (e.g. a 4-GW chip shape-test window
+        # vs. a 1-GW sidebar horizon) even though nothing about the player
+        # changed. That mismatch was caught by test_patch43_merge_correctness.py
+        # after unioning several overlapping gw_list calls into one shared
+        # compute_all() run for performance — pinning to gw_list[0] fixes it
+        # for good (the badge always reflects "right now", never drifts with
+        # how wide a horizon some other feature happened to request).
+        sp_mult_ref = setpiece.setpiece_multiplier(p, gw_list[0], cfg) if gw_list else 1.0
+
         rec = {
             "code": p.get("code"), "id": p.get("id"), "web_name": p.get("web_name"),
             "team": short, "team_id": team_id, "position": pos, "price": price(p.get("now_cost")),
@@ -269,8 +285,8 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
             ) if pd.notna(p.get("transfers_in_event")) or pd.notna(p.get("transfers_out_event")) else None,
             "xm": round(xm, 3),
             "est_rescue_needed": bool(p.get("est_rescue_needed", False)),
-            "setpiece_flag": sp_mult_last > 1.001,
-            "setpiece_multiplier": round(sp_mult_last, 3),
+            "setpiece_flag": sp_mult_ref > 1.001,
+            "setpiece_multiplier": round(sp_mult_ref, 3),
         }
         for gw in gw_list:
             rec[f"xpts_gw{gw}"] = gw_xpts[gw]

@@ -494,6 +494,79 @@ meta:
                           # unrelated fixture issue flagged since Patch 36/37.
                           # NOTE (2026-09-15): rb_model_app_patch42.zip is CUMULATIVE: Patch 29 through
                           # 42 together, on top of the manager's Patch 28 baseline.
+                          # Patch 43 (2026-09-15, manager report: "performance still too slow, what other
+                          # optimizations we can made!!" after Patch 42's solver caching): the manager's
+                          # confirmed scope was "compute projections once, reuse everywhere" (declined the
+                          # larger, riskier option of also vectorizing compute_all()'s core per-player loop).
+                          # Root cause: app.py called _project() (build_player_table + compute_all(), the
+                          # slow non-vectorized .iterrows() pipeline) up to 3 SEPARATE times on every single
+                          # script run regardless of user action -- once for the sidebar's own gw_list, once
+                          # for the chip shape-test's detection window, once for the Chip Advisor's window --
+                          # even though all three windows always start at the same planning_gw and heavily
+                          # overlap. Fix: chip_status/_wc_available_now/_fh_available_now/available_chip_names
+                          # and the two window SIZES (chip_shape_test's detection window, chip_advisor_gw_window)
+                          # are now computed BEFORE the first _project() call instead of after (confirmed by
+                          # reading the code that none of that actually depends on `proj`/`squad_df` -- only
+                          # the downstream USE of each window still gates on `not squad_df.empty`, unchanged),
+                          # so their GW ranges can be unioned with the sidebar's own gw_list and requested via
+                          # ONE shared _project()/compute_all() call; shape_proj/chip_adv_proj are now just
+                          # views into that same shared `proj` (already containing every column they need)
+                          # instead of separate compute_all() runs. Measured ~1.84x wall-clock speedup on the
+                          # compute_all() cost itself for a real (uncached) 1-GW-horizon run (15.1s -> 8.2s on
+                          # this environment's 616-player pool), on top of Patch 42's separate solver-caching
+                          # win. CORRECTNESS: verified via a new standalone script
+                          # (test_patch43_merge_correctness.py, run against real snapshot data, not synthetic)
+                          # that the merged single-call compute_all() reproduces every xpts_gw{n}/opp_gw{n}/
+                          # fdr_gw{n} value byte-identical to what the 3 separate calls it replaces produced --
+                          # this is guaranteed by compute_all()'s own per-player loop always starting its
+                          # per-GW math fresh at gw_list[0] regardless of how many further GWs follow, so a
+                          # longer unioned list is a strict superset computation, never a different one for
+                          # the GWs both ranges share. That same verification script caught a REAL bug this
+                          # patch introduces if left unfixed: setpiece_flag/setpiece_multiplier (the pitch
+                          # card's "SP" badge) used to be read off `sp_mult_last` -- whatever value a
+                          # player's set-piece multiplier happened to land on at the LAST gw of whichever
+                          # gw_list a given call was passed. Since setpiece.setpiece_multiplier() is actually
+                          # a PURE function of (player, gw, cfg) with no real cross-gw memory (it's just
+                          # recomputed fresh every iteration, "sp_mult_last" was only ever "last iteration's
+                          # fresh value"), merging calls with different list lengths silently changed the
+                          # badge (e.g. a 6-GW Chip-Advisor window's last gw has a more-decayed multiplier
+                          # than a 1-GW sidebar horizon's). Fixed by pinning the badge to gw_list[0]
+                          # (planning_gw) explicitly, computed once per player independent of the loop's
+                          # length -- this is a genuine, disclosed correctness fix (the badge now always
+                          # reflects "right now," never drifts with how wide a horizon some other feature
+                          # happened to request), not just a workaround for the merge. Full regression suite
+                          # (test_patch28/29/30/34_unit/35/36/37/38(_horizon,_open_pool)/39_hits/41_tiebreak)
+                          # passes unchanged; test_patch34_impact_check.py Test 1 still fails on the same
+                          # pre-existing, unrelated fixture issue flagged since Patch 36/37.
+                          # NOTE (2026-09-15): rb_model_app_patch43.zip is CUMULATIVE: Patch 29 through
+                          # 43 together, on top of the manager's Patch 28 baseline.
+                          # Patch 44 (2026-09-15, manager report: Damsgaard-vs-Tavernier tie-break still not
+                          # firing at a 1-GW sidebar horizon, despite correctly firing once the horizon was
+                          # widened to 2 GWs) -- root cause: before this patch, `proj` only ever carried GW
+                          # columns for whatever range was actually requested. recommend._position_tie_break()
+                          # needs `xpts_gw{max(gw_list)+1}` to break a near-tie by looking one GW further
+                          # ahead; at horizon=1 that column simply didn't exist unless a chip detection/
+                          # advisor window happened to widen `proj` anyway (Patch 43's merge made that a
+                          # frequent but NOT guaranteed side effect -- it only helps in a week where at least
+                          # one of Wildcard/Free Hit/Bench Boost/Triple Captain is still available). Manager
+                          # confirmed (2026-09-15) this should be unconditional: `gw_list[-1] + 1` is now
+                          # always folded into the shared projection union regardless of chip availability --
+                          # one extra GW of xPts columns, not a second compute_all() call or an extra MILP
+                          # solve, so the tie-break's extension always has the data it needs, in every week,
+                          # at every horizon setting. Also documents, for the same manager question, where the
+                          # Wildcard card's percentage figure comes from: it's `wc_trigger["avg_rating_pct"]`
+                          # from fpl_engine.wildcard_trigger_check() -- the average of your squad's Team
+                          # Rating % (current squad's best XI, captain doubled, bench autosub-discounted,
+                          # divided by the bounded-reachable-ceiling squad using only your banked free
+                          # transfers) across each GW in the chip shape-test's detection window (4 GWs by
+                          # default, model_config.yaml chip_shape_test.detection_window_gws), then averaged.
+                          # 94.4% inside the noise band means that average sits comfortably above the 79%
+                          # trigger ceiling (wildcard_trigger.team_rating_pct_ceiling) and the cumulative xPts
+                          # gap over that window also stays below the 15-point trigger threshold
+                          # (wildcard_trigger.cumulative_gap_threshold) -- both v6.4's own documented numbers,
+                          # not a manager-directed extension. Full regression suite unchanged/still passing.
+                          # NOTE (2026-09-15): rb_model_app_patch44.zip is CUMULATIVE: Patch 29 through
+                          # 44 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
