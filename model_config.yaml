@@ -588,6 +588,47 @@ meta:
                           # guardrail only (dynamic slider max_value based on the selected hit stance).
                           # NOTE (2026-09-15): rb_model_app_patch45.zip is CUMULATIVE: Patch 29 through
                           # 45 together, on top of the manager's Patch 28 baseline.
+                          # Patch 46 (2026-09-15, manager report: "if the recommended transfers executed the
+                          # xpts and team rate will be better... concerned the trigger isn't considering the
+                          # transfers recommended which will make the team better without the chip") --
+                          # confirmed a real methodological blind spot: the Wildcard trigger's own reachable-
+                          # ceiling benchmark (data_pipeline.solve_reachable_ceiling, app.py line ~893) is a
+                          # ONE-SHOT rebuild using only the free transfers banked RIGHT NOW, never the chained,
+                          # week-by-week plan (recommend.plan_transfer_schedule) that accrues +1 FT/week like
+                          # the real game does and that "Transfer Recommendations" is already showing. So the
+                          # trigger's "gap" can read as needing a Wildcard even when ordinary transfers,
+                          # simply followed as recommended, would already close most or all of it. Manager
+                          # confirmed (2026-09-15) the fix scope explicitly: do NOT change what "active"/
+                          # "inactive" means (stays the doc's plain 79%/15pt read, same cost as before) --
+                          # instead surface a visible, always-computed cross-check next to the Wildcard card
+                          # showing what your OWN recommended plan already achieves: rebuilds the "after-plan"
+                          # squad from rec["moves"]' out_code/in_code pairs, computes its average Team Rating %
+                          # over the plan's own GW range against the SAME reachable-ceiling squad the trigger
+                          # itself already uses (apples-to-apples, same 79% ceiling), and states plainly
+                          # whether that projected rating already clears the ceiling or not. Deliberately
+                          # reuses data already computed this run (rec, reachable_detect, proj's already-
+                          # merged wide columns) -- zero new MILP solves, zero new compute_all() calls, so
+                          # this adds no measurable cost on top of Patch 42-45's performance work. Verified via
+                          # a new standalone script (test_patch46_wc_crosscheck.py, full 15-man synthetic
+                          # squads so optimizer.rating_gw_value's best-XI solve is valid) covering: the plan
+                          # clearing the ceiling, the plan NOT clearing a meaningfully stronger ceiling, and
+                          # the no-transfer/Roll case degrading gracefully. Full regression suite unchanged/
+                          # still passing.
+                          # NOTE (2026-09-15): rb_model_app_patch46.zip is CUMULATIVE: Patch 29 through
+                          # 46 together, on top of the manager's Patch 28 baseline.
+                          # Patch 47 (2026-09-15, manager request: "show the data retrieval time stamp to make
+                          # sure about the numbers we are seeing and make it user friendly") -- the old
+                          # "fetched 11:34" line gave no date, no timezone (ambiguous whether it's the
+                          # manager's own local time or the server's, which can differ), and no sense of
+                          # whether that number is fresh or long stale. Replaced with an explicit-UTC
+                          # date+time, a "how long ago" readout computed fresh at render time (not cached, so
+                          # it stays accurate even on a tab left open a while), and a color-coded freshness
+                          # badge (green < 5 min, gold 5-15 min, coral >= 15 min) keyed to the EXACT 15-minute
+                          # window _load_data's own st.cache_data(ttl=900) uses -- the same window the
+                          # sidebar's "Refresh live data now" button clears -- never an invented threshold.
+                          # Display-only change; no scoring/recommendation logic touched.
+                          # NOTE (2026-09-15): rb_model_app_patch47.zip is CUMULATIVE: Patch 29 through
+                          # 47 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

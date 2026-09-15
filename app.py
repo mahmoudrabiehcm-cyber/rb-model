@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 45"
+PATCH_VERSION = "Patch 47"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1054,6 +1054,64 @@ with st.spinner("Fetching live data and computing xPts..."):
                "hit_stance": hit_stance, "free_transfers": ft["free_transfers"],
                "weekly_plan": [], "is_weekly_schedule": False}
 
+# Patch 46 (2026-09-15, manager report: the Wildcard trigger's own reachable-
+# ceiling benchmark ignores what the "Transfer Recommendations" section is
+# ALREADY telling you to do -- it's a one-shot rebuild using only today's
+# banked free-transfer count (data_pipeline.solve_reachable_ceiling, line
+# ~893), never the chained, week-by-week plan (recommend.plan_transfer_
+# schedule) that accrues +1 FT/week like the real game does. So the trigger
+# can read "gap requires a Wildcard" even when ordinary transfers, simply
+# followed as recommended, would already close most or all of that gap on
+# their own -- a real methodological blind spot, not a display bug.
+#
+# Manager confirmed (2026-09-15) the fix scope explicitly: DON'T change what
+# "active"/"inactive" means (that stays the doc's plain 79%/15pt read, zero
+# extra cost, computed once per run same as before) -- INSTEAD surface a
+# visible cross-check showing what your own recommended plan already
+# achieves, so you can see for yourself whether the trigger's gap survives
+# ordinary play or not, before burning a Wildcard on it. Deliberately reuses
+# data already computed this run (rec's own moves, reachable_detect's own
+# ceiling squad, proj's already-merged wide columns) -- zero new MILP solves,
+# zero new compute_all() calls, so this adds no measurable cost on top of
+# Patch 42-45's performance work.
+_wc_check_note = None
+if wc_flag and reachable_detect is not None and not squad_df.empty:
+    _moves_all = rec.get("moves") or []
+    if _moves_all:
+        _out_codes = {m["out_code"] for m in _moves_all}
+        _in_codes = {m["in_code"] for m in _moves_all}
+        _after_plan_squad = pd.concat(
+            [squad_df[~squad_df["code"].isin(_out_codes)], proj[proj["code"].isin(_in_codes)]],
+            ignore_index=True, sort=False)
+    else:
+        _after_plan_squad = squad_df
+    _check_gws = [g for g in transfer_gw_list
+                  if f"xpts_gw{g}" in _after_plan_squad.columns and f"xpts_gw{g}" in reachable_detect["squad"].columns]
+    if _check_gws:
+        _ratings = []
+        for _g in _check_gws:
+            _col = f"xpts_gw{_g}"
+            _sv = opt.rating_gw_value(_after_plan_squad, _col, cfg)["total_realized"]
+            _rv = opt.rating_gw_value(reachable_detect["squad"], _col, cfg)["total_realized"]
+            _rp = eng.team_rating_pct(_sv, _rv, "")["rating_pct"]
+            if _rp is not None:
+                _ratings.append(_rp)
+        if _ratings:
+            _avg_after = round(sum(_ratings) / len(_ratings), 1)
+            _wc_ceiling = cfg.get("wildcard_trigger", {}).get("team_rating_pct_ceiling", 79.0)
+            _closes = _avg_after >= _wc_ceiling
+            _plan_desc = (f"the {len(_moves_all)}-move plan" if _moves_all else "no transfer (this run rolls)")
+            _wc_check_note = (
+                f"Cross-check against your own recommended transfer plan ({hit_stance}, {_plan_desc}, "
+                f"GW{_check_gws[0]}-GW{_check_gws[-1]}): if followed in full, your squad's average Team "
+                f"Rating % over that span is projected to rise to {_avg_after}% (currently "
+                f"{wc_trigger['avg_rating_pct']}%) — "
+                + (f"already at/above the {_wc_ceiling:.0f}% trigger ceiling, so ordinary transfers may close "
+                   f"this gap on their own, without needing the Wildcard — worth checking before committing it."
+                   if _closes else
+                   f"still below the {_wc_ceiling:.0f}% trigger ceiling even after the plan, so this looks like "
+                   f"a structural gap ordinary transfers alone won't close, not just a few weeks away."))
+
 # ---------------------------------------------------------------------------
 # Header + verdict
 # ---------------------------------------------------------------------------
@@ -1105,9 +1163,40 @@ with col2:
                    f"sidebar to re-pull the latest provisional figures.")
 
 gw_status = "confirmed final" if getattr(snap, "current_gw_data_checked", False) else "provisional, not yet finalized"
-st.markdown(f'<div class="side-note">Source: {snap.source} · squad as of GW{squad_gw} ({gw_status}) · '
+
+# Patch 47 (2026-09-15, manager request: "show the data retrieval timestamp
+# to make sure about the numbers we are seeing and make it user friendly")
+# — replaces the old bare "fetched 11:34" (no date, no timezone, easy to
+# misread as your own local time when this app can run on a server in a
+# different one, and gives no sense of whether that fetch is fresh or long
+# stale) with an explicit-UTC date+time, a live "how long ago" readout
+# computed at render time (not cached, so it's accurate even if you've had
+# the page open a while), and a color-coded freshness badge matching the
+# EXACT 15-minute window `_load_data`'s own st.cache_data(ttl=900) actually
+# uses (Patch reference: the "Refresh live data now" button that clears that
+# same cache) — never a made-up threshold. Green < 5 min, gold 5-15 min
+# (still the SAME cached fetch, just older), coral >= 15 min (that cache
+# entry has actually expired — the next "Run Model"/page action re-fetches
+# automatically, but if you're staring at numbers from well past that mark,
+# the badge says so instead of leaving you to guess).
+_fetch_dt_utc = dt.datetime.fromtimestamp(snap.fetched_at, tz=dt.timezone.utc)
+_age_s = max(0.0, dt.datetime.now(dt.timezone.utc).timestamp() - snap.fetched_at)
+if _age_s < 60:
+    _age_txt, _fresh_cls = "just now", "play"
+elif _age_s < 300:
+    _age_txt, _fresh_cls = f"{int(_age_s // 60)} min ago", "play"
+elif _age_s < 900:
+    _age_txt, _fresh_cls = f"{int(_age_s // 60)} min ago", "active"
+else:
+    _age_txt, _fresh_cls = f"{int(_age_s // 60)} min ago — cache expired, will refetch on next run", "caution"
+_fetch_badge = (f'<span class="badge {_fresh_cls}" title="Live official FPL data cached for up to 15 minutes '
+                f'(_load_data\'s own cache window) — exactly matching what the ↑Refresh live data now button '
+                f'in the sidebar clears. This badge is computed fresh every time the page renders, so it always '
+                f'reflects how old the underlying fetch actually is, even if you\'ve had this tab open a while.">'
+                f'{_age_txt}</span>')
+st.markdown(f'<div class="side-note">Data as of <b>{_fetch_dt_utc.strftime("%b %d, %H:%M:%S UTC")}</b> '
+            f'{_fetch_badge} · Source: {snap.source} · squad as of GW{squad_gw} ({gw_status}) · '
             f'planning for GW{planning_gw} · '
-            f'fetched {dt.datetime.fromtimestamp(snap.fetched_at).strftime("%H:%M")} · '
             f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
 fh_at_ceiling = fh_auto_optimal_val > 0 and fh_auto_gap < fh_auto_moe
 if fh_auto_rating["rating_pct"] is not None:
@@ -1147,6 +1236,8 @@ much_more = wc_trigger["reason"] if (wc_trigger and not wc_flag and wc_trigger.g
 pill_items = []
 if wc_flag:
     pill_items.append(_flag_pill(wc_flag))
+    if _wc_check_note:
+        pill_items.append(_flag_pill(_wc_check_note))
 elif much_more:
     pill_items.append(_flag_pill(f"Wildcard trigger: not active — {much_more}."))
 for note in chip_notes:
@@ -1201,6 +1292,8 @@ wc_card_tooltip = (wc_flag or (f"Wildcard trigger: not active — {much_more}." 
                                 "Insufficient data to evaluate the trigger this run."))
 wc_card_tooltip += " Wildcard's trigger condition is mechanical (Standing Rule #24/#41), but the specific play " \
                     "date is never a mechanical verdict — it's a rolling re-test per Standing Rule #32."
+if wc_flag and _wc_check_note:
+    wc_card_tooltip += " " + _wc_check_note
 if wc_flag:
     wc_stat = f'{wc_trigger["avg_rating_pct"]}%' if wc_trigger and wc_trigger.get("avg_rating_pct") is not None else "ACTIVE"
     wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
@@ -1220,6 +1313,8 @@ st.markdown(signal_html, unsafe_allow_html=True)
 # that the cards above carry the at-a-glance read (2026-09-14 redesign).
 strategy_lines = chip_protocol.chip_strategy_summary(
     wc_flag, shape_test, bb_advisor, tc_advisor, fh_advisor, chip_rows, disruption["notes"], wc_trigger)
+if _wc_check_note:
+    strategy_lines.append(_wc_check_note)
 with st.expander("Full chip analysis — combined narrative, rule-by-rule"):
     for line in strategy_lines:
         st.markdown(f"- {line}")
