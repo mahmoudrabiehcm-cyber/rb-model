@@ -724,6 +724,51 @@ meta:
                           # scope for this patch and none of which were touched.
                           # NOTE (2026-09-16): rb_model_app_patch50.zip is CUMULATIVE: Patch 29 through
                           # 50 together, on top of the manager's Patch 28 baseline.
+                          # Patch 51 (2026-09-16, two reports): (1) a separate advisory chat ("GW5 prep with
+                          # full context") reviewed this app's own header "Team Rating %" against the model
+                          # doc's own §1a formula and found a real compliance gap, relayed faithfully by the
+                          # manager and independently verified against the actual code before acting: §1a
+                          # requires a fixed N=3-4 GW horizon and a full-pool unconstrained ceiling; the
+                          # header's single visible "Team Rating %" (Patch 20/24, fh_auto_rating) is correct
+                          # on the ceiling but wrong on horizon -- it's single-GW only. (The advisory chat's
+                          # OTHER finding, that the proxy projection method overreacts to one big recent
+                          # haul, was checked and found NOT to describe this app's own engine -- our
+                          # blend_rate() decays PER-90 underlying rates, not raw recent points, a materially
+                          # different mechanism; no code change made for that finding, flagged only as
+                          # something to watch once real 2026-27 in-season data starts flowing in.) Fixed the
+                          # real gap by: relabeling the existing single-GW metric from "Team Rating %" to
+                          # "Quick Team Rating" (badge + "Quick Team Rating -- single-GW, EST -- full
+                          # breakdown" expander), with its tooltip now explicitly disclosing it is NOT the
+                          # doc's §1a metric and naming the new one by exact label; and adding a genuinely
+                          # compliant "Team Rating % (GW{start}-{end}, full pool)" badge computed over a
+                          # fixed 4-GW window (compliant_gw_list, independent of the sidebar horizon slider)
+                          # via opt.rating_horizon_value() against the ALREADY-computed theoretical_ceiling
+                          # (data_pipeline.solve_ceiling() still called exactly once -- zero new MILP cost),
+                          # with its own tooltip cross-referencing "Quick Team Rating" the same way round.
+                          # While implementing this, proactively caught and fixed a second, related risk
+                          # before it could recreate the exact confusion Patch 49 was built to stop: the
+                          # Pitch Navigator's own pre-existing "Team Rating % (GW{n})" metric (single-GW,
+                          # unconstrained-optimal -- the very number behind Patch 49's "where the points we
+                          # discussed!!!!" report) would have now shared a near-identical name with the new
+                          # compliant badge -- renamed it to "Quick Team Rating (GW{n})" with the same
+                          # cross-referencing tooltip, no change to its underlying math. (2) manager also
+                          # reported (with a screenshot showing four separate Chip Rack pills each cut off
+                          # mid-sentence with "...") that _flag_pill()'s 70-character hard truncation --
+                          # already fixed for the Wildcard cross-check pill specifically in Patch 48 -- was
+                          # never generalized to the other three pill types (Wildcard-not-active, shape-test,
+                          # disruption check, price-drop-flow). Rather than hand-craft a short verdict-first
+                          # headline for each (only practical when a caller already knows its own conclusion
+                          # is a short final clause, as Patch 48's case was), removed the truncation entirely
+                          # -- every pill now always shows its full text, wrapping onto multiple lines via
+                          # updated .flag-pill CSS (white-space:normal, max-width:420px) instead of being cut
+                          # off. Nothing is hidden on any pill any more. Verified: full existing regression
+                          # suite (test_patch28 through test_patch50_vectorized_correctness) plus a new
+                          # test_patch51_compliant_rating.py (confirms the 4-GW compliant rating differs from
+                          # the single-GW one on real data, and that solve_ceiling() is still called exactly
+                          # once in app.py, not duplicated) -- all pass. A syntax check and a live Streamlit
+                          # server smoke-start (clean, no tracebacks) were also run before packaging.
+                          # NOTE (2026-09-16): rb_model_app_patch51.zip is CUMULATIVE: Patch 29 through
+                          # 51 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

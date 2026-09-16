@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 50"
+PATCH_VERSION = "Patch 51"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -174,8 +174,9 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .badge.used{ background:var(--surface-2); color:var(--ink-faint); }
 
 .flag-row{ display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 16px; }
-.flag-pill{ display:flex; align-items:center; gap:6px; background:var(--coral-tint); border:1px solid var(--coral);
-  color:#7A2E18; font-family:"IBM Plex Mono"; font-size:11px; padding:4px 10px; border-radius:20px; cursor:help; }
+.flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--coral-tint); border:1px solid var(--coral);
+  color:#7A2E18; font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px; cursor:help;
+  white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
 
 /* Team Rating % radial gauge (Patch 31) — conic-gradient ring, no SVG/JS
    library needed. Percentage is still the same number the tooltip/expander
@@ -322,10 +323,25 @@ def _flag_pill(text: str, tooltip: str = "") -> str:
     """Patch 31 — a single compact pill for Chip Rack notes (Wildcard flag,
     shape-test, disruption, price-drop-flow) that used to render as a full
     <p class="side-note"> paragraph each. Full detail stays available on
-    hover rather than being deleted."""
+    hover rather than being deleted.
+
+    Patch 51 (2026-09-16, manager report + screenshot) — this used to
+    hard-truncate anything past 70 characters with a bare "…", which cut
+    FOUR different pill types off mid-sentence, mid-clause, right before
+    their actual conclusion (the exact same class of bug Patch 48 already
+    fixed for the Wildcard cross-check pill specifically, just never
+    generalized to the other three: shape-test, disruption check, price-
+    drop-flow). Rather than hand-craft a short verdict-first headline for
+    each of those three (Patch 48's approach, only practical when a caller
+    already knows its own conclusion is a short final clause), this now
+    shows the FULL text on every pill, always — no truncation, nothing
+    hidden — and lets the pill wrap onto multiple lines via the `.flag-pill`
+    CSS's `white-space: normal` + `max-width` (below) instead of clipping.
+    The hover tooltip still repeats the same full text for parity with
+    Patch 48/49's pills, which pass a separate, even-more-detailed tooltip
+    string."""
     icon = "⚠️" if any(k in text for k in ("CAUTION", "flagged", "Disruption")) else "●"
-    short = text if len(text) <= 70 else text[:67] + "…"
-    return f'<span class="flag-pill" title="{tooltip or text}">{icon} {short}</span>'
+    return f'<span class="flag-pill" title="{tooltip or text}">{icon} {text}</span>'
 
 
 def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool = False,
@@ -650,8 +666,25 @@ with st.spinner("Fetching live data and computing xPts..."):
     # availability — one extra GW's worth of xPts columns, not a second
     # compute_all() call or a new MILP solve.
     _tie_break_lookahead_gw = gw_list[-1] + 1
+
+    # Patch 51 (2026-09-16, §1a compliance fix) — the doc's Team Rating %
+    # clause requires a FIXED 3-4 GW horizon (Standing Rule cite: §1a
+    # requirement (a)), never the sidebar horizon slider (`gw_list`, which
+    # can be as short as 1 GW depending on hit_stance) and never dependent
+    # on whether a chip happens to be available (`detect_gw_list` is None
+    # whenever neither Wildcard nor Free Hit is currently available, which
+    # would otherwise silently starve `proj` of the columns this metric
+    # needs). `compliant_gw_list` is that fixed window, built the same way
+    # detect_gw_list already is (same config key, so the two windows agree
+    # whenever detect_gw_list also happens to be populated) — and is always
+    # folded into the shared projection union below so `proj` unconditionally
+    # carries these GW columns regardless of chip availability or the
+    # horizon slider's position.
+    _compliant_window = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
+    compliant_gw_list = list(range(planning_gw, planning_gw + _compliant_window))
+
     _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
-                        | {_tie_break_lookahead_gw})
+                        | set(compliant_gw_list) | {_tie_break_lookahead_gw})
     proj = _project(snap, hist_df, overrides, cfg, _gw_union)
     picks = _picks(entry_id, squad_gw)
 
@@ -762,6 +795,30 @@ with st.spinner("Fetching live data and computing xPts..."):
     rating_gap = round(reachable_total - squad_total, 2)
     at_ceiling = reachable_total > 0 and rating_gap < moe
 
+    # Patch 51 (2026-09-16, §1a compliance fix) — the genuinely §1a-compliant
+    # "Team Rating %": Squad_xPts / Ceiling_xPts over a FIXED 3-4 GW horizon
+    # (`compliant_gw_list`, computed above and independent of the sidebar
+    # horizon slider), with the Ceiling side a full-player-pool, unconstrained,
+    # complete 15-man £100m squad solve (§1a requirement (b)) — REUSING
+    # `theoretical_ceiling` (already solved once, above, for the "theoretical"
+    # reference) rather than triggering a second MILP call. Both sides go
+    # through the same captaincy-aware opt.rating_horizon_value() the other
+    # Team Rating variants use (Rule #22 Systematic Application), just summed
+    # over `compliant_gw_list` instead of whatever `gw_list` happens to be.
+    # This is DELIBERATELY separate from the header's "Quick Team Rating"
+    # badge below (the old single-GW `fh_auto_rating`, kept unchanged on the
+    # manager's explicit call re: ceiling choice — Patch 24) — see Standing
+    # Rules #16/#18 disclosure and the Patch 49 precedent on never showing two
+    # differently-scoped percentages without a cross-reference between them.
+    compliant_squad_total = opt.rating_horizon_value(squad_df, compliant_gw_list, cfg) if not squad_df.empty else 0.0
+    compliant_ceiling_total = opt.rating_horizon_value(theoretical_ceiling["squad"], compliant_gw_list, cfg) \
+        if theoretical_ceiling else 0.0
+    compliant_moe = eng.margin_of_error_threshold(compliant_ceiling_total, cfg)
+    compliant_gap = round(compliant_ceiling_total - compliant_squad_total, 2)
+    compliant_at_ceiling = compliant_ceiling_total > 0 and compliant_gap < compliant_moe
+    compliant_rating = eng.team_rating_pct(compliant_squad_total, compliant_ceiling_total, "")
+    compliant_gw_start, compliant_gw_end = compliant_gw_list[0], compliant_gw_list[-1]
+
     # Researched-tier coverage — live count of how much of manual_overrides.csv's
     # qualitative layer (xm_override / cs_pct_override / bps_profile /
     # tenure_discount — anything that promotes a player past the free
@@ -818,10 +875,27 @@ with st.spinner("Fetching live data and computing xPts..."):
     # old reachable-ceiling calc (`rating`/squad_total/reachable_total/moe)
     # is kept as-is for the Wildcard-flag trigger only (chip_protocol.wildcard_flag
     # below) — untouched, not displayed anywhere any more.
-    fh_auto_tooltip = (f"Team Rating % = your current squad's best XI this GW (captain doubled, bench "
-                       f"autosub-discounted), divided by a genuinely unconstrained optimal squad for GW"
-                       f"{planning_gw} only (full player pool, no free-transfer limit — a true from-scratch "
+    # Patch 51 (2026-09-16, §1a compliance fix) — relabeled from "Team Rating
+    # %" to "Quick Team Rating — single-GW, EST" (manager-approved wording).
+    # The MATH here is unchanged from Patch 24 (same numbers, same ceiling
+    # choice) — this is a label/disclosure-only change. It's relabeled
+    # because it violates §1a requirement (a) (a fixed 3-4 GW horizon):
+    # this metric is scored against GW{planning_gw} ALONE, never a multi-GW
+    # window, so per the model doc it "is not a Team Rating % under this
+    # clause — it's a bounded estimate and must be labeled as such." The
+    # doc-compliant multi-GW metric now lives in its own separate badge,
+    # "Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}, full pool)"
+    # — see compliant_rating below — and this tooltip cross-references it so
+    # the two differently-scoped percentages are never confused for one
+    # another (Patch 49 precedent: "where the points we discussed!!!!").
+    fh_auto_label = "Quick Team Rating"
+    fh_auto_tooltip = (f"Quick Team Rating (single-GW, EST) = your current squad's best XI this GW (captain "
+                       f"doubled, bench autosub-discounted), divided by a genuinely unconstrained optimal squad "
+                       f"for GW{planning_gw} only (full player pool, no free-transfer limit — a true from-scratch "
                        f"rebuild). Gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: {fh_auto_moe:.1f} xPts). "
+                       f"NOTE: this is a single-GW read, NOT the model doc's §1a Team Rating % (which requires a "
+                       f"fixed 3-4 GW horizon) — see 'Team Rating % (GW{compliant_gw_start}-{compliant_gw_end})' "
+                       f"below (full-pool, {len(compliant_gw_list)}-GW) for that doc-compliant metric. "
                        f"Explore a different candidate gameweek in 'Evaluate your own scenario' below.")
 
     # captaincy — starting XI only, never the bench. "code" is carried through
@@ -1196,11 +1270,42 @@ with col2:
                        f'<span class="gauge-val">{_rp:.0f}%</span></div></div>')
     else:
         _gauge_html = '<span class="info-dot" title="Not enough data this run">—</span>'
+
+    # Patch 51 (2026-09-16, §1a compliance fix) — second, visually distinct
+    # badge for the doc-compliant multi-GW "Team Rating %" (compliant_rating,
+    # computed above), placed right next to "Quick Team Rating" so neither
+    # one can be mistaken for a stray, unlabeled second number. Its tooltip
+    # cross-references the quick badge by name (Patch 49 disclosure pattern).
+    _compliant_tooltip = (
+        f"Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}, full pool) — the model doc's §1a-compliant "
+        f"metric: Squad_xPts / Ceiling_xPts over a FIXED {len(compliant_gw_list)}-GW horizon (GW{compliant_gw_start}"
+        f"-GW{compliant_gw_end}, independent of the sidebar horizon slider), where Ceiling_xPts is a full-player-"
+        f"pool, unconstrained, complete 15-man £100m squad solve (§1a requirements (a) and (b) both satisfied). "
+        f"Both sides use the same captain-doubled, bench-autosub-discounted best-XI-per-GW calculation as the "
+        f"'Quick Team Rating' badge above. Squad: {compliant_squad_total:.1f} xPts · Ceiling: "
+        f"{compliant_ceiling_total:.1f} xPts · gap: {compliant_gap:.1f} xPts (margin-of-error threshold: "
+        f"{compliant_moe:.1f} xPts). NOTE: this is a DIFFERENT, wider-horizon metric than 'Quick Team Rating' "
+        f"(single-GW, GW{planning_gw} only) above — the two are not meant to match; see 'Team Rating % "
+        f"(GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown' below for the full disclosure."
+    )
+    _crp = compliant_rating['rating_pct']
+    if _crp is not None:
+        _ccol = "var(--accent-strong)" if _crp >= 79 else ("var(--gold)" if _crp >= 65 else "var(--coral)")
+        _compliant_gauge_html = (f'<div class="gauge-wrap"><div class="gauge-ring" title="{_compliant_tooltip}" '
+                       f'style="background:conic-gradient({_ccol} {_crp*3.6:.0f}deg, var(--rule) 0deg);">'
+                       f'<span class="gauge-val">{_crp:.0f}%</span></div></div>')
+    else:
+        _compliant_gauge_html = f'<span class="info-dot" title="{_compliant_tooltip}">—</span>'
+
     st.markdown(f"""<div class="stat-row">
       <div class="stat"><div class="n">{rank_disp} {trend}{prov_badge}</div><div class="l">Overall rank</div></div>
       <div class="stat rating">
         <div class="n">{_gauge_html}</div>
-        <div class="l">Team rating</div>
+        <div class="l">Quick Team Rating <span class="info-dot" title="{fh_auto_tooltip}">ⓘ</span></div>
+      </div>
+      <div class="stat rating">
+        <div class="n">{_compliant_gauge_html}</div>
+        <div class="l">Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}) <span class="info-dot" title="{_compliant_tooltip}">ⓘ</span></div>
       </div>
       <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
       <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
@@ -1252,18 +1357,54 @@ if fh_auto_rating["rating_pct"] is not None:
     if fh_at_ceiling:
         st.caption(f"✓ Already at this GW's optimal — the {fh_auto_gap:.1f} xPts gap is inside normal weekly "
                    f"noise (threshold {fh_auto_moe:.1f} xPts), not real room left on the table.")
-    with st.expander("Team Rating % — full breakdown"):
+    with st.expander("Quick Team Rating — single-GW, EST — full breakdown"):
         st.markdown(tier_label)
         st.caption(f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
                    f"{fh_auto_current_val:.1f} · GW{planning_gw} optimal (a genuinely unconstrained best-possible "
                    f"squad from the full player pool, £{team_value}m proxy budget, no free-transfer limit): "
                    f"{fh_auto_optimal_val:.1f} · gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: "
                    f"{fh_auto_moe:.1f} xPts)")
-        st.caption("Patch 24 methodology (2026-09-08): Team Rating % = current squad GW xPts / GW-optimal xPts, "
+        st.caption("Patch 24 methodology (2026-09-08): Quick Team Rating = current squad GW xPts / GW-optimal xPts, "
                    "both sides using the same best-legal-Starting-XI-plus-captain-bonus-plus-Rule-#12-bench-value "
                    "calculation (Rule #22 Systematic Application) — replacing the prior reachable-ceiling version, "
                    "which the manager flagged as tautologically high whenever few free transfers are banked. This "
-                   "is the same figure previously shown as 'Free Hit rating'; it is now the sole Team Rating stat.")
+                   "is the same figure previously shown as 'Free Hit rating'. "
+                   "Patch 51 (2026-09-16): relabeled from 'Team Rating %' to 'Quick Team Rating — single-GW, EST' "
+                   "because it is scored against GW{planning_gw} ALONE — it does not satisfy the model doc's §1a "
+                   "requirement (a) of a fixed 3-4 GW horizon, so per the doc it 'is not a Team Rating % under this "
+                   "clause — it's a bounded estimate and must be labeled as such.' The MATH is unchanged from Patch "
+                   "24 — same numbers, label/disclosure only. See 'Team Rating % (GW{compliant_gw_start}-"
+                   "{compliant_gw_end}) — full breakdown' below for the doc-compliant metric."
+                   .format(planning_gw=planning_gw, compliant_gw_start=compliant_gw_start,
+                           compliant_gw_end=compliant_gw_end))
+
+    # Patch 51 (2026-09-16, §1a compliance fix) — the new, genuinely
+    # §1a-compliant "Team Rating %" expander: fixed multi-GW horizon,
+    # full-pool unconstrained ceiling (reusing `theoretical_ceiling`, no new
+    # MILP solve), captaincy-aware, same margin-of-error banding as every
+    # other Team Rating variant. Kept in its own expander (not merged into
+    # the one above) so the two differently-scoped percentages are always
+    # visually and textually separate — Patch 49 precedent.
+    if compliant_rating["rating_pct"] is not None:
+        if compliant_at_ceiling:
+            st.caption(f"✓ Already at the GW{compliant_gw_start}-{compliant_gw_end} full-pool optimal — the "
+                       f"{compliant_gap:.1f} xPts gap is inside normal weekly noise (threshold "
+                       f"{compliant_moe:.1f} xPts), not real room left on the table.")
+        with st.expander(f"Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown"):
+            st.markdown(tier_label)
+            st.caption(f"GW{compliant_gw_start}-GW{compliant_gw_end} Squad_xPts (your current 15, best-XI-per-GW, "
+                       f"captain doubled, bench autosub-discounted, summed across all {len(compliant_gw_list)} "
+                       f"GWs): {compliant_squad_total:.1f} · GW{compliant_gw_start}-GW{compliant_gw_end} "
+                       f"Ceiling_xPts (a genuinely unconstrained, full-player-pool, complete 15-man £100m squad "
+                       f"solve — same theoretical_ceiling squad used elsewhere in this app, re-summed over this "
+                       f"fixed window, no second solve): {compliant_ceiling_total:.1f} · gap: "
+                       f"{compliant_gap:.1f} xPts (margin-of-error threshold: {compliant_moe:.1f} xPts)")
+            st.caption(f"Patch 51 methodology (2026-09-16): Team Rating % = Squad_xPts(horizon "
+                       f"{len(compliant_gw_list)}) / Ceiling_xPts(horizon {len(compliant_gw_list)}) × 100, per the "
+                       f"model doc's §1a clause — a FIXED 3-4 GW horizon (never the sidebar horizon slider) against "
+                       f"a full-player-pool, unconstrained, complete 15-man £100m squad ceiling (never a bounded/"
+                       f"shortlist estimate). This is the metric that actually satisfies §1a; 'Quick Team Rating' "
+                       f"above is a faster single-GW read for day-to-day use and is labeled as such.")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
 
@@ -1664,12 +1805,28 @@ def _render_pitch_navigator():
         if nav_optimal_result else 0.0
     nav_rating = eng.team_rating_pct(nav_current_val, nav_optimal_val, "")
 
+    # Patch 51 (2026-09-16) -- relabeled from "Team Rating % (GW{n})" to avoid
+    # colliding, in name only, with the new §1a-compliant "Team Rating %
+    # (GW{start}-{end})" badge added this patch (a fixed multi-GW, full-pool
+    # metric -- a completely different calculation from this navigator tile,
+    # which is single-GW and scoped to whatever squad/GW you're browsing
+    # here). This tile is the SAME calculation the manager already saw
+    # produce a real, confusing near-miss against a different metric in
+    # Patch 49 ("where the points we discussed!!!!") -- renaming it here is
+    # a proactive extension of that same fix, not a new bug report. No
+    # change to its underlying math (still current-squad-best-XI over a
+    # genuinely unconstrained single-GW optimal squad) -- label/disclosure
+    # only, per Standing Rules #16/#18.
     nt1, nt2 = st.columns(2)
     with nt1:
         st.metric(f"GW{nav_gw} xPts (best XI)", f"{nav_gw_xpts:.1f}")
     with nt2:
-        st.metric(f"Team Rating % (GW{nav_gw})",
-                  f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—")
+        st.metric(f"Quick Team Rating (GW{nav_gw})",
+                  f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—",
+                  help=f"Single-GW, EST -- your best XI for GW{nav_gw} (captain doubled, bench autosub-"
+                       f"discounted) over a fully unconstrained optimal squad for that GW alone. NOT the "
+                       f"doc's §1a Team Rating % (that one needs a fixed 3-4 GW horizon) -- see the header's "
+                       f"'Team Rating % (GW{compliant_gw_start}-{compliant_gw_end})' badge for that metric.")
     if not at_planning_gw:
         st.caption("Projected for this GW only — Overall rank and Season points elsewhere on this page are "
                    "your live actuals and don't change with navigation.")
