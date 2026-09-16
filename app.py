@@ -29,7 +29,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 48"
+PATCH_VERSION = "Patch 49"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -162,6 +162,9 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   letter-spacing:.04em; color:var(--ink-muted); }
 .signal-card .stat{ font-family:"Fraunces"; font-weight:800; font-size:1.4rem; color:var(--accent-strong); line-height:1; }
 .signal-card .sub{ font-size:10.5px; color:var(--ink-faint); margin-top:4px; }
+.signal-card .note{ font-size:11px; font-weight:700; margin-top:8px; padding-top:8px; border-top:1px dashed var(--rule); }
+.signal-card .note.good{ color:var(--accent-strong); }
+.signal-card .note.warn{ color:var(--coral); }
 .badge{ font-family:"IBM Plex Mono"; font-size:9px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
   padding:2px 7px; border-radius:20px; display:inline-block; white-space:nowrap; }
 .badge.play{ background:var(--accent-tint); color:var(--accent-strong); }
@@ -274,7 +277,7 @@ def _photo_url(code) -> str:
 
 def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str,
                   tooltip: str, card_cls: str = "", by_gw: dict | None = None,
-                  best_gw: int | None = None) -> str:
+                  best_gw: int | None = None, note: str | None = None, note_cls: str = "") -> str:
     """Patch 31 — one compact scannable "Chip Signals" card, replacing a
     paragraph of Chip Advisor/Chip Strategy prose. Rule/step citations and
     the full quantified reasoning move into the card's `title` tooltip
@@ -287,11 +290,21 @@ def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str
     the actual per-GW numbers). When `by_gw` ({gw: value}, 2+ entries) is
     given, the card becomes a <details>/<summary> — click to reveal a small
     CSS bar-chart of every scanned GW, the winning one highlighted, so "why
-    this GW" is answered by the numbers themselves, not just a sentence."""
+    this GW" is answered by the numbers themselves, not just a sentence.
+
+    Patch 49 (manager report: a "your recommended transfers may already
+    close this" finding existed but only lived in a small secondary pill —
+    same size/weight as everything else in that row — not on the Wildcard
+    card itself, where the trigger status it directly qualifies is shown at
+    full prominence). `note`, when given, adds one more short line directly
+    on the card, below the existing badge/stat/sub — same card, same
+    tooltip, same badge text, nothing else changed, just one additional
+    always-visible line at equal visual weight to the rest of the card."""
     body = (f'<div class="top"><span class="name">{name}</span>'
             f'<span class="badge {badge_cls}">{badge_text}</span></div>'
             f'<div class="stat">{stat}</div>'
-            f'<div class="sub">{sub}</div>')
+            f'<div class="sub">{sub}</div>'
+            + (f'<div class="note {note_cls}">{note}</div>' if note else ""))
     if by_gw and len(by_gw) >= 2:
         max_v = max(max(by_gw.values()), 0.01)
         bars = "".join(
@@ -1110,7 +1123,26 @@ if wc_flag and reachable_detect is not None and not squad_df.empty:
                    f"this gap on their own, without needing the Wildcard — worth checking before committing it."
                    if _closes else
                    f"still below the {_wc_ceiling:.0f}% trigger ceiling even after the plan, so this looks like "
-                   f"a structural gap ordinary transfers alone won't close, not just a few weeks away."))
+                   f"a structural gap ordinary transfers alone won't close, not just a few weeks away.")
+                # Patch 49 (2026-09-15, manager report: "where the points we
+                # discussed" after seeing 100.0% here but 89.5% in the pitch
+                # navigator's own Team Rating % for the same GW/after-plan
+                # squad) — both numbers are correct, but silently used
+                # different denominators with no disclosure, which is exactly
+                # what Standing Rule #16 (Team Rating % Disclosure Rule)
+                # exists to prevent. This one is scored against the SAME
+                # reachable-ceiling squad the Wildcard trigger itself checks
+                # (best squad reachable using only your currently-banked free
+                # transfers) — the navigator's own Team Rating % is scored
+                # against a fully unconstrained "best XI money could buy"
+                # ceiling instead (Patch 20/24), a much harder bar. A high
+                # number here plus a lower one there isn't a contradiction —
+                # it means your plan is basically already optimal GIVEN the
+                # transfers you actually have, even though a truly
+                # unconstrained rebuild could still in theory do better.
+                + f" (Scored against the Wildcard trigger's own reachable-transfer ceiling — a different, "
+                  f"easier-to-reach bar than the pitch navigator's Team Rating %, which compares against a "
+                  f"fully unconstrained optimal squad instead; the two aren't meant to match.)")
             # Patch 48 (2026-09-15, manager report: the pill only ever showed
             # "Cross-check against your own recommended transfer plan (Hit if
             # wort…" — _flag_pill truncates any text past 70 chars, and the
@@ -1122,9 +1154,12 @@ if wc_flag and reachable_detect is not None and not squad_df.empty:
             # so it's never truncated) — the full reasoning above is unchanged
             # and still carried as this pill's hover tooltip and inside "Full
             # chip analysis" / the card tooltip.
+            # Patch 49 — "of reachable ceiling" added to the headline itself
+            # (not just the tooltip) so it never reads as the same stat as
+            # the pitch navigator's own Team Rating % at a glance.
             _wc_check_headline = (
-                f"Wildcard may not be needed — transfer plan alone projects {_avg_after}%" if _closes else
-                f"CAUTION: Wildcard still needed — plan alone reaches only {_avg_after}%")
+                f"Wildcard may not be needed — plan reaches {_avg_after}% of reachable ceiling" if _closes else
+                f"CAUTION: Wildcard likely needed — only {_avg_after}% of reachable ceiling")
 
 # ---------------------------------------------------------------------------
 # Header + verdict
@@ -1310,8 +1345,20 @@ if wc_flag and _wc_check_note:
     wc_card_tooltip += " " + _wc_check_note
 if wc_flag:
     wc_stat = f'{wc_trigger["avg_rating_pct"]}%' if wc_trigger and wc_trigger.get("avg_rating_pct") is not None else "ACTIVE"
+    # Patch 49 — the "may not be needed if you take the recommended
+    # transfers" finding now lives directly on this card, same prominence
+    # as "TRIGGER ACTIVE" itself, not just in the smaller Chip Rack pill
+    # row above (that pill stays exactly as Patch 48 left it — this is in
+    # addition, not instead).
+    _wc_note_html, _wc_note_cls = None, ""
+    if _wc_check_note:
+        _wc_note_html = ("✓ Your recommended transfers may already close this — the chip may not be needed"
+                          if _closes else
+                          "Recommended transfers alone don't close this — Wildcard still looks warranted")
+        _wc_note_cls = "good" if _closes else "warn"
     wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
-                            "structural gap detected — date is your call", wc_card_tooltip, "is-active")
+                            "structural gap detected — date is your call", wc_card_tooltip, "is-active",
+                            note=_wc_note_html, note_cls=_wc_note_cls)
 elif much_more:
     wc_card = _signal_card("Wildcard", "HOLD", "hold", f'{wc_trigger["avg_rating_pct"]}%',
                             "inside noise band — no trigger", wc_card_tooltip)

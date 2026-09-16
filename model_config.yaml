@@ -646,6 +646,33 @@ meta:
                           # covered by test_patch46_wc_crosscheck.py, which passes unchanged) -- display-only.
                           # NOTE (2026-09-15): rb_model_app_patch48.zip is CUMULATIVE: Patch 29 through
                           # 48 together, on top of the manager's Patch 28 baseline.
+                          # Patch 49 (2026-09-15, manager report, two rounds): (1) "where the points we
+                          # discussed" after seeing 100.0% in the Wildcard cross-check pill vs 89.5% in the
+                          # pitch navigator's own Team Rating % for what looked like the same squad/GW --
+                          # both numbers were correct but silently used different denominators (the
+                          # cross-check scores against the SAME reachable-transfer ceiling the Wildcard
+                          # trigger itself uses; the navigator scores against a fully unconstrained "best XI
+                          # money could buy" ceiling, Patch 20/24) with no disclosure that they don't measure
+                          # the same thing -- exactly what Standing Rule #16 exists to prevent. Fixed by
+                          # naming "reachable ceiling" explicitly in both the pill headline itself and the
+                          # full tooltip, so the two percentages are never mistaken for the same stat. (2)
+                          # manager clarified the deeper point after that: the "transfers may already close
+                          # this" finding needs to live at the SAME visual prominence as "TRIGGER ACTIVE"
+                          # itself, not just in a small secondary pill among several others in the Chip Rack
+                          # row -- explicitly confirmed to keep the Wildcard card, its badge, and every
+                          # existing pill exactly as they were, just ADD a user-friendly line. Implemented via
+                          # a new optional `note`/`note_cls` param on _signal_card() (used only by the
+                          # Wildcard card; every other card's call site is untouched, so Bench Boost/Triple
+                          # Captain/Free Hit render identically) that appends one short, always-visible line
+                          # directly on the card itself, below the existing badge/stat/sub -- "Your recommended
+                          # transfers may already close this -- the chip may not be needed" (green) when the
+                          # plan closes the gap, or "Recommended transfers alone don't close this -- Wildcard
+                          # still looks warranted" (coral) when it doesn't. The Chip Rack pill from Patch 48
+                          # stays exactly as it was, in addition to this, not replaced by it. No change to the
+                          # underlying cross-check math (still covered by test_patch46_wc_crosscheck.py,
+                          # unchanged/still passing) -- display-only both times.
+                          # NOTE (2026-09-15): rb_model_app_patch49.zip is CUMULATIVE: Patch 29 through
+                          # 49 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
