@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -86,6 +87,141 @@ def blend_rate(historical: float, current: float, gw: int, cfg: dict, metric: st
         return historical if not pd.isna(historical) else 0.0
     historical = 0.0 if pd.isna(historical) else historical
     return h_w * historical + c_w * current
+
+
+def _pyround(series: pd.Series, ndigits: int) -> pd.Series:
+    """Element-wise twin of Python's builtin round() -- NOT the same thing
+    as numpy/pandas' own .round(), which disagrees with it on some exact
+    halfway float ties (e.g. round(1.0675, 3) is 1.067 via Python's round()
+    but 1.068 via numpy's .round(), because numpy's algorithm is a plain
+    multiply-round-divide while Python's operates on the value's true
+    correctly-rounded decimal expansion). Every place the scalar engine
+    calls round(...) must be matched with THIS, not .round(), or the
+    vectorized rewrite silently disagrees with the scalar original on
+    borderline values. NaN passes through unchanged (Python's round() on a
+    float NaN also just returns NaN, so this only differs for non-float NaN
+    sentinels like None/pd.NA)."""
+    return series.apply(lambda v: v if pd.isna(v) else round(float(v), ndigits))
+
+
+# ---------------------------------------------------------------------------
+# Patch 50 -- VECTORIZED counterparts of the scalar functions above, used by
+# data_pipeline.compute_all()'s vectorized rewrite. These are pure additions
+# -- the scalar functions above are untouched and may still be called
+# elsewhere -- and each one is designed to reproduce its scalar twin's output
+# EXACTLY (including its NaN-propagation quirks), just operating on a whole
+# Series/DataFrame at once instead of row-by-row. See
+# test_patch50_vectorized_correctness.py for the byte-for-byte proof.
+# ---------------------------------------------------------------------------
+def blend_rate_vec(historical: pd.Series, current: pd.Series, gw: int, cfg: dict,
+                    metric: str, current_sample_matches: pd.Series) -> pd.Series:
+    """Vectorized twin of blend_rate() for a SINGLE gw applied across every
+    row of a table at once (decay_weights(gw, cfg, metric) is a scalar
+    lookup -- the schedule is a step function of gw only -- so it's computed
+    once here rather than once per row)."""
+    h_w, c_w = decay_weights(gw, cfg, metric)
+    historical = pd.to_numeric(historical, errors="coerce")
+    current = pd.to_numeric(current, errors="coerce")
+    hist_filled = historical.fillna(0.0)
+    blended = h_w * hist_filled + c_w * current
+    cond_no_sample = (current_sample_matches == 0) | current.isna()
+    return hist_filled.where(cond_no_sample, blended)
+
+
+def defcon_probability_vec(dc90: pd.Series, position: pd.Series, cfg: dict) -> pd.Series:
+    """Vectorized twin of defcon_probability(). Uses np.interp for the same
+    piecewise-linear calibration curve, which flat-extrapolates outside the
+    table's domain exactly like the scalar function's manual clamp does."""
+    dc90 = pd.to_numeric(dc90, errors="coerce")
+    result = pd.Series(0.0, index=dc90.index)
+    valid = dc90.notna() & (position != "FWD")
+    if not valid.any():
+        return result
+    for mask, key in ((valid & position.isin(["GK", "DEF"]), "DEF"),
+                       (valid & (position == "MID"), "MID_FWD")):
+        if not mask.any():
+            continue
+        table = cfg["defcon_calibration"][key]
+        xs = [row["dc90"] for row in table]
+        ys = [row["p"] for row in table]
+        result.loc[mask] = np.interp(dc90.loc[mask].astype(float).values, xs, ys)
+    return result
+
+
+def cs_pct_poisson_vec(att: pd.Series, deff_opp: pd.Series) -> pd.Series:
+    """Vectorized twin of cs_pct_poisson(), with `att`/`deff_opp` already
+    selected for home/away (i.e. the caller picks strength_attack_home vs
+    _away, and strength_defence_away vs _home, per row -- same selection the
+    scalar function makes internally based on `is_home`)."""
+    att = pd.to_numeric(att, errors="coerce")
+    deff_opp = pd.to_numeric(deff_opp, errors="coerce")
+    invalid = att.isna() | deff_opp.isna() | (att == 0) | (deff_opp == 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        opp_expected_goals = 1.35 * (deff_opp / 1100.0) * (1100.0 / att) * 0.5 \
+            + 1.35 * (att / deff_opp) * 0.5
+    opp_expected_goals = opp_expected_goals.clip(lower=0.15, upper=3.5)
+    cs = _pyround(pd.Series(np.exp(-opp_expected_goals), index=att.index), 4)
+    return cs.where(~invalid, 0.30)
+
+
+def _bps_mult_lookup(profile, table: dict) -> float:
+    key = profile if pd.notna(profile) else "default"
+    return table.get(key, 1.0)
+
+
+def estimate_xm_vec(df: pd.DataFrame, cfg: dict) -> pd.Series:
+    """Vectorized twin of estimate_xm(). `df` must carry (or be missing, in
+    which case the same defaults the scalar `.get()` calls use apply):
+    status, starts, minutes, starts_per_90, recent_start,
+    chance_of_playing_next_round, tenure_discount, xm_override."""
+    heur = cfg["xm_heuristic"]
+    idx = df.index
+    max_xm = heur["max_xm"]
+
+    def col(name, default=np.nan):
+        if name in df.columns:
+            return df[name]
+        return pd.Series(default, index=idx)
+
+    override = pd.to_numeric(col("xm_override"), errors="coerce")
+    status = col("status", "a").astype(str)
+    unavailable = status.isin(heur["unavailable_statuses"])
+
+    starts = pd.to_numeric(col("starts"), errors="coerce")
+    minutes = pd.to_numeric(col("minutes"), errors="coerce")
+    starts_per_90 = pd.to_numeric(col("starts_per_90"), errors="coerce")
+    recent_start = col("recent_start", None)
+    # None/True -> "not False" -> True; False -> False. Comparing an object
+    # column with mixed None/True/False against `False` gives exactly this.
+    recent_start_not_false = ~(recent_start == False)  # noqa: E712
+
+    cond1 = (starts >= 1) & recent_start_not_false
+    cond2 = starts_per_90.notna() & (starts_per_90 > 0)
+    cond3 = minutes > 0
+
+    val1 = heur["confirmed_current_season_start_floor"]
+    val2 = starts_per_90.clip(upper=max_xm)
+    val3 = (minutes / (38 * 90)).clip(upper=max_xm)
+
+    base = pd.Series(
+        np.select([cond1.values, cond2.values, cond3.values],
+                  [np.full(len(idx), val1), val2.values, val3.values],
+                  default=0.15),
+        index=idx, dtype=float,
+    )
+
+    if heur.get("doubtful_status_multiplier_applies", True):
+        cop = pd.to_numeric(col("chance_of_playing_next_round"), errors="coerce")
+        base = base.where(cop.isna(), base * (cop / 100.0))
+
+    tenure = pd.to_numeric(col("tenure_discount"), errors="coerce")
+    td = tenure.clip(lower=0.40, upper=1.00)
+    base = base.where(tenure.isna(), base * td)
+
+    result = base.clip(upper=max_xm)
+    result = result.where(~unavailable, 0.0)
+    result = result.where(override.isna(), override.astype(float))
+    return result
 
 
 # ---------------------------------------------------------------------------

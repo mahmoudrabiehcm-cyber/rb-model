@@ -673,6 +673,57 @@ meta:
                           # unchanged/still passing) -- display-only both times.
                           # NOTE (2026-09-15): rb_model_app_patch49.zip is CUMULATIVE: Patch 29 through
                           # 49 together, on top of the manager's Patch 28 baseline.
+                          # Patch 50 (2026-09-16, manager report): "the performance is tool slow, i believe
+                          # we agreed that will be fixed!!" -- reported at horizon=1, "Hit if worth it," a
+                          # case Patches 42/45 do NOT cover (those fixed the chained weekly planner at
+                          # horizon>1 only; horizon=1 never dispatches to it). Root-caused via a full
+                          # grounded cold-cache benchmark of every solve/compute call that runs
+                          # unconditionally on a page load matching the manager's own screenshot (WC trigger
+                          # active, GW1): compute_all() 7.42s (49%), suggest_transfers() 2.08s (14%),
+                          # solve_free_hit_optimal_squad() header panel 2.09s (14%), evaluate_free_hit()
+                          # 1.25s (8%), wildcard_freehit_shape_test() 1.07s (7%),
+                          # evaluate_wildcard_whatif() 0.75s (5%), solve_reachable_ceiling()+solve_ceiling()
+                          # 0.48s (3%) -- TOTAL 15.14s. Presented the full breakdown to the manager and
+                          # confirmed scope before touching anything (per standing instruction): manager
+                          # chose to revisit vectorizing compute_all() (data_pipeline.py), the single
+                          # dominant cost (49%), a change explicitly declined earlier in this project in
+                          # favor of the narrower dedupe/merge fix that became Patch 43. Rewrote compute_all()
+                          # to explode every player x gw x fixture combination into one long table (a double
+                          # gameweek is naturally 2 rows, a blank gameweek 1 all-NaN row) and vectorized the
+                          # full per-fixture math -- CS% Poisson, per-metric decay blending (npxG/xA/dc90),
+                          # the set-piece npxG multiplier, DEFCON probability, xM estimation -- as new
+                          # vectorized twins in fpl_engine.py (estimate_xm_vec, blend_rate_vec,
+                          # cs_pct_poisson_vec, defcon_probability_vec, _pyround) and setpiece.py
+                          # (setpiece_multiplier_vec, apply_to_npxg_vec), added ADDITIVELY alongside the
+                          # existing scalar originals (other call sites keep using the scalar versions
+                          # unchanged), then grouped back by (player, gw) into the same wide
+                          # xpts_gw{n}/opp_gw{n}/fdr_gw{n}/xpts_horizon_sum columns. No change to
+                          # compute_all()'s public signature or any column name/semantics -- a pure drop-in
+                          # performance replacement. Two subtle correctness traps were caught and fixed
+                          # during verification, before shipping: (1) numpy's .round() disagrees with
+                          # Python's builtin round() on some exact halfway float ties (e.g. round(1.0675, 3)
+                          # is 1.067 in Python vs 1.068 in numpy) -- fixed via a _pyround() helper applying
+                          # true Python rounding element-wise everywhere a scalar round(...) call needed
+                          # reproducing; (2) groupby().sum() defaults to skipna=True, silently turning a
+                          # genuinely-missing (NaN) per-fixture xPts into 0.0, whereas the original loop's
+                          # plain += propagates that NaN through to the output column -- fixed with explicit
+                          # skipna=False. Verified via a new test_patch50_vectorized_correctness.py (diffs
+                          # against a stashed scalar reference implementation, scalar_reference.py, kept in
+                          # the app folder as a deliberate, clearly-marked, unused-by-app.py audit reference)
+                          # across a single-GW window, a 6-GW window, and a synthetic double-gameweek +
+                          # blank-gameweek scenario (the live 2026-27 fixture list has no real DGW/BGW yet) --
+                          # exact match on every column for all 616 players in every scenario. Also re-ran
+                          # test_patch43_merge_correctness.py (still passes unchanged -- the projection-union
+                          # merge's own premise still holds) and the full existing regression suite
+                          # (test_patch28 through test_patch46_wc_crosscheck, all pass). Benchmark:
+                          # compute_all() over 616 players/6 GWs went from 7.58s to 0.17-0.19s (~40x), and a
+                          # full cold-cache page load matching the manager's reported scenario went from
+                          # 15.14s to 7.80s measured end-to-end (a 48% cut) -- the remaining ~7.8s is the six
+                          # other one-shot MILP solves listed above (suggest_transfers, the header's Team
+                          # Rating panel, the Free Hit/Wildcard chip-advisor windows), none of which were in
+                          # scope for this patch and none of which were touched.
+                          # NOTE (2026-09-16): rb_model_app_patch50.zip is CUMULATIVE: Patch 29 through
+                          # 50 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

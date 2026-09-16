@@ -21,6 +21,7 @@ committed CSV of "role last changed GW", updated by hand each week), swap
 this for exact confirmation-week tracking — see README.
 """
 from __future__ import annotations
+import numpy as np
 import pandas as pd
 
 import fpl_engine as eng
@@ -65,3 +66,54 @@ def apply_to_npxg(npxg_blend: float, player_row: pd.Series, gw: int, cfg: dict) 
         return npxg_blend, 1.0
     mult = setpiece_multiplier(player_row, gw, cfg)
     return npxg_blend * mult, mult
+
+
+# ---------------------------------------------------------------------------
+# Patch 50 -- vectorized twins, additive alongside the scalar functions above
+# (see fpl_engine.py's Patch 50 section for the same pattern/rationale).
+# `gw` may be a single int (the pinned-gw badge use case) or a per-row
+# pd.Series of gw values (the per-fixture-per-gw npxG-adjustment use case) --
+# either way the decay-weight lookup is only ever done once per DISTINCT gw
+# value present, never once per row.
+# ---------------------------------------------------------------------------
+def setpiece_multiplier_vec(df: pd.DataFrame, gw, cfg: dict) -> pd.Series:
+    sp_cfg = cfg.get("setpiece_signal", {})
+    idx = df.index
+    if not sp_cfg.get("enabled", True):
+        return pd.Series(1.0, index=idx)
+
+    gw_series = gw if isinstance(gw, pd.Series) else pd.Series(gw, index=idx)
+
+    def col(name):
+        return pd.to_numeric(df[name], errors="coerce") if name in df.columns \
+            else pd.Series(np.nan, index=idx)
+
+    pen_order = col("penalties_order")
+    corner_order = col("corners_and_indirect_freekicks_order")
+    fk_order = col("direct_freekicks_order")
+
+    is_primary_pen = pen_order.notna() & (pen_order == 1)
+    is_primary_dead_ball = (corner_order.notna() & (corner_order == 1)) | \
+                            (fk_order.notna() & (fk_order == 1))
+
+    unique_gws = gw_series.dropna().unique()
+    cw_dict = {g: eng.decay_weights(int(g), cfg, metric="npxg")[1] for g in unique_gws}
+    c_w = gw_series.map(cw_dict)
+    fade = (1.0 - c_w).clip(lower=0.0)
+
+    pen_band = sp_cfg.get("penalty_multiplier_max", 1.20)
+    db_band = sp_cfg.get("dead_ball_multiplier_max", 1.10)
+
+    mult = pd.Series(1.0, index=idx)
+    mult = mult.where(~is_primary_dead_ball, 1.0 + (db_band - 1.0) * fade)
+    mult = mult.where(~is_primary_pen, 1.0 + (pen_band - 1.0) * fade)
+    return mult
+
+
+def apply_to_npxg_vec(npxg_blend: pd.Series, df: pd.DataFrame, gw, cfg: dict):
+    """Returns (adjusted_npxg_blend, multiplier_applied), same contract as
+    apply_to_npxg() but vectorized. NaN in npxg_blend passes straight
+    through (nan * anything == nan), matching the scalar early-return."""
+    mult = setpiece_multiplier_vec(df, gw, cfg)
+    adjusted = npxg_blend * mult
+    return adjusted, mult
