@@ -473,8 +473,18 @@ def chip_strategy_summary(wc_flag: str | None, shape_test: dict | None,
     strength for Bench Boost, a nailed premium's run for Triple Captain) —
     this tool can't compute that reminder's actual numbers outside a real
     Wildcard-build scenario, so it points at the "Evaluate a scenario" panel
-    rather than fabricating a check; (5) any live Rule #41 disruption notes,
-    since a disrupted player can itself be a reason a chip's timing shifts."""
+    rather than fabricating a check.
+
+    `disruption_notes` is accepted for backward-compatible call signatures
+    but, since Patch 52 (2026-09-16, manager decision: chip-rack pill
+    tooltip is the one place these now live, not both there AND here),
+    deliberately no longer echoed into `lines` — doing so used to reprint
+    the exact same disruption-note strings the Chip Rack's own pills
+    already show (Patch 51 made those pills full-sentence too, which is
+    the regression Patch 52 fixes at the pill level; this was the matching
+    duplicate at the expander level). Sections (1)-(4) below are
+    independently-composed synthesis prose, not verbatim repeats of any
+    other panel's text, and are unchanged."""
     lines = []
 
     # (1) Near-term mechanical plays, soonest first.
@@ -535,9 +545,14 @@ def chip_strategy_summary(wc_flag: str | None, shape_test: dict | None,
                       "include a nailed premium worth a near-term Triple Captain?). Run \"Evaluate a scenario\" "
                       "for a candidate Wildcard GW below to see the actual build and check both.")
 
-    # (5) Disruption notes (Rule #41) — a disrupted player can itself shift
-    # chip timing (e.g. tip toward Wildcard now rather than waiting).
-    for note in (disruption_notes or []):
-        lines.append(note)
+    # (5) Disruption notes (Rule #41) — REMOVED Patch 52 (2026-09-16, manager
+    # decision: tooltip only, drop from the expander). This used to
+    # `lines.append(note)` for every note in `disruption_notes`, verbatim —
+    # the exact same strings the Chip Rack pills above already carry, now
+    # each with its own short headline + full-text tooltip (Patch 52's Fix
+    # 1). Kept as a no-op comment rather than deleted silently so the
+    # section numbering above ((1)-(4)) still matches what's actually in
+    # this function. `disruption_notes` is still accepted as a parameter
+    # (call sites unchanged) but is intentionally unused now.
 
     return lines

@@ -769,6 +769,46 @@ meta:
                           # server smoke-start (clean, no tracebacks) were also run before packaging.
                           # NOTE (2026-09-16): rb_model_app_patch51.zip is CUMULATIVE: Patch 29 through
                           # 51 together, on top of the manager's Patch 28 baseline.
+                          # Patch 52 (2026-09-16, manager screenshots with annotations): confirmed scope via
+                          # AskUserQuestion before building (targeted pass, not a full theme overhaul). Two
+                          # circled issues: (1) "remove this" on the 4 Chip Rack pills (Wildcard-not-active,
+                          # chip recommendations, shape-test, disruption check) -- Patch 51's truncation fix
+                          # had the side effect of turning compact one-line pills into large multi-line
+                          # paragraph blocks, since it showed each pill's full raw sentence with nothing
+                          # shortened. Fixed the same way Patch 48 already fixed this for the Wildcard
+                          # cross-check pill specifically: each of the 4 pills now gets a short, genuinely-
+                          # authored headline (not truncated) via new helper functions
+                          # (_wc_not_active_pill_headline/_chip_recommendation_pill_headline/
+                          # _shape_test_pill_headline/_disruption_pill_headline, app.py), with the full
+                          # original sentence moved to the pill's hover tooltip via _flag_pill(headline,
+                          # full_text). Manager also explicitly chose (via clarifying question) that the full
+                          # text should live in the tooltip ONLY, not also repeated in the "Full chip
+                          # analysis" expander below -- removed the literal duplicates: dropped
+                          # `strategy_lines.append(_wc_check_note)` in app.py, and removed
+                          # chip_strategy_summary()'s section (5) loop that re-echoed disruption_notes
+                          # verbatim (chip_protocol.py) -- the expander's OTHER sections (near-term plays,
+                          # Wildcard-trigger-vs-shape-test cross-reference, same-week clash caution, chip-
+                          # chaining checklist) are independently-composed synthesis, not literal duplicates,
+                          # and were left untouched. test_patch29.py's Test 4 asserted the old (now
+                          # deliberately removed) duplication -- updated with a comment explaining why, now
+                          # asserts the non-duplication instead. (2) "Make this 'GW# Rating' for the current
+                          # GW" on the header's "Quick Team Rating" gauge -- relabeled to "GW{planning_gw}
+                          # Rating" (header tile, its expander title, methodology caption, and the compliant-
+                          # metric's cross-reference text), and the Pitch Navigator's own equivalent tile
+                          # from "Quick Team Rating (GW{n})" to "GW{n} Rating". No change to either metric's
+                          # underlying math or to the separate "Team Rating % (GW{start}-{end}, full pool)"
+                          # compliant badge added in Patch 51 -- label/disclosure changes only. Verified: full
+                          # existing regression suite (test_patch28 through test_patch51_compliant_rating)
+                          # plus a new test_patch52_pill_shortening.py (confirms all 4 pill headlines stay
+                          # under 65 chars across realistic scenarios, full text is preserved unabridged in
+                          # each tooltip, and chip_strategy_summary() no longer echoes the disruption-note/
+                          # WC-check-note text) -- all pass except the same 4 pre-existing, unrelated
+                          # failures already isolated in earlier patches. The broader "more visual, less
+                          # words, theme/color" request was discussed but deliberately scoped OUT of this
+                          # patch at the manager's own choice (targeted pass only) -- still open for a future
+                          # patch if requested.
+                          # NOTE (2026-09-16): rb_model_app_patch52.zip is CUMULATIVE: Patch 29 through
+                          # 52 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

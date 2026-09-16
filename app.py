@@ -9,6 +9,7 @@ Run locally:  streamlit run app.py
 """
 from __future__ import annotations
 import datetime as dt
+import re
 
 import pandas as pd
 import streamlit as st
@@ -29,7 +30,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 51"
+PATCH_VERSION = "Patch 52"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -888,8 +889,14 @@ with st.spinner("Fetching live data and computing xPts..."):
     # — see compliant_rating below — and this tooltip cross-references it so
     # the two differently-scoped percentages are never confused for one
     # another (Patch 49 precedent: "where the points we discussed!!!!").
-    fh_auto_label = "Quick Team Rating"
-    fh_auto_tooltip = (f"Quick Team Rating (single-GW, EST) = your current squad's best XI this GW (captain "
+    # Patch 52 (2026-09-16, manager screenshot) — relabeled from the generic
+    # "Quick Team Rating" to include the actual GW it scores (`planning_gw`,
+    # confirmed above via fh_auto_result = data_pipeline.
+    # solve_free_hit_optimal_squad(cfg, proj, team_value, planning_gw)) so
+    # it's self-explanatory at a glance which week it's scoring, without
+    # needing the tooltip. Math unchanged — label/disclosure only.
+    fh_auto_label = f"GW{planning_gw} Rating"
+    fh_auto_tooltip = (f"GW{planning_gw} Rating (single-GW, EST) = your current squad's best XI this GW (captain "
                        f"doubled, bench autosub-discounted), divided by a genuinely unconstrained optimal squad "
                        f"for GW{planning_gw} only (full player pool, no free-transfer limit — a true from-scratch "
                        f"rebuild). Gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: {fh_auto_moe:.1f} xPts). "
@@ -1282,9 +1289,9 @@ with col2:
         f"-GW{compliant_gw_end}, independent of the sidebar horizon slider), where Ceiling_xPts is a full-player-"
         f"pool, unconstrained, complete 15-man £100m squad solve (§1a requirements (a) and (b) both satisfied). "
         f"Both sides use the same captain-doubled, bench-autosub-discounted best-XI-per-GW calculation as the "
-        f"'Quick Team Rating' badge above. Squad: {compliant_squad_total:.1f} xPts · Ceiling: "
+        f"'{fh_auto_label}' badge above. Squad: {compliant_squad_total:.1f} xPts · Ceiling: "
         f"{compliant_ceiling_total:.1f} xPts · gap: {compliant_gap:.1f} xPts (margin-of-error threshold: "
-        f"{compliant_moe:.1f} xPts). NOTE: this is a DIFFERENT, wider-horizon metric than 'Quick Team Rating' "
+        f"{compliant_moe:.1f} xPts). NOTE: this is a DIFFERENT, wider-horizon metric than '{fh_auto_label}' "
         f"(single-GW, GW{planning_gw} only) above — the two are not meant to match; see 'Team Rating % "
         f"(GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown' below for the full disclosure."
     )
@@ -1301,7 +1308,7 @@ with col2:
       <div class="stat"><div class="n">{rank_disp} {trend}{prov_badge}</div><div class="l">Overall rank</div></div>
       <div class="stat rating">
         <div class="n">{_gauge_html}</div>
-        <div class="l">Quick Team Rating <span class="info-dot" title="{fh_auto_tooltip}">ⓘ</span></div>
+        <div class="l">{fh_auto_label} <span class="info-dot" title="{fh_auto_tooltip}">ⓘ</span></div>
       </div>
       <div class="stat rating">
         <div class="n">{_compliant_gauge_html}</div>
@@ -1357,14 +1364,14 @@ if fh_auto_rating["rating_pct"] is not None:
     if fh_at_ceiling:
         st.caption(f"✓ Already at this GW's optimal — the {fh_auto_gap:.1f} xPts gap is inside normal weekly "
                    f"noise (threshold {fh_auto_moe:.1f} xPts), not real room left on the table.")
-    with st.expander("Quick Team Rating — single-GW, EST — full breakdown"):
+    with st.expander(f"{fh_auto_label} — single-GW, EST — full breakdown"):
         st.markdown(tier_label)
         st.caption(f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
                    f"{fh_auto_current_val:.1f} · GW{planning_gw} optimal (a genuinely unconstrained best-possible "
                    f"squad from the full player pool, £{team_value}m proxy budget, no free-transfer limit): "
                    f"{fh_auto_optimal_val:.1f} · gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: "
                    f"{fh_auto_moe:.1f} xPts)")
-        st.caption("Patch 24 methodology (2026-09-08): Quick Team Rating = current squad GW xPts / GW-optimal xPts, "
+        st.caption(f"Patch 24 methodology (2026-09-08): {fh_auto_label} = current squad GW xPts / GW-optimal xPts, "
                    "both sides using the same best-legal-Starting-XI-plus-captain-bonus-plus-Rule-#12-bench-value "
                    "calculation (Rule #22 Systematic Application) — replacing the prior reachable-ceiling version, "
                    "which the manager flagged as tautologically high whenever few free transfers are banked. This "
@@ -1403,7 +1410,7 @@ if fh_auto_rating["rating_pct"] is not None:
                        f"{len(compliant_gw_list)}) / Ceiling_xPts(horizon {len(compliant_gw_list)}) × 100, per the "
                        f"model doc's §1a clause — a FIXED 3-4 GW horizon (never the sidebar horizon slider) against "
                        f"a full-player-pool, unconstrained, complete 15-man £100m squad ceiling (never a bounded/"
-                       f"shortlist estimate). This is the metric that actually satisfies §1a; 'Quick Team Rating' "
+                       f"shortlist estimate). This is the metric that actually satisfies §1a; '{fh_auto_label}' "
                        f"above is a faster single-GW read for day-to-day use and is labeled as such.")
 if snap.stale_warning:
     st.warning(snap.stale_warning)
@@ -1423,20 +1430,101 @@ for r in chip_rows:
 chip_html += '</div>'
 st.markdown(chip_html, unsafe_allow_html=True)
 much_more = wc_trigger["reason"] if (wc_trigger and not wc_flag and wc_trigger.get("avg_rating_pct") is not None) else None
+
+
+# Patch 52 (2026-09-16, manager screenshot) — Patch 51 removed _flag_pill's
+# hard 70-char truncation (which used to cut four pill types off mid-
+# sentence), but did so by showing the FULL sentence on every pill, which
+# just traded "truncated" for "giant multi-line coral box" for the same
+# four pill types. The fix Patch 48 already used successfully for the
+# Wildcard cross-check pill is generalized here to the other three: a
+# short, genuinely-authored (never truncated) headline on the pill itself,
+# full original sentence unabridged in its hover tooltip via
+# _flag_pill(short, full). Every helper below is built from the ACTUAL
+# fields/note text the corresponding function returns (verified by reading
+# wildcard_trigger_check(), chip_recommendations(), wildcard_freehit_
+# shape_test() and disruption_check() directly, not guessed from shape) —
+# nothing here fabricates data the note didn't already carry.
+def _wc_not_active_pill_headline(trigger: dict) -> str:
+    """Short headline for the 'Wildcard trigger: not active' pill. Pulls
+    the two numbers wildcard_trigger_check() always returns when inactive
+    (avg_rating_pct / cumulative_gap) rather than the full `reason`
+    sentence, which stays as this pill's tooltip unabridged."""
+    pct = trigger.get("avg_rating_pct")
+    gap = trigger.get("cumulative_gap")
+    if pct is not None and gap is not None:
+        return f"Wildcard trigger: not active ({pct}%, {gap:.1f} xPts gap — noise band)"
+    return "Wildcard trigger: not active (inside noise band)"
+
+
+_CHIP_NOTE_RE = re.compile(
+    r"^GW(?P<gw>\d+): confirmed (?P<kind>double|blank) (?:for|hits) (?P<n>\d+) of your clubs — "
+    r"(?P<chip>.+?) (?:has|is) ")
+
+
+def _chip_recommendation_pill_headline(note: str) -> str:
+    """Short headline for a chip_recommendations() note (BB/TC/FH DGW/BGW
+    exposure). All three sentence shapes that function emits start
+    'GW{n}: confirmed double/blank ... — {chip_tag} has/is ...' — parsed
+    here rather than hardcoded, so it stays correct if the club count or
+    chip tag changes. Full original sentence is unabridged in the tooltip."""
+    m = _CHIP_NOTE_RE.match(note)
+    if m:
+        plural = "s" if m["n"] != "1" else ""
+        return f"{m['chip']}: {m['kind']} GW exposure (GW{m['gw']}, {m['n']} club{plural})"
+    return "Chip exposure flagged this GW"
+
+
+def _shape_test_pill_headline(shape_test: dict) -> str:
+    """Short headline for the Step 8c shape-test note. classification is
+    always one of wildcard_shaped/freehit_shaped/no_signal by the time this
+    is called (insufficient_data is filtered out by the caller)."""
+    return f"Shape-test: {shape_test['classification'].replace('_', ' ')}"
+
+
+def _disruption_pill_headline(note: str) -> str:
+    """Short headline for one disruption_check() note. That function emits
+    several distinct note shapes (the live-flag note, the horizon-cap note,
+    the price-drop-flow note, and two 'nothing to cap yet' no-op notes) —
+    each handled by prefix here (verified against disruption_check()'s
+    actual f-strings) so the player/GW count in the headline always reflects
+    the same data the underlying note does. Full original sentence is
+    unabridged in the tooltip regardless of which shape matched."""
+    if note.startswith("Disruption check (Rule #41 auto-trigger):"):
+        m = re.search(r": (.+) currently carr", note)
+        n = len(m.group(1).split(", ")) if m else "1+"
+        return f"Disruption check: {n} player(s) flagged"
+    if note.startswith("Price-drop-flow override"):
+        m = re.search(r"\): (.+) current transfers-out", note)
+        n = len(m.group(1).split(", ")) if m else "1+"
+        return f"Price-drop-flow override: {n} player(s) flagged"
+    if note.startswith("A full-rebuild chip is planned for"):
+        m = re.search(r"planned for (GW\d+)", note)
+        return f"Disruption: {m.group(1) if m else 'rebuild'} chip already covers it"
+    if note.startswith("Transfer net-gain horizon capped"):
+        m = re.search(r"capped at (GW\d+|-)", note)
+        return f"Disruption: transfer horizon capped ({m.group(1) if m else 'see detail'})"
+    if note.startswith("Next planned full-rebuild chip GW set"):
+        m = re.search(r"set to (GW\d+)", note)
+        return f"Disruption: planned chip {m.group(1) if m else ''} noted".replace("  ", " ")
+    return "Disruption check — see detail"
+
+
 pill_items = []
 if wc_flag:
     pill_items.append(_flag_pill(wc_flag))
     if _wc_check_note:
         pill_items.append(_flag_pill(_wc_check_headline, _wc_check_note))
 elif much_more:
-    pill_items.append(_flag_pill(f"Wildcard trigger: not active — {much_more}."))
+    _wc_not_active_full = f"Wildcard trigger: not active — {much_more}."
+    pill_items.append(_flag_pill(_wc_not_active_pill_headline(wc_trigger), _wc_not_active_full))
 for note in chip_notes:
-    pill_items.append(_flag_pill(note))
+    pill_items.append(_flag_pill(_chip_recommendation_pill_headline(note), note))
 if shape_test and shape_test["classification"] != "insufficient_data":
     for note in shape_test["notes"]:
-        pill_items.append(_flag_pill(note))
+        pill_items.append(_flag_pill(_shape_test_pill_headline(shape_test), note))
 for note in disruption["notes"]:
-    pill_items.append(_flag_pill(note))
+    pill_items.append(_flag_pill(_disruption_pill_headline(note), note))
 if pill_items:
     st.markdown(f'<div class="flag-row">{"".join(pill_items)}</div>', unsafe_allow_html=True)
 
@@ -1513,10 +1601,16 @@ st.markdown(signal_html, unsafe_allow_html=True)
 # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
 # deleted per manager instruction) but moved behind an opt-in expander now
 # that the cards above carry the at-a-glance read (2026-09-14 redesign).
+#
+# Patch 52 (2026-09-16, manager decision: "tooltip only, drop from the
+# expander") — the `_wc_check_note` append here used to duplicate, verbatim,
+# the exact same sentence that's already the Wildcard cross-check pill's
+# tooltip (Patch 48) — removed. The disruption notes' own duplication is
+# removed at the source instead (chip_strategy_summary()'s own section (5)
+# in chip_protocol.py), since that function no longer receives them
+# verbatim into its output.
 strategy_lines = chip_protocol.chip_strategy_summary(
     wc_flag, shape_test, bb_advisor, tc_advisor, fh_advisor, chip_rows, disruption["notes"], wc_trigger)
-if _wc_check_note:
-    strategy_lines.append(_wc_check_note)
 with st.expander("Full chip analysis — combined narrative, rule-by-rule"):
     for line in strategy_lines:
         st.markdown(f"- {line}")
@@ -1821,7 +1915,7 @@ def _render_pitch_navigator():
     with nt1:
         st.metric(f"GW{nav_gw} xPts (best XI)", f"{nav_gw_xpts:.1f}")
     with nt2:
-        st.metric(f"Quick Team Rating (GW{nav_gw})",
+        st.metric(f"GW{nav_gw} Rating",
                   f"{nav_rating['rating_pct']}%" if nav_rating["rating_pct"] is not None else "—",
                   help=f"Single-GW, EST -- your best XI for GW{nav_gw} (captain doubled, bench autosub-"
                        f"discounted) over a fully unconstrained optimal squad for that GW alone. NOT the "
