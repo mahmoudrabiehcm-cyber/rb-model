@@ -33,25 +33,79 @@ def chip_status(boot_chips: list, history_chips: list) -> list[dict]:
     windows per chip name in a season with a reset at the winter break.
     history_chips: entry history's ['chips'] — chips this manager has
     actually played (name + event). Cross-referencing the two gives, per
-    chip window: used (with GW) or available (with window)."""
+    chip window: used (with GW) or available (with window).
+
+    Patch 53 (2026-09-17, manager report: two other managers tested — one
+    who'd already played Triple Captain and Bench Boost, one who'd played
+    Wildcard "last week" — both chips still showed as available/HOLD in
+    this app). Root cause: the old version matched "the Nth time this
+    manager played chip X" to "the Nth calendar window for chip X" purely
+    by ORDINAL COUNT, never by checking the played event actually falls
+    inside that window's [start_event, stop_event] range. The manager
+    pointed out (correctly) that `history_chips` itself is already proven
+    trustworthy elsewhere in this same app — the Season Ledger renders
+    "Bench Boost played"/"Triple Captain played"/"Wildcard played" directly
+    from this exact same list (app.py's chip_by_event, same `name`/`event`
+    fields, same CHIP_LABELS mapping) and gets it right — so there was no
+    reason to trust a second, independently-sourced, ordinally-matched
+    dataset (bootstrap-static's chip calendar) over data already proven
+    correct. Rewritten in two passes: (1) match each played event to the
+    calendar window that actually contains it (correct regardless of play
+    order, and immune to a manager skipping an earlier window); (2) a
+    reconciliation pass — any played event that still doesn't land inside
+    any window for its chip name (e.g. a calendar window with a missing/
+    stale start_event or stop_event) is force-assigned to the earliest
+    still-"available" window for that name rather than silently vanishing.
+    This makes the per-chip "used" count here provably unable to fall below
+    the count `history_chips` already shows was actually played — the same
+    guarantee the Season Ledger already relies on."""
     played = {}  # name -> list of events played
     for c in history_chips or []:
-        played.setdefault(c.get("name"), []).append(c.get("event"))
+        ev = c.get("event")
+        if ev is not None:
+            played.setdefault(c.get("name"), []).append(ev)
+    for name in played:
+        played[name] = sorted(played[name])
 
-    # group calendar windows per chip name, in start_event order, so the
-    # Nth played instance of a name consumes the Nth calendar window
+    # group calendar windows per chip name, in start_event order
     windows_by_name: dict[str, list[dict]] = {}
-    for c in sorted(boot_chips or [], key=lambda c: (c.get("name", ""), c.get("start_event", 0))):
+    for c in sorted(boot_chips or [], key=lambda c: (c.get("name", ""), c.get("start_event") or 0)):
         windows_by_name.setdefault(c.get("name"), []).append(c)
 
     rows = []
     for name, windows in windows_by_name.items():
-        used_events = sorted(played.get(name, []))
         label_base = CHIP_LABELS.get(name, name)
+        used_events_all = list(played.get(name, []))
+
+        # Pass 1 — real event-range matching: does a played event actually
+        # fall inside this window's [start_event, stop_event]?
+        matched: list[int | None] = []
+        consumed = set()
+        for w in windows:
+            start, stop = w.get("start_event"), w.get("stop_event")
+            hit = None
+            if start is not None and stop is not None:
+                hit = next((e for e in used_events_all if e not in consumed and start <= e <= stop), None)
+            if hit is not None:
+                consumed.add(hit)
+            matched.append(hit)
+
+        # Pass 2 — reconciliation: a played event that matched no window at
+        # all (stale/missing window bounds in boot_chips) still genuinely
+        # happened per history_chips — assign it to the earliest window
+        # still reading "available" for this name rather than dropping it.
+        leftovers = [e for e in used_events_all if e not in consumed]
+        for i, hit in enumerate(matched):
+            if not leftovers:
+                break
+            if hit is None:
+                matched[i] = leftovers.pop(0)
+
         for idx, w in enumerate(windows):
             tag = f"{label_base} {idx + 1}" if len(windows) > 1 else label_base
-            if idx < len(used_events):
-                rows.append({"chip": tag, "status": "used", "event": used_events[idx],
+            hit = matched[idx]
+            if hit is not None:
+                rows.append({"chip": tag, "status": "used", "event": hit,
                              "window": (w.get("start_event"), w.get("stop_event"))})
             else:
                 rows.append({"chip": tag, "status": "available", "event": None,

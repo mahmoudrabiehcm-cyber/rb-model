@@ -809,6 +809,37 @@ meta:
                           # patch if requested.
                           # NOTE (2026-09-16): rb_model_app_patch52.zip is CUMULATIVE: Patch 29 through
                           # 52 together, on top of the manager's Patch 28 baseline.
+                          # Patch 53 (2026-09-17, manager report): tested the app against two OTHER managers'
+                          # real teams (33864, already played Triple Captain GW3 + Bench Boost GW1; 1301651,
+                          # played Wildcard GW4) -- both chips still showed as available/HOLD in the Chip
+                          # Rack/Chip Signal cards, which is wrong. Attempted live-API verification first
+                          # (blocked in this sandbox -- fantasy.premierleague.com is not reachable here), but
+                          # the manager correctly pointed out this app already proves history_chips is
+                          # fetched and parsed correctly: the Season Ledger (app.py ~line 2361,
+                          # chip_by_event) renders "Bench Boost played"/"Triple Captain played"/"Wildcard
+                          # played" directly from the SAME history_chips list, using the SAME CHIP_LABELS
+                          # mapping, and gets it right -- so the bug could only be inside
+                          # chip_protocol.chip_status(), which cross-references that same trusted data
+                          # against a second, independent source (bootstrap-static's chip calendar,
+                          # boot_chips) using ordinal-position matching ("the Nth time played = the Nth
+                          # calendar window") instead of checking the played event actually falls inside
+                          # that window's [start_event, stop_event] range. Rewrote chip_status() as a
+                          # two-pass match: (1) assign each played event to the calendar window that
+                          # genuinely contains it; (2) a reconciliation pass that force-assigns any played
+                          # event NOT contained by any window (a stale/missing/off calendar boundary) to the
+                          # earliest still-"available" window for that chip name, rather than letting it
+                          # silently vanish -- making the used-count here provably unable to fall below what
+                          # history_chips (and therefore the Season Ledger) already correctly shows. Verified
+                          # via a new test_patch53_chip_status_fix.py: reproduces the exact reported symptom
+                          # (a played event landing entirely outside its window's stated range) and confirms
+                          # it's now correctly read as "used"; also closes a related latent risk (playing
+                          # only the SECOND of two per-season windows, skipping the first, no longer
+                          # misassigns "used" to the wrong window) not yet observable this early in a season
+                          # but real once winter-break second-half windows open. Full existing regression
+                          # suite (test_patch28 through test_patch52_pill_shortening) plus the new test all
+                          # pass -- no existing test exercised chip_status() directly before this patch.
+                          # NOTE (2026-09-17): rb_model_app_patch53.zip is CUMULATIVE: Patch 29 through
+                          # 53 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
