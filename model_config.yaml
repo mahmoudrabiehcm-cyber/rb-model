@@ -840,6 +840,46 @@ meta:
                           # pass -- no existing test exercised chip_status() directly before this patch.
                           # NOTE (2026-09-17): rb_model_app_patch53.zip is CUMULATIVE: Patch 29 through
                           # 53 together, on top of the manager's Patch 28 baseline.
+                          # Patch 54 (2026-09-17, manager screenshots): Patch 53 fixed chip_status()'s used/
+                          # available LABELS (confirmed correct in the manager's own screenshots -- the Chip
+                          # Rack strip showed "Triple Captain 1 used"/"Bench Boost 1 used"/"Wildcard 1 used"
+                          # correctly, struck through), but the Bench Boost/Triple Captain/Free Hit signal
+                          # CARDS below still showed HOLD/PLAY GW9 verdicts for chips already used this half.
+                          # Root cause (verified in code, not inferred): chip_protocol.chip_advisor_gw_window()
+                          # builds a generic near-term scan range (planning_gw..~+8) with zero awareness of
+                          # WHICH specific calendar window (from chip_rows) is actually open -- the gate
+                          # `any(c.startswith("Bench Boost") for c in available_chip_names)` was never wrong
+                          # (Bench Boost 2, window GW20-38, genuinely IS still available), but the scan window
+                          # fed to evaluate_bench_boost()/evaluate_triple_captain()/evaluate_free_hit() fell
+                          # entirely inside the ALREADY-USED first window (GW1-19), so the advisor scored and
+                          # recommended a verdict over a date range where that chip literally cannot be played.
+                          # Fixed with a new _clip_to_available_windows() helper (app.py) that filters the scan
+                          # window to only GWs falling inside a still-"available" window for that chip name; if
+                          # nothing overlaps (this manager's exact case), no verdict is computed and the card
+                          # instead shows a genuine "USED GW{n}" state (badge + "next available GW{n}" sub-line)
+                          # via a new `used_state` param on _advisor_card(), rather than a fabricated HOLD.
+                          # Manager also requested, confirmed via AskUserQuestion: (1) once a chip's card shows
+                          # USED, it should also disclose the next window's opening GW (done, as above); (2)
+                          # the old "Chip Rack" section (a row of 8 small tiles duplicating what the 4 signal
+                          # cards now show directly) is redundant now and removed entirely -- chip_rows itself
+                          # is untouched and still drives the signal cards, pills, and Wildcard trigger exactly
+                          # as before, only that tile-row rendering is gone; (3) the 4 Chip Rack pills (kept,
+                          # not removed) get a less alarming restyle -- previously ALL four rendered in solid
+                          # coral regardless of content; now a neutral gray/muted style is the default, and the
+                          # softer gold/amber tier (matching this app's existing "flagged" color convention,
+                          # .chip.flagged's dot) is reserved for pills whose icon is already the warning
+                          # triangle (disruption check, price-drop-flow override) -- purely informational pills
+                          # (Wildcard-not-active, shape-test) are no longer visually alarming. Verified via a
+                          # new test_patch54_used_chip_cards.py (reproduces the exact reported scenario against
+                          # real chip_status() output: Bench Boost/Triple Captain correctly show no scannable
+                          # GWs + correct last-used/next-open numbers; a never-played chip's scan window is
+                          # provably unaffected; once the scan window's own range reaches the next open window,
+                          # clipping correctly stops removing anything; a chip with both windows used has zero
+                          # available rows, so the outer gate never even calls the clip helper). Full existing
+                          # regression suite (test_patch28 through test_patch53_chip_status_fix) plus the new
+                          # test all pass.
+                          # NOTE (2026-09-17): rb_model_app_patch54.zip is CUMULATIVE: Patch 29 through
+                          # 54 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

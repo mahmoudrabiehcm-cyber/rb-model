@@ -30,7 +30,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 53"
+PATCH_VERSION = "Patch 54"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -175,9 +175,22 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .badge.used{ background:var(--surface-2); color:var(--ink-faint); }
 
 .flag-row{ display:flex; gap:8px; flex-wrap:wrap; margin:6px 0 16px; }
-.flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--coral-tint); border:1px solid var(--coral);
-  color:#7A2E18; font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px; cursor:help;
-  white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
+/* Patch 54 (2026-09-17, manager decision: "keep red boxes but with
+   something better looking") — the old version painted EVERY pill in solid
+   coral regardless of content, so a purely informational note ("Wildcard
+   trigger: not active", "Shape-test: wildcard shaped") read with the same
+   visual urgency as a genuine actionable flag ("Disruption check: N
+   player(s) flagged", "Price-drop-flow override: ..."). Split into two
+   tiers instead: a quiet neutral style by default, and a softer gold/amber
+   tier reserved for pills whose icon is already the warning triangle
+   (_flag_pill's own existing "flagged"/"CAUTION"/"Disruption" keyword
+   check) — the same gold already used elsewhere in this app for "flagged"
+   status (.chip.flagged's dot color), so this isn't a new color language,
+   just applying the one that already exists consistently here too. */
+.flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--surface-2); border:1px solid var(--rule);
+  color:var(--ink-muted); font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px;
+  cursor:help; white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
+.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#5C4212; }
 
 /* Team Rating % radial gauge (Patch 31) — conic-gradient ring, no SVG/JS
    library needed. Percentage is still the same number the tooltip/expander
@@ -341,8 +354,10 @@ def _flag_pill(text: str, tooltip: str = "") -> str:
     The hover tooltip still repeats the same full text for parity with
     Patch 48/49's pills, which pass a separate, even-more-detailed tooltip
     string."""
-    icon = "⚠️" if any(k in text for k in ("CAUTION", "flagged", "Disruption")) else "●"
-    return f'<span class="flag-pill" title="{tooltip or text}">{icon} {text}</span>'
+    is_warn = any(k in text for k in ("CAUTION", "flagged", "Disruption"))
+    icon = "⚠️" if is_warn else "●"
+    cls = "flag-pill warn" if is_warn else "flag-pill"
+    return f'<span class="{cls}" title="{tooltip or text}">{icon} {text}</span>'
 
 
 def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool = False,
@@ -1054,20 +1069,70 @@ with st.spinner("Fetching live data and computing xPts..."):
         starters_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(starters_df["code"])]
         squad_df_adv = chip_adv_proj[chip_adv_proj["code"].isin(squad_codes)]
 
+    # Patch 54 (2026-09-17, manager report + screenshots) — chip_advisor_gw_
+    # window()'s near-term scan range (planning_gw..planning_gw+~8) has no
+    # awareness of which SPECIFIC calendar window (from chip_rows) is
+    # actually open for a given chip. A manager who's already played, say,
+    # Bench Boost 1 (window GW1-19) still has "Bench Boost" show up in
+    # available_chip_names (Bench Boost 2, window GW20-38, genuinely is
+    # still available) -- so the gate above was never wrong -- but the scan
+    # window it fed to evaluate_bench_boost() fell entirely inside the
+    # ALREADY-USED first window, so the advisor was scoring and recommending
+    # a "PLAY GW9"/"HOLD" verdict over a date range where that chip literally
+    # cannot be played any more. Fixed by clipping the scan window to only
+    # the GWs that actually fall inside a still-"available" window for that
+    # chip name; if nothing in the near-term scan overlaps any available
+    # window (this manager's exact case), no verdict is computed at all --
+    # the card instead shows a genuine "USED GW{n}" state (see
+    # _advisor_card) with the next window's opening GW, rather than a
+    # fabricated HOLD.
+    def _clip_to_available_windows(gw_list: list[int], name_prefix: str):
+        """Returns (clipped_gw_list, last_used_event, next_available_start).
+        clipped_gw_list is gw_list filtered to GWs inside any window still
+        "available" for this chip name; last_used_event is the most recent
+        GW this chip was actually played (None if never); next_available_
+        start is the earliest start_event among its available windows."""
+        avail_windows = [r["window"] for r in chip_rows
+                          if r["chip"].startswith(name_prefix) and r["status"] == "available"]
+        used_events = [r["event"] for r in chip_rows
+                        if r["chip"].startswith(name_prefix) and r["status"] == "used" and r["event"] is not None]
+        last_used = max(used_events) if used_events else None
+        next_start = min((w[0] for w in avail_windows if w[0] is not None), default=None)
+        if not avail_windows or not gw_list:
+            return [], last_used, next_start
+        clipped = [g for g in gw_list
+                   if any(s is not None and e is not None and s <= g <= e for s, e in avail_windows)]
+        return clipped, last_used, next_start
+
     bb_advisor = None
+    bb_used_state = None
     if any(c.startswith("Bench Boost") for c in available_chip_names):
-        bb_advisor = chip_protocol.evaluate_bench_boost(
-            bench_df_adv, chip_adv_window["gw_list"], _chip_moe_fn("bench_boost"))
+        _bb_gws, _bb_last_used, _bb_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Bench Boost")
+        if _bb_gws:
+            bb_advisor = chip_protocol.evaluate_bench_boost(
+                bench_df_adv, _bb_gws, _chip_moe_fn("bench_boost"))
+        elif _bb_last_used is not None:
+            bb_used_state = {"last_used_gw": _bb_last_used, "next_open_gw": _bb_next}
     tc_advisor = None
+    tc_used_state = None
     if any(c.startswith("Triple Captain") for c in available_chip_names):
-        tc_advisor = chip_protocol.evaluate_triple_captain(
-            starters_df_adv, chip_adv_window["gw_list"], _chip_moe_fn("triple_captain"))
+        _tc_gws, _tc_last_used, _tc_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Triple Captain")
+        if _tc_gws:
+            tc_advisor = chip_protocol.evaluate_triple_captain(
+                starters_df_adv, _tc_gws, _chip_moe_fn("triple_captain"))
+        elif _tc_last_used is not None:
+            tc_used_state = {"last_used_gw": _tc_last_used, "next_open_gw": _tc_next}
     fh_advisor = None
+    fh_used_state = None
     if any(c.startswith("Free Hit") for c in available_chip_names) and not squad_df.empty:
-        fh_advisor = chip_protocol.evaluate_free_hit(
-            squad_df_adv, chip_adv_window["gw_list"],
-            lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, chip_adv_proj, team_value, gw),
-            _chip_moe_fn("free_hit"))
+        _fh_gws, _fh_last_used, _fh_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Free Hit")
+        if _fh_gws:
+            fh_advisor = chip_protocol.evaluate_free_hit(
+                squad_df_adv, _fh_gws,
+                lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, chip_adv_proj, team_value, gw),
+                _chip_moe_fn("free_hit"))
+        elif _fh_last_used is not None:
+            fh_used_state = {"last_used_gw": _fh_last_used, "next_open_gw": _fh_next}
 
     # Chip-aware transfer advisory: only from signals already computed
     # mechanically above — never a guess at the manager's intent. Wildcard:
@@ -1416,19 +1481,21 @@ if snap.stale_warning:
     st.warning(snap.stale_warning)
 
 # ---------------------------------------------------------------------------
-# Chip rack
+# Chip status
 # ---------------------------------------------------------------------------
-st.markdown('<div class="section-h">Chip Rack</div>', unsafe_allow_html=True)
+# Patch 54 (2026-09-17, manager decision) — the old "Chip Rack" section
+# rendered every one of the 8 calendar windows (2 per chip: Wildcard/Bench
+# Boost/Triple Captain/Free Hit) as its own small tile up here, ABOVE the 4
+# signal cards below that already summarize the same chips. Once the signal
+# cards themselves started showing a genuine "USED GW{n}" state (this same
+# patch, see _advisor_card below), that tile row became pure duplication —
+# manager's own call: "there is no need for the chips here because we are
+# using the boxes." Removed entirely; `chip_rows` itself is untouched and
+# still drives the signal cards, the pills below, and the Wildcard trigger
+# exactly as before -- only this tile-row rendering is gone.
 flagged_chip_names = set()
 if wc_flag:
     flagged_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available" and r["chip"].startswith("Wildcard")}
-chip_html = '<div class="chip-rack">'
-for r in chip_rows:
-    cls = "used" if r["status"] == "used" else ("flagged" if r["chip"] in flagged_chip_names else "available")
-    win = f'used GW{r["event"]}' if r["status"] == "used" else f'GW{r["window"][0]}–{r["window"][1]}'
-    chip_html += f'<div class="chip {cls}"><span class="dot"></span><span class="name">{r["chip"]}</span><span class="win">&nbsp;{win}</span></div>'
-chip_html += '</div>'
-st.markdown(chip_html, unsafe_allow_html=True)
 much_more = wc_trigger["reason"] if (wc_trigger and not wc_flag and wc_trigger.get("avg_rating_pct") is not None) else None
 
 
@@ -1533,9 +1600,24 @@ if pill_items:
 # every card's rule/step citation and full quantified reasoning lives in its
 # hover tooltip (same hover-hidden pattern as the header's .info-dot),
 # instead of sitting as permanent visible body text.
-def _advisor_card(label: str, adv: dict | None) -> str:
+def _advisor_card(label: str, adv: dict | None, used_state: dict | None = None) -> str:
     _win = (f"GW{chip_adv_window['gw_list'][0]}-GW{chip_adv_window['gw_list'][-1]}" if chip_adv_window
             else "the scanned window")
+    # Patch 54 — this chip has already been played this half, and the near-
+    # term scan window doesn't reach the next available window yet (see
+    # _clip_to_available_windows above). Showing "HOLD"/"PLAY" here would be
+    # fabricating a verdict over a date range where the chip literally can't
+    # be played — show what's actually true instead: when it was used, and
+    # when the next one opens.
+    if used_state is not None:
+        sub = (f"next available GW{used_state['next_open_gw']}" if used_state.get("next_open_gw") is not None
+               else "no further window this season")
+        tooltip = (f"{label} was already played at GW{used_state['last_used_gw']}. " +
+                   (f"The next available window opens GW{used_state['next_open_gw']} — this card will show a "
+                    f"real PLAY/HOLD verdict again once the scan window reaches it."
+                    if used_state.get("next_open_gw") is not None else
+                    "No further window is available for this chip this season."))
+        return _signal_card(label, f"USED GW{used_state['last_used_gw']}", "used", "—", sub, tooltip)
     if adv is None or adv.get("best_gw") is None:
         return _signal_card(label, "N/A", "used", "—", "no data this run",
                              f"No candidate gameweek available for this chip across {_win}.")
@@ -1594,8 +1676,10 @@ elif much_more:
 else:
     wc_card = _signal_card("Wildcard", "N/A", "used", "—", "insufficient data this run", wc_card_tooltip)
 
-signal_html = '<div class="signal-grid">' + wc_card + _advisor_card("Bench Boost", bb_advisor) + \
-    _advisor_card("Triple Captain", tc_advisor) + _advisor_card("Free Hit", fh_advisor) + '</div>'
+signal_html = '<div class="signal-grid">' + wc_card + \
+    _advisor_card("Bench Boost", bb_advisor, bb_used_state) + \
+    _advisor_card("Triple Captain", tc_advisor, tc_used_state) + \
+    _advisor_card("Free Hit", fh_advisor, fh_used_state) + '</div>'
 st.markdown(signal_html, unsafe_allow_html=True)
 
 # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
