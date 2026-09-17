@@ -880,6 +880,54 @@ meta:
                           # test all pass.
                           # NOTE (2026-09-17): rb_model_app_patch54.zip is CUMULATIVE: Patch 29 through
                           # 54 together, on top of the manager's Patch 28 baseline.
+                          # Patch 55 (2026-09-17, manager report: team 1301651, Season Ledger showed "GW4 --
+                          # Wildcard played" but the Wildcard signal card still showed "TRIGGER ACTIVE 93.4%"
+                          # for GW5 planning). Root cause (verified in code, not inferred): app.py's
+                          # `_wc_available_now` was a raw "does ANY Wildcard window have status==available"
+                          # check -- Wildcard has 2 calendar windows/season (roughly GW1-19 and GW20-38); the
+                          # manager's GW4 play closed window 1, but window 2 is a real, separate window
+                          # chip_status() correctly reports as "available" even though it's ~15 GWs away. The
+                          # flag never checked whether that available window's [start,stop] actually overlaps
+                          # the GW being planned, so it stayed True and fired wc_trigger/wc_flag/the Wildcard
+                          # card off a window that can't be played for another 15 gameweeks. This is the exact
+                          # same scan-range-blindness bug class Patch 54 fixed for Bench Boost/Triple Captain/
+                          # Free Hit's ADVISOR CARDS via _clip_to_available_windows() -- but that fix was never
+                          # extended to (a) the Wildcard trigger card, which is built directly (`wc_card`, not
+                          # through `_advisor_card`) and (b) the Step 8c shape-test gate, which both
+                          # `_wc_available_now` and the equally-unclipped `_fh_available_now` feed independent
+                          # of the (already-correct) Free Hit advisor card.
+                          # Manager explicitly asked to confirm Free Hit (and Bench Boost/Triple Captain)
+                          # weren't at risk of the same defect before building anything. Verified live against
+                          # chip_protocol.chip_status() with the exact reported window shape (all four chips
+                          # played in window 1, window 2 open but unreachable): Bench Boost/Triple Captain/
+                          # Free Hit's advisor CARDS were confirmed already correct (they route through
+                          # `_clip_to_available_windows`, added in Patch 54) -- this matches the manager's own
+                          # live test of BB/TC. Only Wildcard's card path, plus the shared detect-window/shape-
+                          # test gate both Wildcard and Free Hit feed, had the unclipped defect.
+                          # Fix: `_clip_to_available_windows()` (previously only defined next to its Chip
+                          # Advisor call site) now lives immediately after `chip_rows` is built, so the same
+                          # clipping logic gates `_wc_available_now`/`_fh_available_now` against the same
+                          # detect window (planning_gw..planning_gw+detection_window_gws-1) that
+                          # wc_trigger/shape_test actually scans -- "available" now means "reachable from here,"
+                          # not "exists somewhere on the calendar." The Wildcard card gained a genuine
+                          # "USED GW{n} / next available GW{n}" state (mirroring `_advisor_card`'s Patch 54
+                          # pattern) instead of falling through to the old "N/A / insufficient data this run"
+                          # branch, which read as a data gap rather than "already played."
+                          # Verified via new test_patch55_wildcard_used_window.py (reproduces the exact
+                          # reported scenario against real chip_status() output: Wildcard's detect window
+                          # correctly clips to empty with last_used_gw=4/next_open_gw=20; Free Hit's detect-
+                          # window gate does the same; Bench Boost/Triple Captain confirmed unaffected; the OLD
+                          # unclipped flags are shown to genuinely read True in this scenario, proving this is
+                          # a real fix and not a no-op; a genuinely-open, never-used Wildcard window is
+                          # confirmed unaffected by the clip). Full existing regression suite re-run: all prior
+                          # patch tests pass except test_patch34_impact_check.py, which was already failing
+                          # before this patch (last touches recommend.py 2026-09-14, model_config.yaml
+                          # thresholds 2026-09-17 10:26 -- both predate this patch's app.py-only edit at 11:36;
+                          # unrelated to Wildcard/Free Hit/chip_protocol code) -- flagged here rather than
+                          # silently left out, not fixed as part of this patch since it's outside this patch's
+                          # scope and root cause.
+                          # NOTE (2026-09-17): rb_model_app_patch55.zip is CUMULATIVE: Patch 29 through
+                          # 55 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

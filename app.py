@@ -30,7 +30,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 54"
+PATCH_VERSION = "Patch 55"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -649,15 +649,68 @@ with st.spinner("Fetching live data and computing xPts..."):
     chips_played = history.get("chips", []) if history else []
     chip_rows = chip_protocol.chip_status(boot_chips, chips_played)
     all_team_ids = snap.teams["id"].tolist() if "id" in snap.teams.columns else []
-    _wc_available_now = any(r["status"] == "available" and r["chip"].startswith("Wildcard") for r in chip_rows)
-    _fh_available_now = any(r["status"] == "available" and r["chip"].startswith("Free Hit") for r in chip_rows)
+
+    # Patch 55 (2026-09-17, manager report: team 1301651 -- Wildcard played
+    # GW4, closing window 1 (GW1-19); window 2 (GW20-38) is a genuinely
+    # separate, legitimately "available" calendar window per chip_status(),
+    # just not open for another ~15 GWs. The OLD _wc_available_now/
+    # _fh_available_now here were a raw "does ANY window have status==
+    # available" check with no notion of whether that window overlaps the GW
+    # actually being planned -- the exact same scan-range-blindness Patch 54
+    # fixed for the Bench Boost/Triple Captain/Free Hit ADVISOR CARDS via
+    # _clip_to_available_windows(), but that fix was never extended to (a)
+    # the Wildcard trigger card, which is built directly (wc_card, not
+    # through _advisor_card) and (b) the shape-test gate these two flags also
+    # feed, independent of the advisor cards. Confirmed via a live probe
+    # against chip_protocol.chip_status() with this exact scenario:
+    # _wc_available_now stayed True with zero GWs of the open window
+    # anywhere near the GW5-8 planning window, firing a fabricated "TRIGGER
+    # ACTIVE 93.4%" Wildcard card 15 GWs before that window could ever
+    # actually be played. Bench Boost/Triple Captain/Free Hit's own advisor
+    # CARDS were independently confirmed correct (see manager's own live
+    # test) since they already route through _clip_to_available_windows
+    # further below -- this fix only touches the Wildcard/detect-window gate.
+    #
+    # Fix: _clip_to_available_windows() (previously defined further below,
+    # next to its first use for the Chip Advisor cards) now lives here
+    # instead, right after chip_rows exists, so this earlier gate uses the
+    # exact same clipping logic rather than a second, divergent one. Both
+    # _wc_available_now and _fh_available_now now mean "is an available
+    # window's [start,stop] range actually reachable from the same detect
+    # window (planning_gw..planning_gw+detection_window_gws-1) that
+    # wc_trigger/shape_test will actually scan" -- not "does an available
+    # window exist anywhere on the calendar, however far off."
+    def _clip_to_available_windows(gw_list: list[int], name_prefix: str):
+        """Returns (clipped_gw_list, last_used_event, next_available_start).
+        clipped_gw_list is gw_list filtered to GWs inside any window still
+        "available" for this chip name; last_used_event is the most recent
+        GW this chip was actually played (None if never); next_available_
+        start is the earliest start_event among its available windows."""
+        avail_windows = [r["window"] for r in chip_rows
+                          if r["chip"].startswith(name_prefix) and r["status"] == "available"]
+        used_events = [r["event"] for r in chip_rows
+                        if r["chip"].startswith(name_prefix) and r["status"] == "used" and r["event"] is not None]
+        last_used = max(used_events) if used_events else None
+        next_start = min((w[0] for w in avail_windows if w[0] is not None), default=None)
+        if not avail_windows or not gw_list:
+            return [], last_used, next_start
+        clipped = [g for g in gw_list
+                   if any(s is not None and e is not None and s <= g <= e for s, e in avail_windows)]
+        return clipped, last_used, next_start
+
     available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
+
+    _detect_window_size = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
+    _detect_candidate_gws = list(range(planning_gw, planning_gw + _detect_window_size))
+    _wc_clipped_gws, _wc_last_used, _wc_next_open = _clip_to_available_windows(_detect_candidate_gws, "Wildcard")
+    _fh_clipped_detect_gws, _fh_last_used_detect, _fh_next_open_detect = _clip_to_available_windows(
+        _detect_candidate_gws, "Free Hit")
+    _wc_available_now = bool(_wc_clipped_gws)
+    _fh_available_now = bool(_fh_clipped_detect_gws)
 
     detect_gw_list = None
     if _wc_available_now or _fh_available_now:
-        shape_cfg = cfg.get("chip_shape_test", {})
-        detect_window = shape_cfg.get("detection_window_gws", 4)
-        detect_gw_list = list(range(planning_gw, planning_gw + detect_window))
+        detect_gw_list = _detect_candidate_gws
 
     chip_adv_window = None
     chip_adv_gw_list = None
@@ -1086,23 +1139,12 @@ with st.spinner("Fetching live data and computing xPts..."):
     # the card instead shows a genuine "USED GW{n}" state (see
     # _advisor_card) with the next window's opening GW, rather than a
     # fabricated HOLD.
-    def _clip_to_available_windows(gw_list: list[int], name_prefix: str):
-        """Returns (clipped_gw_list, last_used_event, next_available_start).
-        clipped_gw_list is gw_list filtered to GWs inside any window still
-        "available" for this chip name; last_used_event is the most recent
-        GW this chip was actually played (None if never); next_available_
-        start is the earliest start_event among its available windows."""
-        avail_windows = [r["window"] for r in chip_rows
-                          if r["chip"].startswith(name_prefix) and r["status"] == "available"]
-        used_events = [r["event"] for r in chip_rows
-                        if r["chip"].startswith(name_prefix) and r["status"] == "used" and r["event"] is not None]
-        last_used = max(used_events) if used_events else None
-        next_start = min((w[0] for w in avail_windows if w[0] is not None), default=None)
-        if not avail_windows or not gw_list:
-            return [], last_used, next_start
-        clipped = [g for g in gw_list
-                   if any(s is not None and e is not None and s <= g <= e for s, e in avail_windows)]
-        return clipped, last_used, next_start
+    #
+    # Patch 55 — _clip_to_available_windows() itself now lives earlier in
+    # this script (right after chip_rows is built), so the Wildcard/Free Hit
+    # detect-window gate above can reuse the exact same logic instead of a
+    # second, divergent copy. Still the same function, still called the same
+    # way here — only its definition site moved.
 
     bb_advisor = None
     bb_used_state = None
@@ -1670,6 +1712,22 @@ if wc_flag:
     wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
                             "structural gap detected — date is your call", wc_card_tooltip, "is-active",
                             note=_wc_note_html, note_cls=_wc_note_cls)
+elif not _wc_available_now and _wc_last_used is not None:
+    # Patch 55 (manager report, team 1301651: Wildcard played GW4, closing
+    # window 1 — window 2 (a real, separate calendar window) isn't reachable
+    # yet, so _wc_available_now is correctly False and wc_trigger never even
+    # ran. Show the same genuine "USED GW{n}" state the Bench Boost/Triple
+    # Captain/Free Hit cards already show in this situation (_advisor_card,
+    # Patch 54), instead of falling through to the old "N/A / insufficient
+    # data" branch, which read as a data gap rather than "already played."
+    _wc_used_sub = (f"next available GW{_wc_next_open}" if _wc_next_open is not None
+                    else "no further window this season")
+    _wc_used_tooltip = (f"Wildcard was already played at GW{_wc_last_used}. " +
+                         (f"The next available window opens GW{_wc_next_open} — this card will show a live "
+                          f"trigger check again once planning reaches it."
+                          if _wc_next_open is not None else
+                          "No further window is available for this chip this season."))
+    wc_card = _signal_card("Wildcard", f"USED GW{_wc_last_used}", "used", "—", _wc_used_sub, _wc_used_tooltip)
 elif much_more:
     wc_card = _signal_card("Wildcard", "HOLD", "hold", f'{wc_trigger["avg_rating_pct"]}%',
                             "inside noise band — no trigger", wc_card_tooltip)
