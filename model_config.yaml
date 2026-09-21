@@ -1169,6 +1169,80 @@ meta:
                           # NOTE (2026-09-21): rb_model_app_patch60.zip is CUMULATIVE: Patch 29 through
                           # 60 together, on top of the manager's Patch 28 baseline. manual_overrides.csv is
                           # NOT included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 61 / "Release 2" (2026-09-21, manager: "start patching the new visuals as
+                          # Release 2 from the app, let's go" -- the app-wide build-out of the theme/logo/
+                          # layout redesign locked over several rounds of mockups earlier the same day:
+                          # theme3_accents.html, pitch_and_logo_concepts.html, pitch_final_check.html,
+                          # captaincy_transfer_visuals.html, accent_primary_compare.html,
+                          # final_recommendation.html). Scope, all in app.py:
+                          # (1) Theme retint -- dark "Signal/Differential" palette (--bg #111113,
+                          # --surface #18181B/#1E1E22, --rule #2A2A2E) replacing the old warm-cream/forest-
+                          # green palette, with cyan (--accent #2FD1D9) as the primary EVERYDAY signal color
+                          # (xPts numbers, bars, differential markers, pitch markings, transfer arrows) and
+                          # coral (--coral #FF5A5F) reserved EXCLUSIVELY for the captaincy spotlight card and
+                          # alerts, per the locked design verdict. Because nearly every existing component
+                          # already read its colors from CSS custom properties instead of hardcoded hex,
+                          # retinting :root re-skinned the overwhelming majority of the app automatically --
+                          # component-level CSS mostly only needed a headline-font swap (Fraunces -> Space
+                          # Grotesk, this phase's locked face) plus a few dark-mode-specific fixes: three
+                          # hardcoded light-mode text colors (#7A5A16 / #5C4212, used against .badge.active /
+                          # .flag-pill.warn / .xm-badge.rotation's amber tint backgrounds) would have been
+                          # illegible dark-on-dark once that tint itself went dark -- replaced with a light
+                          # amber (#F2C879); the avatar-fallback gradient's hardcoded old-accent endpoint
+                          # (#12492E) was updated to a dark cyan-adjacent tone; the captain armband badge
+                          # (.card .cap) recolored gold->coral (captaincy is now coral's one everyday use);
+                          # position-tag FWD color moved off --coral (which used to double as a 4th position
+                          # color, now genuinely reserved) onto a new --violet (#B39CFF) added for that one
+                          # purpose only. (2) New "Monogram + Dot" logo (_CREST_SVG) -- a bold cyan "R" in
+                          # Space Grotesk inside a rounded dark badge with a small coral dot -- replacing the
+                          # old Patch 2 chess-crest-style polygon mark everywhere it appears (login screen,
+                          # sidebar, main header). (3) Real pitch markings -- `.pitch` gained a grass-stripe
+                          # backdrop (repeating-linear-gradient) and a `.pitch::before` layer drawing a
+                          # halfway line, center circle, and two penalty boxes via layered CSS
+                          # gradients/borders, replacing the old flat single-tint rectangle; caught and fixed
+                          # a real stacking-context bug while building this (verified visually, not just by
+                          # code inspection -- see below): `.pitch` had `position:relative` but no `z-index`,
+                          # so it never established its own stacking context, and the markings layer's
+                          # `z-index:-1` escaped to an ancestor context instead of sitting between the
+                          # pitch's own background and the player cards -- the markings rendered completely
+                          # invisible (occluded) until `.pitch` was given an explicit `z-index:0` to force
+                          # the stacking context Layered-below cards. (4) Captaincy spotlight card
+                          # (`.cap-spotlight`, rendered in `_render_pitch_navigator()`) -- a coral-ringed
+                          # photo (same crop/source as the pitch cards), player name/team, a large xPts
+                          # number, a bar showing xPts vs. the nearest alternative pick, and an EO% row,
+                          # replacing the plain-text armband caption as the PRIMARY display. Every field the
+                          # old text caption disclosed (standout-pick vs. coin-flip framing, nearest
+                          # alternative, Standing Rule #40 team-stability tiebreak footnote) is kept
+                          # unabridged directly under the card, not dropped -- this only adds a visual
+                          # header on top of it. (5) Transfer OUT->IN card (`.tx-card`, rendered in the main
+                          # recommendation section, one per entry in `rec["moves"]`) -- an OUT/IN photo pair,
+                          # an arrow, a net-xPts number, and a FREE/hit-cost pill, added ABOVE the existing
+                          # text summary (which is left completely unchanged, so nothing is hidden or
+                          # reduced -- this is purely an additional at-a-glance view, same disclosure
+                          # philosophy as (4)). The "Evaluate your own scenario" section's own what-if
+                          # displays keep the existing `.tx-reco`/`.cap-caption` text styles (just recolored
+                          # for the dark theme) rather than being converted to the new card components --
+                          # scoped out of this patch to keep it reviewable; can follow as its own small patch
+                          # if wanted. Verified: full `ast.parse` syntax check; CSS brace-balance check (159
+                          # open / 159 close); a static HTML+CSS preview built directly from the shipped
+                          # `<style>` block and representative sample markup was rendered with Playwright/
+                          # Chromium and visually inspected (this is how the stacking-context bug above was
+                          # actually caught, not assumed away) -- confirmed pitch markings, captaincy
+                          # spotlight card, and transfer OUT->IN card all render correctly after the fix;
+                          # full existing test suite re-run, all prior patch tests pass except
+                          # test_patch34_impact_check.py, the same pre-existing, already-flagged failure
+                          # noted in every patch entry since Patch 55 (unrelated); new regression test
+                          # (test_release2_visual_redesign.py, 8 checks: CSS validity, palette/font swap
+                          # completeness, new component classes present, pitch markings present, new logo
+                          # present and old crest gone, no leftover illegible dark-on-dark text colors,
+                          # armband/arrow colors correct) added to the standing suite. PATCH_VERSION bumped
+                          # to "Patch 61 (Release 2)" so this is visible in the app's own version stamp
+                          # (Patch 38's own disclosure mechanism), per the manager's own naming for this
+                          # milestone.
+                          # NOTE (2026-09-21): rb_model_app_patch61.zip is CUMULATIVE: Patch 29 through 61
+                          # ("Release 2") together, on top of the manager's Patch 28 baseline.
+                          # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
+                          # using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

@@ -31,16 +31,20 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 60"
+PATCH_VERSION = "Patch 61 (Release 2)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
-# Crest mark (Patch 2) — replaces the pawn icon everywhere it appeared inline
-# in the brand wordmark. A small geometric badge rather than an emoji glyph.
-_CREST_SVG = ('<svg viewBox="0 0 100 100" width="26" height="26" style="flex:none;">'
-              '<polygon points="50,4 90,26 90,68 50,96 10,68 10,26" fill="none" stroke="#0E3D26" stroke-width="6"/>'
-              '<polygon points="50,22 74,36 74,64 50,80 26,64 26,36" fill="#1F6D45"/>'
-              '<circle cx="50" cy="50" r="9" fill="#F5F6F0"/></svg>')
+# Crest mark — "Monogram + Dot" (Release 2, replacing the Patch 2 chess-
+# pawn-style crest as part of the manager-directed theme/logo overhaul): a
+# rounded dark badge, a bold cyan "R" (the primary everyday signal color),
+# and a small coral dot standing in for the differential/captaincy signal —
+# the two-color language the rest of the redesigned app now uses throughout.
+_CREST_SVG = ('<svg viewBox="0 0 100 100" width="28" height="28" style="flex:none;">'
+              '<rect x="4" y="4" width="92" height="92" rx="24" fill="#18181B" stroke="#2A2A2E" stroke-width="3"/>'
+              '<text x="42" y="70" font-family="\'Space Grotesk\',sans-serif" font-weight="700" '
+              'font-size="58" fill="#2FD1D9" text-anchor="middle">R</text>'
+              '<circle cx="76" cy="76" r="10" fill="#FF5A5F"/></svg>')
 
 # ---------------------------------------------------------------------------
 # Style — a considered, precise identity (terse micro-copy, restraint, one
@@ -49,26 +53,51 @@ _CREST_SVG = ('<svg viewBox="0 0 100 100" width="26" height="26" style="flex:non
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700;9..144,900&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
+/* ---------------------------------------------------------------------
+   Release 2 (2026-09-21, manager: "the theme and the logo and maybe the
+   model name and layout needs a real change directed more to visuals" —
+   then, after several rounds of mockups, "before patching it ... act as a
+   professional designer ... visualize your recommendation", and finally
+   "start patching the new visuals as Release 2"). This is the app-wide
+   build-out of that locked design system: theme "Signal/Differential"
+   (near-black canvas, cyan as the primary everyday signal color, coral
+   reserved exclusively for the captaincy spotlight + alerts), the
+   "Monogram + Dot" logo, a redesigned pitch with real CSS-drawn markings,
+   and new visual captaincy/transfer components (replacing the old plain-
+   text captions). Because almost every component below already read its
+   colors from these CSS custom properties instead of hardcoding hex
+   values, retinting :root here re-skins the overwhelming majority of the
+   app automatically — component-level rules mostly only needed a font
+   swap (Fraunces -> Space Grotesk, this design phase's locked headline
+   face) and a few dark-mode-specific tweaks (shadow depth, avatar-
+   fallback gradient, etc.), not a rewrite. Class names are kept stable on
+   purpose so no Python markup-generation code needed to change to pick
+   up the new look.
+   --------------------------------------------------------------------- */
 :root{
-  --bg:#F5F6F0; --surface:#FFFFFF; --surface-2:#EDF0E7;
-  --ink:#16211B; --ink-muted:#4B564E; --ink-faint:#8B9686;
-  --rule:#DBE1D3; --accent:#1F6D45; --accent-strong:#12492E; --accent-tint:#E4EFE6;
-  --gold:#B8842A; --gold-tint:#F6ECD9;
-  --blue:#2E6E93; --blue-tint:#E1EDF3;
-  --coral:#C1502E; --coral-tint:#F7E3DA;
-  --warn:#B23B1E; --bench:#EFF1E9;
-  --fdr-easy:#375A2E; --fdr-mid:#B8842A; --fdr-hard:#B23B1E;
-  --shadow:0 1px 2px rgba(20,30,22,.07), 0 8px 22px -12px rgba(20,30,22,.24);
+  --bg:#111113; --surface:#18181B; --surface-2:#1E1E22;
+  --ink:#F5F5F6; --ink-muted:#A8A8AF; --ink-faint:#6E6E76;
+  --rule:#2A2A2E; --accent:#2FD1D9; --accent-strong:#5FE1E7; --accent-tint:#132C2E;
+  --gold:#E8A93D; --gold-tint:#2E2313;
+  --blue:#4FA8D8; --blue-tint:#132430;
+  --coral:#FF5A5F; --coral-tint:#2A1717;
+  --warn:#FF5A5F; --bench:#141416;
+  --fdr-easy:#3FE0A0; --fdr-mid:#E8A93D; --fdr-hard:#FF5A5F;
+  --shadow:0 1px 2px rgba(0,0,0,.45), 0 10px 26px -14px rgba(0,0,0,.7);
+  /* Release 2 — position-tag-only neutral accent (FWD label), kept
+     separate from --coral now that coral is reserved for captaincy +
+     alerts and shouldn't double as a fourth position color. */
+  --violet:#B39CFF;
 }
 html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--ink); }
 .mono{ font-family:"IBM Plex Mono",monospace; }
 .stApp{ background:var(--bg); }
 
 .brand-row{ display:flex; align-items:center; gap:8px; }
-.brand-mark{ font-family:"Fraunces"; font-weight:900; font-size:2rem; line-height:1; margin-bottom:2px; }
-.brand-mark .b2{ color:var(--accent-strong); }
+.brand-mark{ font-family:"Space Grotesk"; font-weight:700; font-size:2rem; line-height:1; margin-bottom:2px; }
+.brand-mark .b2{ color:var(--accent); }
 .brand-tag{ font-family:"IBM Plex Mono"; font-size:10.5px; color:var(--ink-faint); letter-spacing:.06em; text-transform:uppercase; }
 
 .verdict-card{
@@ -77,7 +106,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   box-shadow:var(--shadow); padding:18px 20px; margin-bottom:6px;
 }
 .verdict-card .phase-tag{ font-family:"IBM Plex Mono"; font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--accent); margin-bottom:4px; display:block; }
-.verdict-card .h{ font-family:"Fraunces"; font-weight:800; font-size:1.35rem; margin:0 0 6px; color:var(--accent-strong); }
+.verdict-card .h{ font-family:"Space Grotesk"; font-weight:700; font-size:1.35rem; margin:0 0 6px; color:var(--accent-strong); }
 .verdict-card .b{ margin:0; color:var(--ink-muted); font-size:.94rem; font-style:italic; }
 
 .stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:nowrap; align-items:flex-start; overflow-x:auto; }
@@ -94,7 +123,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   align-items:center; justify-content:center; cursor:help; flex:none; }
 .rating-basis{ font-family:"IBM Plex Sans"; font-size:10px; color:var(--ink-faint); margin-top:3px; max-width:150px; line-height:1.3; }
 
-.section-h{ font-family:"Fraunces"; font-weight:700; font-size:1.15rem; margin:30px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule); }
+.section-h{ font-family:"Space Grotesk"; font-weight:700; font-size:1.15rem; margin:30px 0 14px; padding-bottom:8px; border-bottom:1px solid var(--rule); }
 
 .chip-rack{ display:flex; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
 .chip{ display:flex; align-items:center; gap:7px; background:var(--surface); border:1px solid var(--rule);
@@ -106,18 +135,35 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .chip.used{ color:var(--ink-faint); }
 .chip.used .name{ text-decoration:line-through; }
 
-.pitch{ background:linear-gradient(180deg, var(--accent-tint), var(--surface-2) 70%);
-  border:1px solid var(--rule); padding:22px 14px 10px; }
+/* Release 2 — real pitch markings (halfway line, center circle, two penalty
+   boxes) drawn entirely in CSS via layered gradients/borders on ::before,
+   plus a subtle grass-stripe backdrop, replacing the old flat single-tint
+   rectangle. No image asset, still zero-cost. */
+.pitch{ position:relative; z-index:0; overflow:hidden;
+  background:repeating-linear-gradient(180deg, #132A24 0px, #132A24 44px, #0F231E 44px, #0F231E 88px);
+  border:1px solid var(--rule); border-radius:10px; padding:26px 14px 10px; }
+.pitch::before{ content:""; position:absolute; inset:14px; pointer-events:none; z-index:-1;
+  border:1.5px solid rgba(95,225,231,.22); border-radius:4px;
+  background:
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) center / 100% 1.5px no-repeat,
+    radial-gradient(circle at center, transparent 34px, transparent 35.5px, rgba(95,225,231,.22) 35.5px, rgba(95,225,231,.22) 37px, transparent 37px) center / 96px 96px no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top / 46% 1.5px no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top 0 right 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom / 46% 1.5px no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom 0 right 27% / 1.5px 15% no-repeat;
+}
 .prow{ display:flex; justify-content:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
 
 /* Patch 4 — card redesign: tighter top-cropped photo in a team-color ring,
    name-first info hierarchy (name -> compact pos+opponent meta line -> xPts
    as the dominant stat with price as a quiet footnote), replacing the old
    five-equal-weight stacked-line layout. */
-.card{ background:var(--surface); border:1px solid var(--rule); box-shadow:var(--shadow);
+.card{ background:var(--surface); border:1px solid var(--rule); box-shadow:var(--shadow); border-radius:10px;
   width:clamp(64px, 15vw, 112px); padding:10px 8px 9px; text-align:center; position:relative; }
 .card .cap{ position:absolute; top:-9px; right:-9px; width:20px; height:20px; border-radius:50%;
-  background:var(--gold); color:#241A05; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700;
+  background:var(--coral); color:#2A0C0D; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700;
   display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow); z-index:2; }
 .card .cap-actual{ position:absolute; bottom:-8px; right:-8px; width:16px; height:16px; border-radius:50%;
   background:var(--surface); border:2px solid var(--ink-faint); color:var(--ink-muted); font-family:"IBM Plex Mono";
@@ -129,13 +175,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .photo-ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
   display:block; border:2px solid var(--surface); }
 .photo-ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%;
-  background:linear-gradient(160deg, var(--team,var(--accent)), #12492E); color:#fff; font-family:"Fraunces";
+  background:linear-gradient(160deg, var(--team,var(--accent)), #0B2C2E); color:#fff; font-family:"Space Grotesk";
   font-weight:700; font-size:13px; align-items:center; justify-content:center; border:2px solid var(--surface); }
 .card .name{ font-weight:700; font-size:12.5px; margin-bottom:2px; }
 .card .meta{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-muted); margin-bottom:6px; }
 .card .meta .pos{ font-weight:700; }
 .card .meta .pos.gk{ color:var(--gold); } .card .meta .pos.def{ color:var(--blue); }
-.card .meta .pos.mid{ color:var(--accent-strong); } .card .meta .pos.fwd{ color:var(--coral); }
+.card .meta .pos.mid{ color:var(--accent-strong); } .card .meta .pos.fwd{ color:var(--violet); }
 .card .ticker{ display:flex; justify-content:center; gap:3px; margin-bottom:6px; }
 .card .fdr-dot{ width:7px; height:7px; border-radius:50%; cursor:help; flex:none; }
 .card .fdr-dot.easy{ background:var(--fdr-easy); } .card .fdr-dot.mid{ background:var(--fdr-mid); }
@@ -144,7 +190,8 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .card .xp{ font-family:"IBM Plex Mono"; font-size:14px; font-weight:700; color:var(--accent-strong); }
 .card .xp-l{ font-family:"IBM Plex Mono"; font-size:7px; color:var(--ink-faint); text-transform:uppercase; display:block; margin-top:-2px; }
 .card .price{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-faint); }
-.bench-strip{ background:var(--bench); margin:0 -14px; padding:12px 14px 4px; border-top:1px dashed var(--rule); }
+.bench-strip{ position:relative; z-index:1; background:var(--bench); margin:0 -14px; padding:12px 14px 4px;
+  border-top:1px dashed var(--rule); border-radius:0 0 10px 10px; }
 .bench-strip .card{ opacity:.68; width:clamp(56px, 13vw, 96px); }
 .side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
 
@@ -162,7 +209,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .signal-card .top{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; }
 .signal-card .name{ font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700; text-transform:uppercase;
   letter-spacing:.04em; color:var(--ink-muted); }
-.signal-card .stat{ font-family:"Fraunces"; font-weight:800; font-size:1.4rem; color:var(--accent-strong); line-height:1; }
+.signal-card .stat{ font-family:"Space Grotesk"; font-weight:700; font-size:1.4rem; color:var(--accent-strong); line-height:1; }
 .signal-card .sub{ font-size:10.5px; color:var(--ink-faint); margin-top:4px; }
 .signal-card .note{ font-size:11px; font-weight:700; margin-top:8px; padding-top:8px; border-top:1px dashed var(--rule); }
 .signal-card .note.good{ color:var(--accent-strong); }
@@ -170,7 +217,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .badge{ font-family:"IBM Plex Mono"; font-size:9px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
   padding:2px 7px; border-radius:20px; display:inline-block; white-space:nowrap; }
 .badge.play{ background:var(--accent-tint); color:var(--accent-strong); }
-.badge.active{ background:var(--gold-tint); color:#7A5A16; }
+.badge.active{ background:var(--gold-tint); color:#F2C879; }
 .badge.hold{ background:var(--surface-2); color:var(--ink-faint); }
 .badge.caution{ background:var(--coral-tint); color:var(--coral); }
 .badge.used{ background:var(--surface-2); color:var(--ink-faint); }
@@ -191,7 +238,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--surface-2); border:1px solid var(--rule);
   color:var(--ink-muted); font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px;
   cursor:help; white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
-.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#5C4212; }
+.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#F2C879; }
 
 /* Team Rating % radial gauge (Patch 31) — conic-gradient ring, no SVG/JS
    library needed. Percentage is still the same number the tooltip/expander
@@ -229,7 +276,7 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   padding:1px 5px; border-radius:10px; margin-left:4px; white-space:nowrap; display:inline-block;
   vertical-align:middle; cursor:help; }
 .xm-badge.nailed{ background:var(--accent-tint); color:var(--accent-strong); }
-.xm-badge.rotation{ background:var(--gold-tint); color:#7A5A16; }
+.xm-badge.rotation{ background:var(--gold-tint); color:#F2C879; }
 .xm-badge.risk{ background:var(--coral-tint); color:var(--coral); }
 
 /* Patch 33 — post-transfer preview, promoted out of the "Why" expander to
@@ -239,18 +286,93 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   border-left:3px solid var(--accent); padding:7px 12px; margin:2px 0 10px 0; }
 .tx-preview b{ color:var(--accent-strong); }
 
-/* Patch 4 — captaincy-on-pitch caption, replacing the old standalone
-   "Captaincy Pick" metric section entirely. */
-.cap-caption{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--gold);
-  box-shadow:var(--shadow); padding:9px 14px; margin-top:10px; }
+/* Patch 4 — captaincy-on-pitch caption. Kept as a fallback text style (still
+   used for the disclosed team-stability tiebreak footnote alongside the new
+   spotlight card below) — Release 2 recolors its accent bar to coral, since
+   captaincy is now coral's one reserved everyday use. */
+.cap-caption{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--coral);
+  box-shadow:var(--shadow); padding:9px 14px; margin-top:10px; border-radius:0 6px 6px 0; }
 .cap-caption b{ color:var(--accent-strong); }
 
-/* Patch 5 — Transfer Recommendations simplification: the primary display is
-   now just the recommendation sentence(s), styled the same as the
-   captaincy caption for visual consistency; the old rule-citation trace and
-   raw move table moved into an on-demand expander. */
+/* Patch 5 — Transfer Recommendations simplification. Kept as the style used
+   by the "Evaluate your own scenario" section's own manager-directed what-
+   ifs (target/Wildcard/Free Hit) — the main recommendation now uses the new
+   .tx-card OUT->IN component below instead. */
 .tx-reco{ font-size:13.5px; color:var(--ink); background:var(--surface); border-left:3px solid var(--accent-strong);
-  box-shadow:var(--shadow); padding:9px 14px; margin-top:6px; margin-bottom:6px; }
+  box-shadow:var(--shadow); padding:9px 14px; margin-top:6px; margin-bottom:6px; border-radius:0 6px 6px 0; }
+
+/* ---------------------------------------------------------------------
+   Release 2 — Captaincy spotlight card. Replaces the plain-text armband
+   caption as the PRIMARY captaincy display (the caption above still
+   carries the team-stability-tiebreak footnote when one applies, appended
+   directly under the card, so nothing the old text version disclosed is
+   dropped — only reorganized). Coral throughout, since this is coral's one
+   reserved everyday role. Photo reuses the exact same crop the pitch cards
+   already use (`_photo_url`), just re-ringed in coral instead of team
+   color, to make the armband pick visually unmistakable at a glance.
+   --------------------------------------------------------------------- */
+.cap-spotlight{ background:linear-gradient(160deg, var(--coral-tint), var(--surface) 65%);
+  border:1px solid var(--rule); border-left:4px solid var(--coral); border-radius:10px;
+  box-shadow:var(--shadow); padding:14px 16px; margin-top:10px; }
+.cap-spotlight .row{ display:flex; align-items:center; gap:11px; }
+.cap-spotlight .ring{ width:44px; height:44px; border-radius:50%; padding:2px; flex:none; background:var(--coral); position:relative; }
+.cap-spotlight .ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
+  display:block; border:2px solid var(--surface); }
+.cap-spotlight .ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%; display:none;
+  align-items:center; justify-content:center; background:linear-gradient(160deg, var(--coral), #5A1A1C);
+  color:#fff; font-family:"Space Grotesk"; font-weight:700; font-size:14px; border:2px solid var(--surface); }
+.cap-spotlight .name{ font-family:"Space Grotesk"; font-weight:700; font-size:.95rem; color:var(--ink); }
+.cap-spotlight .meta{ font-family:"IBM Plex Mono"; font-size:9.5px; color:var(--ink-faint); margin-top:1px; }
+.cap-spotlight .tag{ font-family:"IBM Plex Mono"; font-size:9px; text-transform:uppercase; letter-spacing:.05em;
+  color:var(--coral); font-weight:700; margin-bottom:2px; display:block; }
+.cap-spotlight .xp-row{ display:flex; align-items:baseline; gap:6px; margin-top:10px; }
+.cap-spotlight .xp{ font-family:"IBM Plex Mono"; font-weight:700; font-size:1.5rem; color:var(--coral); line-height:1; }
+.cap-spotlight .xp-u{ font-family:"IBM Plex Mono"; font-size:10px; color:var(--ink-faint); }
+.cap-spotlight .bar-track{ height:6px; background:var(--surface-2); border-radius:3px; margin-top:8px; overflow:hidden; }
+.cap-spotlight .bar-fill{ height:100%; border-radius:3px; background:var(--coral); }
+.cap-spotlight .eo-row{ display:flex; justify-content:space-between; font-family:"IBM Plex Mono"; font-size:10px;
+  color:var(--ink-faint); margin-top:5px; }
+.cap-spotlight .alt-sub{ margin-top:11px; padding-top:10px; border-top:1px dashed var(--rule);
+  font-size:12px; color:var(--ink-muted); }
+.cap-spotlight .alt-sub b{ color:var(--ink); }
+
+/* ---------------------------------------------------------------------
+   Release 2 — Transfer OUT->IN card. Replaces the plain-text main
+   recommendation sentence with an OUT->IN photo card, an arrow, a net-xPts
+   number, and a FREE/hit-cost pill. The rule-citation trace/raw move table
+   stay exactly where they were (the "Why" expander) — this only replaces
+   the always-visible summary line, and every field it shows (out/in
+   player, position, net xPts, hit cost) was already disclosed in that
+   text, just reorganized visually, not reduced. Cyan throughout — this is
+   an everyday signal, not a captaincy/alert use.
+   --------------------------------------------------------------------- */
+.tx-card{ background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+  box-shadow:var(--shadow); padding:12px 15px; margin-top:6px; margin-bottom:10px; }
+.tx-card .top{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.tx-card .tag{ font-family:"IBM Plex Mono"; font-size:9.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); }
+.tx-card .hit-pill{ font-family:"IBM Plex Mono"; font-size:9.5px; font-weight:700; padding:2px 8px; border-radius:20px; }
+.tx-card .hit-pill.free{ background:var(--accent-tint); color:var(--accent-strong); }
+.tx-card .hit-pill.hit{ background:var(--coral-tint); color:var(--coral); }
+.tx-swap{ display:flex; align-items:center; gap:10px; }
+.tx-player{ flex:1; display:flex; flex-direction:column; align-items:center; text-align:center; min-width:0; }
+.tx-player .ring{ width:38px; height:38px; border-radius:50%; padding:2px; margin-bottom:5px; flex:none; position:relative; }
+.tx-player.out .ring{ background:var(--rule); }
+.tx-player.in .ring{ background:var(--accent); }
+.tx-player .ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
+  display:block; border:2px solid var(--surface); }
+.tx-player .ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%; display:none;
+  align-items:center; justify-content:center; color:#fff; font-family:"Space Grotesk"; font-weight:700;
+  font-size:12px; border:2px solid var(--surface); }
+.tx-player.out .ring .avatar-fallback{ background:linear-gradient(160deg, var(--ink-faint), #3A3A40); }
+.tx-player.in .ring .avatar-fallback{ background:linear-gradient(160deg, var(--accent), #0B2C2E); }
+.tx-player .pname{ font-family:"Space Grotesk"; font-weight:600; font-size:.78rem; color:var(--ink); white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; max-width:100%; }
+.tx-player .pmeta{ font-family:"IBM Plex Mono"; font-size:8px; color:var(--ink-faint); }
+.tx-arrow{ flex:none; display:flex; flex-direction:column; align-items:center; gap:3px; }
+.tx-arrow svg{ display:block; }
+.tx-net{ font-family:"IBM Plex Mono"; font-weight:700; font-size:.9rem; white-space:nowrap; color:var(--accent); }
+.tx-net.neg{ color:var(--coral); }
+.tx-net-l{ font-family:"IBM Plex Mono"; font-size:7px; color:var(--ink-faint); text-transform:uppercase; }
 
 /* Patch 2 — mobile simplification: at narrow widths the card drops the price
    line entirely (least-needed info at this size — still visible in the GW
@@ -270,6 +392,9 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   .card .cap-actual{ width:13px; height:13px; font-size:7px; }
   .card .fdr-dot{ width:6px; height:6px; }
   .prow{ gap:6px; }
+  .cap-spotlight .xp{ font-size:1.25rem; }
+  .tx-player .pname{ font-size:.7rem; }
+  .tx-net{ font-size:.8rem; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -2473,11 +2598,38 @@ def _render_pitch_navigator():
                     'table below.</p>', unsafe_allow_html=True)
     st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season '
                 'minutes accrue.</p>', unsafe_allow_html=True)
-    if at_planning_gw and cap_caption:
-        # Patch 4 — captaincy-on-pitch caption, only meaningful at
-        # planning_gw where the real captaincy protocol (not the simple
-        # top-scorer armband) actually ran.
-        st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
+    if at_planning_gw and cap_caption and cap_pick_row is not None:
+        # Release 2 — captaincy spotlight card, replacing the plain-text
+        # armband caption as the primary display (only meaningful at
+        # planning_gw where the real captaincy protocol, not the simple
+        # top-scorer armband, actually ran). Every field the old text
+        # caption disclosed is kept below the card verbatim — this adds a
+        # visual header, it doesn't remove anything.
+        _cap_alt_xp = cap_alt_row.get("xpts_this_gw") if cap_alt_row is not None else None
+        if _cap_alt_xp and _cap_alt_xp > 0:
+            _cap_bar_pct = max(40, min(100, round(cap_xp / _cap_alt_xp * 100)))
+            _cap_bar_note = "xPts vs. nearest alternative"
+        else:
+            _cap_bar_pct = 100
+            _cap_bar_note = "xPts this week"
+        _cap_eo = cap_pick_row.get("selected_by_percent")
+        _cap_eo_txt = f"{_cap_eo:.1f}% EO" if _cap_eo is not None and not pd.isna(_cap_eo) else "EO unavailable"
+        _cap_photo = _photo_url(cap_pick_row.get("code", 0))
+        _cap_initials = "".join([w[0] for w in str(cap_pick_row.get("web_name", "??")).split()][:2]).upper() or "??"
+        st.markdown(
+            '<div class="cap-spotlight"><div class="row">'
+            '<div class="ring"><img src="' + _cap_photo + '" '
+            'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
+            '<div class="avatar-fallback">' + _cap_initials + '</div></div>'
+            '<div><span class="tag">Captaincy</span>'
+            '<div class="name">' + str(cap_pick_row.get('web_name', '')) + '</div>'
+            '<div class="meta">' + str(cap_pick_row.get('team', '')) + '</div></div></div>'
+            '<div class="xp-row"><div class="xp">' + f"{cap_xp:.1f}" + '</div>'
+            '<div class="xp-u">xPts · captain (doubled)</div></div>'
+            '<div class="bar-track"><div class="bar-fill" style="width:' + str(_cap_bar_pct) + '%"></div></div>'
+            '<div class="eo-row"><span>' + _cap_eo_txt + '</span><span>' + _cap_bar_note + '</span></div>'
+            '<div class="alt-sub">' + cap_caption + '</div>'
+            '</div>', unsafe_allow_html=True)
 
 
 # Patch 60 — compute the manager's own scenario (if "Evaluate scenario" was
@@ -2565,6 +2717,44 @@ if rec.get("is_weekly_schedule"):
 # Fixed the same way as Patch 57's other blocks: short headline + full text
 # on hover — every other summary line (the actual move recommendation)
 # renders exactly as before, unabridged.
+# Release 2 — Transfer OUT->IN visual card(s), one per actual player move in
+# rec["moves"] (manager: "the ... transfer recommendation to be visuals not
+# written"). Added ABOVE the existing text summary rather than replacing it
+# — every field shown here (out/in player, position, net xPts, hit cost) is
+# already in that text too, so nothing is hidden or lost, this is purely an
+# additional at-a-glance view. "No move" weeks (Roll) have no entries in
+# rec["moves"] and so render no card here, same as before.
+if not rec.get("is_weekly_schedule") and rec.get("moves"):
+    for _mv in rec["moves"]:
+        _mv_out_initials = "".join([w[0] for w in str(_mv.get("out", "??")).split()][:2]).upper() or "??"
+        _mv_in_initials = "".join([w[0] for w in str(_mv.get("in", "??")).split()][:2]).upper() or "??"
+        _mv_hit = _mv.get("hit_cost", 0) or 0
+        _mv_hit_html = '<span class="hit-pill free">FREE</span>' if not _mv_hit else \
+            f'<span class="hit-pill hit">-{_mv_hit} pts</span>'
+        _mv_net = _mv.get("net_gain", 0) or 0
+        _mv_net_cls = "" if _mv_net >= 0 else " neg"
+        _mv_gw_tag = f"GW{_mv['gw']}" if _mv.get("gw") is not None else f"GW{planning_gw}"
+        st.markdown(
+            '<div class="tx-card"><div class="top"><span class="tag">' + _mv_gw_tag +
+            ' · ' + str(_mv.get('position', '')) + '</span>' + _mv_hit_html + '</div>'
+            '<div class="tx-swap">'
+            '<div class="tx-player out"><div class="ring"><img src="' + _photo_url(_mv.get('out_code', 0)) + '" '
+            'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
+            '<div class="avatar-fallback">' + _mv_out_initials + '</div></div>'
+            '<div class="pname">' + str(_mv.get('out', '')) + '</div>'
+            '<div class="pmeta">' + str(_mv.get('out_team', '')) + '</div></div>'
+            '<div class="tx-arrow">'
+            '<svg width="22" height="14" viewBox="0 0 28 18"><path d="M0 9 H24 M17 2 L24 9 L17 16" '
+            'stroke="var(--accent)" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+            '<div class="tx-net' + _mv_net_cls + '">' + f"{_mv_net:+.1f}" + '</div>'
+            '<div class="tx-net-l">net xPts</div></div>'
+            '<div class="tx-player in"><div class="ring"><img src="' + _photo_url(_mv.get('in_code', 0)) + '" '
+            'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
+            '<div class="avatar-fallback">' + _mv_in_initials + '</div></div>'
+            '<div class="pname">' + str(_mv.get('in', '')) + '</div>'
+            '<div class="pmeta">' + str(_mv.get('in_team', '')) + '</div></div>'
+            '</div></div>', unsafe_allow_html=True)
+
 _CHIP_CONTEXT_RE = re.compile(r"^(GW\d+): Chip context — (.+)$")
 if rec.get("summary"):
     for line in rec["summary"]:
