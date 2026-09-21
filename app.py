@@ -31,7 +31,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 58"
+PATCH_VERSION = "Patch 59"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -2493,6 +2493,22 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                 st.session_state["scenario_squad_wc"] = styled_squad
                 st.session_state["scenario_label_wc"] = f"GW{wc_gw_choice}"
                 st.session_state["scenario_gw_list_wc"] = future_gw_list
+                # Patch 59 (manager: "the scenarios still not appearing on
+                # the pitch navigator") — verified in code: this is a real
+                # Streamlit script-order effect, not the option failing to
+                # register. The Pitch Navigator (app.py ~line 2201) runs
+                # BEFORE this section (~line 2400+) in top-to-bottom script
+                # order, so on THIS SAME rerun (the one processing this
+                # Evaluate click) the navigator already rendered using the
+                # session_state as it stood BEFORE this scenario was stored
+                # — it only becomes selectable on the NEXT rerun (any click
+                # anywhere on the page, e.g. a navigator arrow). Disclosed
+                # explicitly here rather than left silent; a same-rerun fix
+                # (restructuring the display to persist across reruns
+                # instead of being gated behind the button click) is a
+                # larger, separate change, not folded into this patch.
+                st.caption("📍 Now available in the Pitch Navigator above — click any navigator control "
+                           "(◀/▶ or the Squad toggle) once to load it there.")
 
                 xi_result = opt.best_starting_xi(styled_squad, wc_gw_col) if wc_gw_col in styled_squad.columns \
                     else None
@@ -2574,6 +2590,13 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                     st.session_state["scenario_squad_fh"] = fh_squad
                     st.session_state["scenario_label_fh"] = f"GW{fh_gw_choice}"
                     st.session_state["scenario_gw_list_fh"] = [fh_gw_choice]
+                    # Patch 59 — see the identical note on the Wildcard block
+                    # above: the Pitch Navigator renders earlier in the
+                    # script than this section, so this becomes selectable
+                    # there on the NEXT interaction, not instantly on this
+                    # same render.
+                    st.caption("📍 Now available in the Pitch Navigator above — click any navigator control "
+                               "(◀/▶ or the Squad toggle) once to load it there.")
                     fh_xi = fh_squad[fh_squad["code"].isin(fh_result["xi_codes"])]
                     fh_bench = fh_squad[~fh_squad["code"].isin(fh_result["xi_codes"])]
                     d, m, f = fh_result["shape"]

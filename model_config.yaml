@@ -1071,6 +1071,63 @@ meta:
                           # by this patch) -- not fixed here, outside scope.
                           # NOTE (2026-09-21): rb_model_app_patch58.zip is CUMULATIVE: Patch 29 through
                           # 58 together, on top of the manager's Patch 28 baseline.
+                          # ADDENDUM (2026-09-21, manager: "the manual override CSV i want it to remain
+                          # the same on any patch and i am the only one who updated it") -- every prior zip
+                          # (through the first Patch 58 delivery) bundled whatever manual_overrides.csv
+                          # happened to sit in this working copy, which is NOT synced with the manager's own
+                          # live-researched, deployed version -- unzipping a patch over their repo could
+                          # silently clobber their own edits. manual_overrides.csv is now PERMANENTLY
+                          # excluded from every future zip (same -x pattern already used for test files),
+                          # starting with a re-packaged Patch 58 delivered the same day.
+                          # manual_overrides_template.csv (the blank reference structure, not live data)
+                          # is unaffected and still included.
+                          # Patch 59 (2026-09-21, manager report: "only 2 benched players!!"). Two real bugs
+                          # found investigating the bench-count report, both in recommend._apply_eo_pull()
+                          # and its callers, reproduced directly against the real functions with synthetic
+                          # data (not guessed from shape):
+                          # (1) ROOT CAUSE: the substitute-candidate pool was only ever excluded by
+                          # `taken_in_codes | out_codes` -- never by `retained_codes` (squad members staying
+                          # untouched this batch). An eo_pull substitution for one leg could legally "steal"
+                          # an already-retained player's code as its own pick; that code then appeared in
+                          # BOTH the untouched `retained` slice and the substituted `in_rows` slice when the
+                          # final squad was reconstructed, and `drop_duplicates(subset="code")` silently
+                          # collapsed the collision into one row -- shrinking the squad below 15 with no
+                          # error and no warning (reproduced: 2 collisions -> a 13-man squad, 11 XI + 2 bench,
+                          # matching the report exactly). Fixed: _apply_eo_pull() takes a new `retained_codes`
+                          # parameter, added to the exclusion set alongside taken_in_codes/out_codes (and kept
+                          # in sync as legs are processed) -- a substitute can never collide with a player the
+                          # squad is already keeping. Updated all 3 call sites (apply_style_to_wildcard_
+                          # squad(), and both suggest_transfers() branches -- this was a systemic risk to
+                          # ordinary weekly transfer recommendations too, not just the Wildcard scenario
+                          # tool, exactly like Patch 56's club-cap gap was).
+                          # (2) A separate CRASH bug in Patch 56's own club-cap filter, found while isolating
+                          # (1): when `pos_pool` is already empty before `pos_pool["team"].map(...)` runs (a
+                          # normal case, nothing to do with club caps), pandas collapses the DataFrame to 0
+                          # COLUMNS, not just 0 rows (`.map()` on an empty Series returns an object-dtype
+                          # empty Series, and boolean-indexing an already-empty frame with an object-dtype
+                          # mask drops every column -- reproduced directly). The very next line then raised
+                          # `KeyError: 'xpts_horizon_sum'`. Fixed by only running the club-cap filter when
+                          # `pos_pool` still has rows; an empty pool now correctly falls through to the
+                          # existing "keep the original pick" path with no crash.
+                          # (3) Disclosed, not silently patched over: the Pitch Navigator (app.py) renders
+                          # BEFORE the "Evaluate your own scenario" section in script order, so a Wildcard/
+                          # Free Hit scenario evaluated this run only becomes selectable in the navigator on
+                          # the FOLLOWING interaction (any click), not instantly on the same render -- a real
+                          # Streamlit script-order effect, verified in code, not the Patch 58 wiring failing
+                          # to register. Added an explicit on-screen pointer under each scenario's results
+                          # ("Now available in the Pitch Navigator above -- click any navigator control once
+                          # to load it there") rather than leaving it silently confusing. A same-render fix
+                          # (persisting the scenario display across reruns instead of gating it behind the
+                          # button click) is a larger, separate restructuring, not folded into this patch.
+                          # Verified: new regression test (test_patch59_eo_pull_retained_collision.py, 3
+                          # tests) reproduces both bugs against the real functions and confirms both fixes;
+                          # full existing suite re-run, all prior patch tests pass except
+                          # test_patch34_impact_check.py, the same pre-existing, already-flagged failure noted
+                          # in every patch entry since Patch 55 (recommend.py's transfer-planner code
+                          # untouched by that specific gap) -- not fixed here, outside scope.
+                          # NOTE (2026-09-21): rb_model_app_patch59.zip is CUMULATIVE: Patch 29 through
+                          # 59 together, on top of the manager's Patch 28 baseline. manual_overrides.csv is
+                          # NOT included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
