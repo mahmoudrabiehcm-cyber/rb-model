@@ -1008,6 +1008,69 @@ meta:
                           # transfer-planner code untouched by this patch) -- not fixed here, outside scope.
                           # NOTE (2026-09-21): rb_model_app_patch57.zip is CUMULATIVE: Patch 29 through
                           # 57 together, on top of the manager's Patch 28 baseline.
+                          # Patch 58 (2026-09-21, manager report on 4 screenshots: "still needs to click on
+                          # Run model and nothing changed after the last patch!!!" -- combined with the
+                          # agreed, sequenced first half of the finalized requirements list). Four changes:
+                          # (1) Auto-run on Unlock -- requirements-list item #4. The "Unlock" gate screen
+                          # (app.py) previously only validated the team ID and set `unlocked`; the model
+                          # itself never ran until the separate sidebar "Run Model" click. Unlock's success
+                          # branch now also sets `has_run = True`, so the very next rerun already shows
+                          # full results with the sidebar's default style/hit-stance/horizon -- no extra
+                          # click. "Run Model" stays in the sidebar for re-running after changing a control.
+                          # Not a regression from Patch 56/57 -- this was simply next in the agreed sequence.
+                          # (2) Standing Rule #45 (Structural Drift Escalation Rule, v6.8) implemented, per
+                          # the manager-approved "disclosed proxy, no new storage" design: a new pill fires
+                          # whenever chip_protocol.wildcard_freehit_shape_test()'s classification is
+                          # "wildcard_shaped" (which, by that function's own definition, only happens when
+                          # overlap already sits at/below the structural ceiling across the WHOLE current
+                          # detection window in a single run) -- that within-run signal stands in for Rule
+                          # #45's literal "same number of consecutive weekly runs" condition, since this
+                          # zero-cost app has no cross-session persistence (confirmed, unchanged architecture
+                          # constraint) and the manager explicitly chose not to add new storage for this.
+                          # The pill's tooltip discloses it's a proxy, not verified week-over-week history.
+                          # Purely informational alongside HOLD -- never overrides the points-based Wildcard
+                          # trigger (wildcard_trigger_check(), untouched).
+                          # (3) Corrected an earlier (same-conversation) verification miss, caught while
+                          # investigating the manager's screenshot showing a large "GW6: Chip context --
+                          # Disruption check ...; Price-drop-flow override ...; Shape-test ..." block with
+                          # their own red annotation "no need for this explanation": this text is NOT a
+                          # _flag_pill() hover tooltip (that mechanism was checked and is a separate,
+                          # correctly-working code path) -- it's `chip_advisory`, appended into recommend.py's
+                          # `summary` list (~line 736-738 / ~1272-1274) and rendered by app.py as plain,
+                          # always-visible body text with no truncation and no tooltip. This was the actual
+                          # gap Patch 57's sweep missed, since Patch 57 only covered st.caption/st.markdown
+                          # blocks written directly in app.py, not text assembled upstream and passed through
+                          # rec["summary"]. Fixed the same way as every other Patch 57 block: detects the
+                          # "GW{n}: Chip context -- ..." line specifically (regex), shows a short "{n} factor(s)
+                          # noted" headline with the full original sentence unabridged in a hover title=
+                          # attribute (html-escaped); every OTHER summary line (the actual move recommendation)
+                          # renders exactly as before, byte-for-byte.
+                          # (4) Scenario team navigation across GWs for Wildcard/Free Hit, closing the rest of
+                          # the manager's report ("the team navigation should have an option to navigate the
+                          # new team evaluated scenario 'Player, Wildcard or FH'"): Patch 40 already wired the
+                          # single-PLAYER target scenario into the Pitch Navigator, via an out/in-code
+                          # reconstruction against the current squad -- but a Wildcard/Free Hit scenario is a
+                          # full rebuild with no "out/in legs," so that reconstruction never applied to either,
+                          # and neither ever appeared as a navigator option. The Wildcard what-if and Free Hit
+                          # optimal-squad blocks in "Evaluate your own scenario" now stash their already-built
+                          # squad DataFrame directly in session_state, each tagged with its own solved GW
+                          # window (Wildcard: its full 3+ GW horizon; Free Hit: the single GW it solved for,
+                          # per Rule #25) -- cleared if a later run comes back infeasible, same caution Patch 40
+                          # already used for the player scenario. The navigator's GW-arrow window now switches
+                          # to whichever scenario is selected, instead of always using the current squad's
+                          # window -- this is also where the manager's reported 4-Leeds bug scenario was found
+                          # (the Wildcard what-if block), already fixed at its root by Patch 56.
+                          # Verified: python -c "import ast; ast.parse(...)" passes on app.py. New unit tests
+                          # (test_patch58_chip_context_trim.py, test_patch58_drift_flag_and_scenario_nav.py)
+                          # mirror the exact inline logic added (regex/headline construction, Rule #45's
+                          # firing condition, the scenario-source dict and its GW-window resolution) since
+                          # this is Streamlit script code, not factored into standalone functions -- all pass.
+                          # Full existing regression suite re-run: all prior patch tests pass except
+                          # test_patch34_impact_check.py, the same pre-existing, already-flagged failure noted
+                          # in the Patch 55/56/57 entries above (recommend.py's transfer-planner code untouched
+                          # by this patch) -- not fixed here, outside scope.
+                          # NOTE (2026-09-21): rb_model_app_patch58.zip is CUMULATIVE: Patch 29 through
+                          # 58 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

@@ -9,6 +9,7 @@ Run locally:  streamlit run app.py
 """
 from __future__ import annotations
 import datetime as dt
+import html
 import re
 
 import pandas as pd
@@ -30,7 +31,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 57"
+PATCH_VERSION = "Patch 58"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -492,6 +493,16 @@ if not st.session_state.unlocked:
                 st.session_state.unlocked = True
                 st.session_state.team_id = int(entry_input.strip())
                 st.session_state.team_name = test_entry.get("name", "")
+                # Patch 58 (manager: "still needs to click on Run model") —
+                # requirements-list item 4. Previously Unlock only validated
+                # the team ID and set `unlocked`; the model itself never ran
+                # until the separate sidebar "Run Model ->" click (line ~578,
+                # gated on `has_run`). Setting `has_run` here too means the
+                # very next rerun (right after Unlock) already renders full
+                # results using the sidebar's default style/hit-stance/
+                # horizon, with no extra click. "Run Model ->" stays in the
+                # sidebar for re-running after changing a control.
+                st.session_state.has_run = True
                 st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
@@ -1634,6 +1645,29 @@ for note in chip_notes:
 if shape_test and shape_test["classification"] != "insufficient_data":
     for note in shape_test["notes"]:
         pill_items.append(_flag_pill(_shape_test_pill_headline(shape_test), note))
+# Patch 58 / Standing Rule #45 (v6.8, Structural Drift Escalation Rule) —
+# manager-approved implementation: the rule wants the shape-test's
+# "wildcard_shaped" pattern flagged when it persists across the SAME NUMBER
+# OF CONSECUTIVE WEEKLY RUNS as the detection window. This app has no
+# cross-session persistence (Step 2 — confirmed, no new storage added per
+# the manager's explicit choice), so genuine week-over-week tracking isn't
+# available. Disclosed proxy used instead (manager-approved): "wildcard_
+# shaped" is ITSELF only ever classified when overlap already sits at/below
+# the ceiling across the WHOLE current detection window in a single run
+# (chip_protocol.wildcard_freehit_shape_test(), the `all(v <= structural_
+# ceiling for v in overlaps)` check) — that single-run signal stands in for
+# the rule's multi-run one, clearly labeled as a proxy below, not verified
+# history. Informational only, alongside HOLD — never overrides the
+# points-based Wildcard verdict (wildcard_trigger_check()).
+if shape_test and shape_test["classification"] == "wildcard_shaped":
+    _drift_note = (
+        "Structural drift (Standing Rule #45, v6.8): the shape-test's persistent-gap pattern is present "
+        "across the whole current detection window this run. This app has no cross-session persistence, "
+        "so this is a disclosed single-run PROXY for Rule #45's 'same number of consecutive weekly runs "
+        "as the detection window' condition, not verified week-over-week history — re-check next run to "
+        "see if it repeats. Informational only, alongside HOLD — never an automatic override of the "
+        "points-based Wildcard verdict above.")
+    pill_items.append(_flag_pill("Structural drift flagged (Rule #45, proxy)", _drift_note))
 for note in disruption["notes"]:
     pill_items.append(_flag_pill(_disruption_pill_headline(note), note))
 if pill_items:
@@ -1974,13 +2008,37 @@ def _render_pitch_navigator():
                 if "code" in _nav_squad_scenario.columns:
                     _nav_squad_scenario = _nav_squad_scenario.drop_duplicates(subset=["code"], keep="first")
 
+    # Patch 58 (manager: "the team navigation should have an option to
+    # navigate the new team evaluated scenario 'Player, Wildcard or FH'") —
+    # the single-player target scenario above (`_nav_squad_scenario`) was
+    # already wired in by Patch 40, via an out/in-code reconstruction
+    # against the current squad. That reconstruction doesn't apply to a
+    # Wildcard/Free Hit scenario below — those are full rebuilds with no
+    # "out/in legs" against the current 15, just a whole new squad — so
+    # those two blocks (further down this script) stash their ALREADY-BUILT
+    # squad DataFrame directly in session_state instead, each tagged with
+    # its own solved GW window (a Wildcard what-if solves its own 3+ GW
+    # horizon; a Free Hit squad is single-GW only, Rule #25), so paging
+    # covers whatever GWs THAT scenario actually solved for.
+    _nav_scenario_sources = {}
+    if _nav_squad_scenario is not None:
+        _nav_scenario_sources[f"After evaluated scenario ({_scenario_label})"] = {
+            "squad": _nav_squad_scenario, "gw_list": None}
+    _wc_scen_squad = st.session_state.get("scenario_squad_wc")
+    if _wc_scen_squad is not None:
+        _nav_scenario_sources[f"Wildcard scenario ({st.session_state.get('scenario_label_wc', '')})"] = {
+            "squad": _wc_scen_squad, "gw_list": st.session_state.get("scenario_gw_list_wc")}
+    _fh_scen_squad = st.session_state.get("scenario_squad_fh")
+    if _fh_scen_squad is not None:
+        _nav_scenario_sources[f"Free Hit scenario ({st.session_state.get('scenario_label_fh', '')})"] = {
+            "squad": _fh_scen_squad, "gw_list": st.session_state.get("scenario_gw_list_fh")}
+
     _nav_options = ["Current squad"]
     _after_tx_label = ("After recommended transfer (this week's move)" if rec.get("is_weekly_schedule")
                         else "After recommended transfer")
     if _nav_can_toggle:
         _nav_options.append(_after_tx_label)
-    if _nav_squad_scenario is not None:
-        _nav_options.append(f"After evaluated scenario ({_scenario_label})")
+    _nav_options.extend(_nav_scenario_sources.keys())
 
     # Dynamic options (both the 2nd option's wording and the 3rd option's
     # label can change run to run) — a stale session_state value that no
@@ -1998,6 +2056,24 @@ def _render_pitch_navigator():
                              help=None if len(_nav_options) > 1 else
                              "No recommended transfer this run to preview for the current planning GW, "
                              "and no scenario evaluated below yet.")
+
+    # Patch 58 — a Wildcard/Free Hit scenario source (see _nav_scenario_
+    # sources above) can carry its OWN solved GW window, different from the
+    # default `_nav_gw_list` (current squad / recommended-transfer window):
+    # a Wildcard what-if solves a 3+ GW horizon starting at its own
+    # candidate GW, and a Free Hit squad only ever has one GW's projections
+    # (Rule #25). Falls back to the shared `_nav_gw_list` for "Current
+    # squad"/"After recommended transfer" and for the player-target scenario
+    # (which reuses the current squad's own window, gw_list=None above).
+    _active_src = _nav_scenario_sources.get(nav_mode)
+    _active_nav_gw_list = (_active_src["gw_list"] if _active_src and _active_src.get("gw_list") else None) \
+        or _nav_gw_list
+    if st.session_state.get("nav_active_gw_list") != _active_nav_gw_list:
+        st.session_state.nav_gw_idx = _active_nav_gw_list.index(planning_gw) if planning_gw in _active_nav_gw_list \
+            else 0
+        st.session_state.nav_active_gw_list = _active_nav_gw_list
+    st.session_state.nav_gw_idx = max(0, min(st.session_state.nav_gw_idx, len(_active_nav_gw_list) - 1))
+
     with nav_c2:
         pb1, pb2, pb3 = st.columns([1, 3, 1])
         with pb1:
@@ -2005,16 +2081,18 @@ def _render_pitch_navigator():
                 st.session_state.nav_gw_idx -= 1
         with pb2:
             st.markdown(f'<div style="text-align:center;font-weight:600;padding-top:0.4rem;">'
-                        f'GW{_nav_gw_list[st.session_state.nav_gw_idx]} '
-                        f'({st.session_state.nav_gw_idx + 1}/{len(_nav_gw_list)})</div>', unsafe_allow_html=True)
+                        f'GW{_active_nav_gw_list[st.session_state.nav_gw_idx]} '
+                        f'({st.session_state.nav_gw_idx + 1}/{len(_active_nav_gw_list)})</div>',
+                        unsafe_allow_html=True)
         with pb3:
-            if st.button("▶", key="nav_next", disabled=st.session_state.nav_gw_idx == len(_nav_gw_list) - 1):
+            if st.button("▶", key="nav_next",
+                         disabled=st.session_state.nav_gw_idx == len(_active_nav_gw_list) - 1):
                 st.session_state.nav_gw_idx += 1
 
-    nav_gw = _nav_gw_list[st.session_state.nav_gw_idx]
+    nav_gw = _active_nav_gw_list[st.session_state.nav_gw_idx]
     nav_col = f"xpts_gw{nav_gw}"
-    if nav_mode.startswith("After evaluated scenario") and _nav_squad_scenario is not None:
-        nav_squad = _nav_squad_scenario
+    if _active_src is not None:
+        nav_squad = _active_src["squad"]
     elif nav_mode.startswith("After recommended transfer") and _nav_squad_after is not None:
         nav_squad = _nav_squad_after
     else:
@@ -2183,9 +2261,32 @@ if rec.get("is_weekly_schedule"):
                     f"decision. Free-transfer accrual (+1/week, cap 5) is modeled explicitly below."
                     + (" Hits are allowed where a paid move still clears the stricter hit-cost bar."
                        if _hs_txt == "Hit if worth it" else ""))
+# Patch 58 (manager screenshot, red-annotated "no need for this
+# explanation") — correcting an earlier verification: this specific text
+# ("GW{n}: Chip context — Disruption check ...; Price-drop-flow override
+# ...; Shape-test ...") is NOT a `_flag_pill()` hover tooltip (that
+# mechanism was checked and is unrelated) — it's `chip_advisory`
+# (constructed above from disruption/shape-test notes) appended straight
+# into `rec["summary"]` by recommend.py (lines ~736-738 / ~1272-1274) and
+# rendered here as plain, always-visible body text with no truncation and
+# no tooltip. That's the actual gap Patch 57's sweep missed, since Patch 57
+# only covered `st.caption`/`st.markdown` blocks written directly in this
+# file, not text assembled upstream and passed through `rec["summary"]`.
+# Fixed the same way as Patch 57's other blocks: short headline + full text
+# on hover — every other summary line (the actual move recommendation)
+# renders exactly as before, unabridged.
+_CHIP_CONTEXT_RE = re.compile(r"^(GW\d+): Chip context — (.+)$")
 if rec.get("summary"):
     for line in rec["summary"]:
-        st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
+        m = _CHIP_CONTEXT_RE.match(line)
+        if m:
+            _gw_txt, _detail = m.group(1), m.group(2).rstrip(".")
+            _n_bits = _detail.count("; ") + 1
+            _plural = "s" if _n_bits != 1 else ""
+            st.markdown(f'<div class="tx-reco" title="{html.escape(line)}">🔗 {_gw_txt}: Chip context — '
+                        f'{_n_bits} factor{_plural} noted (hover for detail)</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
 else:
     st.info("No squad/pool data to plan against this run.")
 
@@ -2357,6 +2458,13 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
             if not wc_eval["feasible"]:
                 st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
                         f"reach that far yet).")
+                # Patch 58 — don't leave a stale Wildcard scenario in the
+                # navigator toggle if this run's evaluation came back
+                # infeasible (same caution as Patch 40's player-scenario
+                # cleanup below).
+                st.session_state.pop("scenario_squad_wc", None)
+                st.session_state.pop("scenario_label_wc", None)
+                st.session_state.pop("scenario_gw_list_wc", None)
             else:
                 gap = wc_eval["gap"]
                 st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
@@ -2372,6 +2480,19 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                     full_pool_future = full_pool_future.drop_duplicates(subset=["code"], keep="first")
                 styled_squad = recommend.apply_style_to_wildcard_squad(
                     future_squad_proj, wc_eval["rebuild_squad"], full_pool_future, style_name, cfg, wc_gw_col)
+
+                # Patch 58 (manager: "the team navigation should have an
+                # option to navigate the new team evaluated scenario
+                # 'Player, Wildcard or FH'") — stash the built squad AND its
+                # own solved GW window directly (not out/in codes — this is
+                # a full rebuild, there's no "out/in legs" against the
+                # current 15 the way the player-target scenario has), so the
+                # Pitch Navigator above can page through this Wildcard
+                # scenario's XI across its own GW{wc_gw_choice}-GW{end}
+                # window, the same way it already pages the real squad.
+                st.session_state["scenario_squad_wc"] = styled_squad
+                st.session_state["scenario_label_wc"] = f"GW{wc_gw_choice}"
+                st.session_state["scenario_gw_list_wc"] = future_gw_list
 
                 xi_result = opt.best_starting_xi(styled_squad, wc_gw_col) if wc_gw_col in styled_squad.columns \
                     else None
@@ -2428,6 +2549,9 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
             fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice])
             if fh_col not in fh_proj.columns:
                 st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
+                st.session_state.pop("scenario_squad_fh", None)
+                st.session_state.pop("scenario_label_fh", None)
+                st.session_state.pop("scenario_gw_list_fh", None)
             else:
                 fh_result = data_pipeline.solve_free_hit_optimal_squad(cfg, fh_proj, team_value, fh_gw_choice)
                 st.markdown(f"**Free Hit optimal squad — GW{fh_gw_choice}**")
@@ -2435,8 +2559,21 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                     st.info(f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
                             f"(projection data may not reach that far yet, or no feasible squad fit the "
                             f"budget/club constraints).")
+                    # Patch 58 — don't leave a stale Free Hit scenario in the
+                    # navigator toggle if this run's solve came back infeasible.
+                    st.session_state.pop("scenario_squad_fh", None)
+                    st.session_state.pop("scenario_label_fh", None)
+                    st.session_state.pop("scenario_gw_list_fh", None)
                 else:
                     fh_squad = fh_result["squad"]
+                    # Patch 58 — stash directly for the Pitch Navigator, same
+                    # pattern as the Wildcard block above. Single-GW only
+                    # (fh_proj only ever covers [fh_gw_choice]), which matches
+                    # a Free Hit's own single-week scope (Rule #25) exactly —
+                    # no artificial multi-GW window to fabricate here.
+                    st.session_state["scenario_squad_fh"] = fh_squad
+                    st.session_state["scenario_label_fh"] = f"GW{fh_gw_choice}"
+                    st.session_state["scenario_gw_list_fh"] = [fh_gw_choice]
                     fh_xi = fh_squad[fh_squad["code"].isin(fh_result["xi_codes"])]
                     fh_bench = fh_squad[~fh_squad["code"].isin(fh_result["xi_codes"])]
                     d, m, f = fh_result["shape"]
