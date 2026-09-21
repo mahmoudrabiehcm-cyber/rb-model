@@ -30,7 +30,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 55"
+PATCH_VERSION = "Patch 57"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1425,10 +1425,11 @@ with col2:
       <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
     </div>""", unsafe_allow_html=True)
     if not gw_final:
-        st.caption(f"⏳ GW{squad_gw} rank & points above are FPL's live provisional numbers — bonus points "
-                   f"haven't been finalized yet, so both can still shift (this matches the official app/site "
-                   f"during this same window, it isn't a bug in this tool). Use **Refresh live data** in the "
-                   f"sidebar to re-pull the latest provisional figures.")
+        st.caption(f"⏳ GW{squad_gw} rank & points are still provisional",
+                   help=f"GW{squad_gw} rank & points above are FPL's live provisional numbers — bonus points "
+                        f"haven't been finalized yet, so both can still shift (this matches the official app/site "
+                        f"during this same window, it isn't a bug in this tool). Use **Refresh live data** in the "
+                        f"sidebar to re-pull the latest provisional figures.")
 
 gw_status = "confirmed final" if getattr(snap, "current_gw_data_checked", False) else "provisional, not yet finalized"
 
@@ -1469,8 +1470,9 @@ st.markdown(f'<div class="side-note">Data as of <b>{_fetch_dt_utc.strftime("%b %
 fh_at_ceiling = fh_auto_optimal_val > 0 and fh_auto_gap < fh_auto_moe
 if fh_auto_rating["rating_pct"] is not None:
     if fh_at_ceiling:
-        st.caption(f"✓ Already at this GW's optimal — the {fh_auto_gap:.1f} xPts gap is inside normal weekly "
-                   f"noise (threshold {fh_auto_moe:.1f} xPts), not real room left on the table.")
+        st.caption("✓ Already at this GW's optimal",
+                   help=f"The {fh_auto_gap:.1f} xPts gap is inside normal weekly noise (threshold "
+                        f"{fh_auto_moe:.1f} xPts), not real room left on the table.")
     with st.expander(f"{fh_auto_label} — single-GW, EST — full breakdown"):
         st.markdown(tier_label)
         st.caption(f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
@@ -1501,9 +1503,9 @@ if fh_auto_rating["rating_pct"] is not None:
     # visually and textually separate — Patch 49 precedent.
     if compliant_rating["rating_pct"] is not None:
         if compliant_at_ceiling:
-            st.caption(f"✓ Already at the GW{compliant_gw_start}-{compliant_gw_end} full-pool optimal — the "
-                       f"{compliant_gap:.1f} xPts gap is inside normal weekly noise (threshold "
-                       f"{compliant_moe:.1f} xPts), not real room left on the table.")
+            st.caption(f"✓ Already at the GW{compliant_gw_start}-{compliant_gw_end} full-pool optimal",
+                       help=f"The {compliant_gap:.1f} xPts gap is inside normal weekly noise (threshold "
+                            f"{compliant_moe:.1f} xPts), not real room left on the table.")
         with st.expander(f"Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown"):
             st.markdown(tier_label)
             st.caption(f"GW{compliant_gw_start}-GW{compliant_gw_end} Squad_xPts (your current 15, best-XI-per-GW, "
@@ -2064,8 +2066,9 @@ def _render_pitch_navigator():
                        f"doc's §1a Team Rating % (that one needs a fixed 3-4 GW horizon) -- see the header's "
                        f"'Team Rating % (GW{compliant_gw_start}-{compliant_gw_end})' badge for that metric.")
     if not at_planning_gw:
-        st.caption("Projected for this GW only — Overall rank and Season points elsewhere on this page are "
-                   "your live actuals and don't change with navigation.")
+        st.caption("Projected for this GW only",
+                   help="Overall rank and Season points elsewhere on this page are your live actuals and "
+                        "don't change with navigation.")
 
     if nav_starters.empty:
         st.warning("No starting XI data for this GW.")
@@ -2174,10 +2177,12 @@ if transfer_error:
 # available on demand rather than shown by default.
 if rec.get("is_weekly_schedule"):
     _hs_txt = rec.get("hit_stance", "No hits")
-    st.caption(f"{_hs_txt} + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's move "
-               f"assumes every earlier week's suggested move already happened), not a single this-week decision. "
-               f"Free-transfer accrual (+1/week, cap 5) is modeled explicitly below."
-               + (" Hits are allowed where a paid move still clears the stricter hit-cost bar." if _hs_txt == "Hit if worth it" else ""))
+    st.caption(f"{_hs_txt} + {horizon}-GW chained pacing plan",
+               help=f"{_hs_txt} + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's "
+                    f"move assumes every earlier week's suggested move already happened), not a single this-week "
+                    f"decision. Free-transfer accrual (+1/week, cap 5) is modeled explicitly below."
+                    + (" Hits are allowed where a paid move still clears the stricter hit-cost bar."
+                       if _hs_txt == "Hit if worth it" else ""))
 if rec.get("summary"):
     for line in rec["summary"]:
         st.markdown(f'<div class="tx-reco">{line}</div>', unsafe_allow_html=True)
@@ -2216,12 +2221,15 @@ if not rec.get("is_weekly_schedule") and not _moves_df_preview.empty \
                     f'above are unaffected until you actually make the transfer and re-run.</div>',
                     unsafe_allow_html=True)
 
-st.caption(f"Two separate bars gate a transfer: a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar "
-           f"(is the gain worth spending a free transfer at all) and a **{rec.get('margin_of_error', 2.0):.1f} xPts** "
-           f"margin-of-error floor (is the gain distinguishable from this model's own known projection noise — "
-           f"Standing Rule #34, not adjustable via the sidebar slider). A move must clear BOTH to be recommended. "
-           f"xM badges above show each player's expected-minutes multiplier — already priced into their xPts, "
-           f"surfaced here so a rotation risk doesn't hide behind a good net number.")
+st.caption(f"Gated by a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar and a "
+           f"**{rec.get('margin_of_error', 2.0):.1f} xPts** margin-of-error floor — both must clear.",
+           help=f"Two separate bars gate a transfer: a **{rec['minimum_meaningful_gain_free']} xPts** materiality "
+                f"bar (is the gain worth spending a free transfer at all) and a "
+                f"**{rec.get('margin_of_error', 2.0):.1f} xPts** margin-of-error floor (is the gain distinguishable "
+                f"from this model's own known projection noise — Standing Rule #34, not adjustable via the sidebar "
+                f"slider). A move must clear BOTH to be recommended. xM badges above show each player's "
+                f"expected-minutes multiplier — already priced into their xPts, surfaced here so a rotation risk "
+                f"doesn't hide behind a good net number.")
 
 with st.expander("Why — full trace, rule references, and move-by-move detail"):
     st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
@@ -2450,11 +2458,12 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
                     fh_bench_show = fh_bench.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
                         .rename(columns=fh_col_rename)
                     st.dataframe(fh_bench_show, hide_index=True, use_container_width=True)
-                    st.caption(f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
-                               f"gameweek, per Rule #25) — this is the model's single best squad for that week, "
-                               f"not season-shaping, so no Style Profile differential pull is applied. Prices, "
-                               f"injuries and fixtures can move before GW{fh_gw_choice} — re-run this closer to "
-                               f"the date rather than treating it as locked in.")
+                    st.caption(f"Optimized for GW{fh_gw_choice} only — re-run closer to the date",
+                               help=f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
+                                    f"gameweek, per Rule #25) — this is the model's single best squad for that "
+                                    f"week, not season-shaping, so no Style Profile differential pull is applied. "
+                                    f"Prices, injuries and fixtures can move before GW{fh_gw_choice} — re-run "
+                                    f"this closer to the date rather than treating it as locked in.")
 
                     # Rating vs. FH optimal (2026-09-07 discussion) — same
                     # rating_gw_value() mechanic Patch 20 uses for the main
@@ -2522,10 +2531,11 @@ if cur_hist:
         ledger_rows.append({"GW": gw, "Move": move, "Points": r.get("points"), "Overall rank": rank_val})
     st.dataframe(pd.DataFrame(ledger_rows), hide_index=True, use_container_width=True)
     if not gw_final:
-        st.caption(f"GW{squad_gw}'s Points and Overall rank above are both live, provisional FPL figures "
-                   f"(rank uses the same corrected field as the header stat) — bonus points for this gameweek "
-                   f"aren't finalized yet, so both can still move. Past rows are each GW's own confirmed, "
-                   f"finalized value and won't change.")
+        st.caption(f"⏳ GW{squad_gw} row is still provisional",
+                   help=f"GW{squad_gw}'s Points and Overall rank above are both live, provisional FPL figures "
+                        f"(rank uses the same corrected field as the header stat) — bonus points for this "
+                        f"gameweek aren't finalized yet, so both can still move. Past rows are each GW's own "
+                        f"confirmed, finalized value and won't change.")
 else:
     st.caption("No season history yet — nothing finished before GW1.")
 
@@ -2533,6 +2543,7 @@ else:
 # Manager style fit
 # ---------------------------------------------------------------------------
 st.markdown('<div class="section-h">Manager Style Fit</div>', unsafe_allow_html=True)
-st.markdown(f"**{style_name}** — {style_profiles.get_profile(style_name)['description']} "
-            f"Ownership is never a reason on its own to prefer a pick — the EO weighting above only breaks ties "
-            f"once xPts is already close, and any differential still has to clear the pool-average floor on merit.")
+st.markdown(f"**{style_name}** — {style_profiles.get_profile(style_name)['description']}",
+            help="Ownership is never a reason on its own to prefer a pick — the EO weighting above only breaks "
+                 "ties once xPts is already close, and any differential still has to clear the pool-average "
+                 "floor on merit.")

@@ -928,6 +928,86 @@ meta:
                           # scope and root cause.
                           # NOTE (2026-09-17): rb_model_app_patch55.zip is CUMULATIVE: Patch 29 through
                           # 55 together, on top of the manager's Patch 28 baseline.
+                          # Patch 56 (2026-09-20, manager report + screenshot): a GW6 Wildcard "what-if"
+                          # scenario (Evaluate your own scenario -> candidate Wildcard GW) came back with 4
+                          # Leeds United players (Bogle, Bijol, Justin as DEF, Trafford at GK) -- a max-3-per-
+                          # club breach. Root cause (verified in code, not inferred): the raw rebuild squad
+                          # comes from optimizer.solve_squad(), which DOES correctly enforce max_per_club (a
+                          # real MILP constraint) -- so the breach wasn't there. It was introduced immediately
+                          # after, by recommend.apply_style_to_wildcard_squad() -> recommend._apply_eo_pull(),
+                          # which substitutes individual IN legs for cheaper/more-differential same-position
+                          # alternatives per the active Style Profile's eo_pull setting (the manager's own
+                          # "Calculated Maverick" profile has this active by design). _apply_eo_pull() scored
+                          # each leg's substitute candidates independently, with zero awareness of any other
+                          # leg's pick or the retained squad's own club composition -- two different legs could
+                          # each legally pick a same-position Leeds alternative, and nothing caught the combined
+                          # squad landing on 4. Confirmed this was NOT limited to the Wildcard tool:
+                          # _apply_eo_pull() is called from 3 sites total (recommend.py) -- the Wildcard
+                          # scenario evaluator, the Force-transfer path, and the ordinary "Hit if worth
+                          # it"/"No hits" weekly transfer recommendation path -- so this gap has been live in
+                          # the manager's actual default weekly IN/OUT suggestions too, not just this one
+                          # Wildcard screenshot, for as long as the EO-pull tie-break has existed.
+                          # Fix: _apply_eo_pull() takes a new `retained_club_counts` parameter (the club counts
+                          # of whichever squad members are NOT being transferred this batch, computed by each
+                          # caller from the squad it already has in scope) that seeds a running `club_counts`
+                          # tally, updated after every leg (substituted or not) in processing order. A
+                          # substitute is only considered if its club's running count is still below
+                          # max_per_club at the moment that leg is processed -- mirroring exactly how
+                          # optimizer.solve_xi_first_squad()'s bench stage already caps its own picks at
+                          # `max_per_club - already-in-XI`. All 3 call sites updated to compute and pass
+                          # this. `retained_club_counts=None` (the old signature) preserves the exact old
+                          # behavior for safety, though every current caller now passes it.
+                          # Verified via new test_patch56_eo_pull_club_cap.py: reproduces the bug directly
+                          # against the real _apply_eo_pull() with a synthetic pool engineered so two
+                          # independent legs would each legally substitute to the same over-represented club;
+                          # confirms the old (no-retained-counts) call path does exactly that; confirms the new
+                          # path correctly allows only as many substitutions as the cap has room for; confirms
+                          # eo_pull="none" (Balanced / Pure xPts) remains a complete no-op; confirms
+                          # retained_club_counts=None preserves old behavior byte-for-byte. Full existing
+                          # regression suite re-run: all prior patch tests pass except
+                          # test_patch34_impact_check.py, already failing before this patch (recommend.py's
+                          # transfer-planner code untouched by Patch 56; same pre-existing, already-flagged
+                          # issue noted in the Patch 55 entry above) -- not fixed here, outside this patch's
+                          # scope and root cause.
+                          # NOTE (2026-09-20): rb_model_app_patch56.zip is CUMULATIVE: Patch 29 through
+                          # 56 together, on top of the manager's Patch 28 baseline.
+                          # Patch 57 (2026-09-21, manager requirements-list item #6: "remove all unnecessary
+                          # words and explanations" -- confirmed scope, via AskUserQuestion, as ALL sections,
+                          # not a subset). Presentation-only pass: every genuinely multi-sentence, default-
+                          # VISIBLE (i.e. NOT already behind a click-to-open st.expander -- those already follow
+                          # this exact pattern and were left untouched) explanatory st.caption()/st.markdown()
+                          # block on the main page had its long methodology/rule-citation text moved from the
+                          # always-visible body into Streamlit's native `help=` parameter (a small (?) tooltip
+                          # icon, hover/tap to reveal) -- confirmed via AskUserQuestion as the preferred
+                          # mechanism over a collapsed-expander-per-block alternative, matching the existing
+                          # info-dot/pill-tooltip convention already used elsewhere (Patch 52, the Pitch
+                          # Navigator's GW-rating metric). NOTHING was deleted -- every word of the original
+                          # disclosure text still exists, verbatim, in the tooltip; only its default visibility
+                          # changed. This preserves the model doc's own disclosure requirements (Rules #4, #16,
+                          # #27, #34, #43 etc. all require showing the reasoning/methodology/threshold behind a
+                          # verdict) while cutting what's visible by default to a short headline, per the
+                          # manager's explicit request.
+                          # Blocks changed (all previously always-visible, none behind an expander): the
+                          # transfer materiality/margin-of-error gate note; the chained weekly-pacing-plan
+                          # caption; the GW-provisional-data warning (both the header stat and the Season Ledger
+                          # row); the Manager Style Fit paragraph; the Free Hit "optimized for this GW only"
+                          # note; the Pitch Navigator's "projected for this GW only" note; and the two "already
+                          # at optimal" ceiling notes (single-GW and compliant multi-GW). Left untouched: every
+                          # block already inside a click-to-open expander ("Why — full trace", "Full chip
+                          # analysis", "Evaluate your own scenario", the two Team Rating % "full breakdown"
+                          # expanders, "Wildcard rebuild") -- those are already detail-on-demand by the app's
+                          # own existing design and were not part of the reported complaint (which was about
+                          # what's shown by default, not what's available on click).
+                          # Verified: python -m py_compile app.py passes; grepped all touched original caption
+                          # strings against the full test suite to confirm no test asserts on their exact old
+                          # text (none do -- app.py's rendered strings aren't covered by the existing pytest-
+                          # style unit tests, which test the underlying data-pipeline/recommend/chip_protocol
+                          # functions, not rendered UI text). Full existing regression suite re-run: all prior
+                          # patch tests pass except test_patch34_impact_check.py, the same pre-existing,
+                          # already-flagged failure noted in the Patch 55/56 entries above (recommend.py's
+                          # transfer-planner code untouched by this patch) -- not fixed here, outside scope.
+                          # NOTE (2026-09-21): rb_model_app_patch57.zip is CUMULATIVE: Patch 29 through
+                          # 57 together, on top of the manager's Patch 28 baseline.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

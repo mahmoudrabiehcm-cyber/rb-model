@@ -68,7 +68,8 @@ def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: s
 
 
 def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cfg: dict,
-                    this_gw_col: str, out_codes: set, in_codes: set) -> list[dict]:
+                    this_gw_col: str, out_codes: set, in_codes: set,
+                    retained_club_counts: dict | None = None) -> list[dict]:
     """Style-Fit tie-break (Rule #23 style consistency), applied AFTER the
     joint xPts solve has already picked the best squad, never instead of
     it: for each chosen IN player, look for a same-position, same-or-
@@ -80,12 +81,43 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
     low-EO profiles favour the most differential tied option that ALSO
     clears `style_profiles.differential_floor()` — a merit bar, not a
     relaxation, per the model doc's explicit caveat that EO pull should
-    never downgrade genuine projection for a cheaper narrative."""
+    never downgrade genuine projection for a cheaper narrative.
+
+    Patch 56 (manager report, 2026-09-20, screenshot: a GW6 Wildcard "what-
+    if" squad came back with 4 Leeds players — Bogle, Bijol, Justin, and
+    Trafford). Root cause (verified in code): the joint solve that picks
+    `pairs` in the first place (`optimizer.solve_squad()`) always enforces
+    max-3-per-club, but this function runs AFTER that solve and substitutes
+    individual IN legs for cheaper/more-differential same-position
+    alternatives per the active Style Profile's `eo_pull` setting — and
+    never checked the substitute's club against the rest of the squad being
+    assembled. Each leg was evaluated independently, so two different legs
+    could each legally pick a same-position, same-price-band Leeds player
+    with nothing to notice the combined squad now had 4. This is the one
+    squad-construction path in the whole codebase that lacked a club-count
+    check — `optimizer.solve_squad()` (max_per_club constraint on every
+    team) and `optimizer.solve_xi_first_squad()` (both its XI-stage MILP and
+    its bench-stage cap on `max_per_club - already-in-XI`) already enforce
+    it correctly.
+
+    Fix: `retained_club_counts` (the club counts of whichever squad members
+    are NOT being transferred this batch — passed in by the caller, who
+    already knows the full old/new squad) seeds a running `club_counts`
+    tally that's updated after every leg, substituted or not, in processing
+    order. A substitute is only considered if its club's running count is
+    still below `max_per_club` — so leg 2 correctly sees leg 1's already-
+    assigned club before it gets to pick, the same way
+    `solve_xi_first_squad`'s bench stage already accounts for the XI's club
+    counts. `retained_club_counts=None` (the old call signature) preserves
+    the exact old, buggy-if-not-fixed-by-caller behavior for any caller
+    that hasn't been updated — every current caller has been."""
     eo_pull = profile.get("eo_pull", "none")
     if eo_pull == "none" or not pairs:
         return pairs
     ceiling_key = profile.get("differential_ceiling")
     taken_in_codes = set(in_codes)  # never pick a code the solve already used elsewhere in this batch
+    max_per_club = cfg["squad_rules"]["max_per_club"]
+    club_counts = dict(retained_club_counts or {})
 
     result = []
     for p in pairs:
@@ -94,6 +126,11 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
                               (full_pool.get("status", pd.Series(dtype=object)) == "a")].copy()
         pos_pool = pos_pool[pos_pool["code"] != p["in_code"]]
         pos_pool = pos_pool[~pos_pool["code"].isin(taken_in_codes | out_codes)]
+        # Patch 56 — a substitute may only be considered if its club still
+        # has room under max_per_club, given the squad assembled so far
+        # (retained players + every earlier leg's, possibly substituted,
+        # pick this batch).
+        pos_pool = pos_pool[pos_pool["team"].map(lambda t: club_counts.get(t, 0) < max_per_club)]
         moe = eng.margin_of_error_threshold(p["in_xpts"], cfg)
         tied = pos_pool[(pos_pool["xpts_horizon_sum"] >= (p["in_xpts"] - moe)) &
                          (pos_pool["price"] <= p["in_price"])]
@@ -105,6 +142,7 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
         if tied.empty:
             result.append(p)
             taken_in_codes.add(p["in_code"])
+            club_counts[p["in_team"]] = club_counts.get(p["in_team"], 0) + 1
             continue
 
         best = (tied.sort_values("selected_by_percent", ascending=False).iloc[0] if eo_pull == "strong_high_eo"
@@ -112,6 +150,7 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
         if best["code"] == p["in_code"]:
             result.append(p)
             taken_in_codes.add(p["in_code"])
+            club_counts[p["in_team"]] = club_counts.get(p["in_team"], 0) + 1
             continue
 
         gw_val = best.get(this_gw_col, 0)
@@ -123,6 +162,7 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
                         "setpiece_flag": bool(best.get("setpiece_flag", False)),
                         "eo_pull_applied": True})
         taken_in_codes.add(best["code"])
+        club_counts[best["team"]] = club_counts.get(best["team"], 0) + 1
     return result
 
 
@@ -270,7 +310,12 @@ def apply_style_to_wildcard_squad(current_squad: pd.DataFrame, rebuild_squad: pd
     if not pairs:
         return rebuild_squad
     in_codes = {p["in_code"] for p in pairs}
-    pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes, in_codes)
+    # Patch 56 — the retained (non-transferred) players' club counts seed
+    # _apply_eo_pull's running max-per-club check, so a same-position
+    # substitute can never push a club past the cap across independently
+    # -processed legs (see that function's docstring for the reported bug).
+    retained_club_counts = current_squad[~current_squad["code"].isin(out_codes)]["team"].value_counts().to_dict()
+    pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes, in_codes, retained_club_counts)
 
     retained_codes = set(current_squad["code"]) & set(rebuild_squad["code"])
     retained = rebuild_squad[rebuild_squad["code"].isin(retained_codes)]
@@ -958,8 +1003,15 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                         f"the full pool at that count — squad unchanged this run.")
         else:
             pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
+            # Patch 56 — see _apply_eo_pull's docstring: retained_club_counts
+            # seeds the running max-per-club check so EO-pull substitutions
+            # across different legs can't combine into an over-3-per-club
+            # squad the way a GW6 Wildcard "what-if" (4 Leeds players) did.
+            _actual_out_codes = set(squad_df["code"]) - set(chosen["squad"]["code"])
+            _retained_club_counts = squad_df[~squad_df["code"].isin(_actual_out_codes)]["team"] \
+                .value_counts().to_dict()
             pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes_all,
-                                    {p["in_code"] for p in pairs})
+                                    {p["in_code"] for p in pairs}, _retained_club_counts)
             moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
             summary.append(f"Forced: {chosen['actual_k']} transfer(s), net {chosen['net_gain']:+.1f} xPts "
                             f"after a {chosen['hit_cost']:.0f}-pt hit.")
@@ -1087,8 +1139,14 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             f"Reassess next gameweek once prices/fixtures move.")
         else:
             pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
+            # Patch 56 — see _apply_eo_pull's docstring / the Force-branch
+            # comment above: same running max-per-club fix for the default
+            # (non-Forced) recommendation path.
+            _actual_out_codes = set(squad_df["code"]) - set(chosen["squad"]["code"])
+            _retained_club_counts = squad_df[~squad_df["code"].isin(_actual_out_codes)]["team"] \
+                .value_counts().to_dict()
             pairs = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, out_codes_all,
-                                    {p["in_code"] for p in pairs})
+                                    {p["in_code"] for p in pairs}, _retained_club_counts)
             moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
             # Patch 33 — xM rotation-risk badge inline on both legs, so a
             # good net-xPts number doesn't quietly hide an incoming player
