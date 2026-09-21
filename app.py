@@ -31,7 +31,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 61 (Release 2)"
+PATCH_VERSION = "Patch 62 (Release 2 fix)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -110,7 +110,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .verdict-card .b{ margin:0; color:var(--ink-muted); font-size:.94rem; font-style:italic; }
 
 .stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:nowrap; align-items:flex-start; overflow-x:auto; }
-.stat .n{ font-size:1.5rem; font-weight:600; }
+.stat .n{ font-size:1.5rem; font-weight:600; color:var(--ink); }
 .stat .l{ font-size:10.5px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
 .stat.rating .n{ display:flex; align-items:center; gap:6px; }
 .stat.new .n{ color:var(--accent-strong); }
@@ -2487,7 +2487,7 @@ def _render_pitch_navigator():
             if st.button("◀", key="nav_prev", disabled=st.session_state.nav_gw_idx == 0):
                 st.session_state.nav_gw_idx -= 1
         with pb2:
-            st.markdown(f'<div style="text-align:center;font-weight:600;padding-top:0.4rem;">'
+            st.markdown(f'<div style="text-align:center;font-weight:600;padding-top:0.4rem;color:var(--ink);">'
                         f'GW{_active_nav_gw_list[st.session_state.nav_gw_idx]} '
                         f'({st.session_state.nav_gw_idx + 1}/{len(_active_nav_gw_list)})</div>',
                         unsafe_allow_html=True)

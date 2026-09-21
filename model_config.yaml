@@ -1243,6 +1243,45 @@ meta:
                           # ("Release 2") together, on top of the manager's Patch 28 baseline.
                           # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
                           # using your own live copy.
+                          # Patch 62 / "Release 2 fix" (2026-09-21, manager screenshot: "all the writing
+                          # isn't clear at all", showing the deployed Patch 61 app with the overall-rank
+                          # number, both gauge % labels, both "full breakdown" expanders, and the GW
+                          # pagination row under the pitch navigator all rendering in barely-visible dark
+                          # gray text). ROOT CAUSE, confirmed in code, not just inferred from the screenshot:
+                          # `.streamlit/config.toml` still declared the OLD light theme (`base = "light"`,
+                          # the pre-Release-2 cream/forest-green palette) -- it was never updated when
+                          # app.py's own injected `<style>` block was retinted to the dark
+                          # "Signal/Differential" palette in Patch 61. Streamlit's NATIVE widgets
+                          # (st.expander, st.button, st.metric, st.caption) and any plain text not wrapped
+                          # in one of the app's own explicitly-colored custom CSS classes are styled by THIS
+                          # config file, not by the injected `<style>` block -- so every one of those kept
+                          # rendering in light-theme text color (a dark gray meant to sit on a light
+                          # background) against the new near-black page background. Every flagged element in
+                          # the screenshot matches this exact pattern (native widget, or custom text with no
+                          # explicit `color:` set relying on inheritance) -- confirmed by rebuilding the
+                          # exact same components (stat-row, gauge rings, both expanders, chip-rack pills,
+                          # GW pagination row) in a throwaway Streamlit script against the OLD config and
+                          # reproducing the same low-contrast rendering via a real screenshot, then again
+                          # against the fix and confirming it resolves -- not assumed from reading the CSS
+                          # alone. Fixed: `.streamlit/config.toml` switched to `base = "dark"` with the exact
+                          # same palette now in app.py's `:root` (primaryColor #2FD1D9, backgroundColor
+                          # #111113, secondaryBackgroundColor #18181B, textColor #F5F5F6). Also hardened two
+                          # spots that relied on inheritance rather than an explicit color (belt-and-
+                          # suspenders, in case of any future Streamlit-internal-wrapper specificity
+                          # surprise): `.stat .n` (the hero stat-row numbers) and the GW pagination label's
+                          # inline style now both set `color:var(--ink)` explicitly. Verified: full
+                          # `ast.parse` syntax check; full existing test suite re-run, all prior patch tests
+                          # pass except test_patch34_impact_check.py (same pre-existing, unrelated failure);
+                          # REAL visual verification this time, not just a static HTML preview -- ran the
+                          # actual app locally with `streamlit run` against the fixed config and confirmed
+                          # via Playwright/Chromium screenshot (both the login screen and a component smoke-
+                          # test standing in for the live dashboard, since this sandbox has no network route
+                          # to the official FPL API) that every element flagged in the manager's screenshot
+                          # now renders with full contrast, expanders both closed and opened.
+                          # NOTE (2026-09-21): rb_model_app_patch62.zip is CUMULATIVE: Patch 29 through 62
+                          # ("Release 2 fix") together, on top of the manager's Patch 28 baseline.
+                          # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
+                          # using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
