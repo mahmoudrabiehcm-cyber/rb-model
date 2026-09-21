@@ -1128,6 +1128,47 @@ meta:
                           # NOTE (2026-09-21): rb_model_app_patch59.zip is CUMULATIVE: Patch 29 through
                           # 59 together, on top of the manager's Patch 28 baseline. manual_overrides.csv is
                           # NOT included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 60 (2026-09-21, manager: "the point related to the scenario requires a
+                          # model run after the scenario was calculated to enable the pitch navigator ...
+                          # please fix that ... once the scenario was calculated the pitch navigation option
+                          # should be enabled"). REAL fix this time, replacing the Patch 59 disclosure-only
+                          # workaround in app.py item (3) above. Verified root cause in code: the "Evaluate
+                          # your own scenario" section used to compute AND render fused together inside
+                          # `if st.button("Evaluate scenario"):`, positioned entirely AFTER
+                          # `_render_pitch_navigator()`'s own call site in script order -- so a freshly
+                          # evaluated Wildcard/Free Hit/target scenario was written to session_state one
+                          # script-line too late for that SAME render's navigator to see it, only becoming
+                          # selectable on the following, unrelated rerun. Fix: split into
+                          # `_compute_scenario_evaluations()` (pure computation, writes 3 session_state
+                          # caches -- scenario_target_cache/scenario_wc_cache/scenario_fh_cache -- plus the
+                          # existing navigator-facing keys) and `_render_scenario_results()` (pure render,
+                          # reads those caches unconditionally). `_compute_scenario_evaluations()` is now
+                          # defined and CALLED before `_render_pitch_navigator()`'s call site; the 3 selector
+                          # widgets (target/Wildcard GW/Free Hit GW) and the "Evaluate scenario" button
+                          # (now given an explicit key, "scenario_evaluate_btn", required so the compute
+                          # function can tell whether that exact click drove this rerun) stay in their
+                          # original visual position inside the "Evaluate your own scenario" expander,
+                          # followed by a call to `_render_scenario_results()`. Net effect: evaluating a
+                          # scenario now makes it selectable in the Pitch Navigator on the SAME render, no
+                          # extra click required -- the Patch 59 "click any navigator control once to load
+                          # it" caption and its underlying limitation are both gone. As a side benefit of the
+                          # same restructuring, results also no longer disappear when the manager touches an
+                          # unrelated widget elsewhere on the page (previously they were gated behind the
+                          # button's one-shot True state, which resets on the next rerun). Verified: full
+                          # `ast.parse` syntax check passes; exactly one definition each of
+                          # `_compute_scenario_evaluations`/`_render_scenario_results`/
+                          # `_render_pitch_navigator` remains in app.py (no leftover duplicate from the
+                          # refactor); full existing test suite re-run, all prior patch tests pass except
+                          # test_patch34_impact_check.py, the same pre-existing, already-flagged failure
+                          # noted in every patch entry since Patch 55 (unrelated to this change). Visual
+                          # redesign (Signal/Differential dark theme, new logo, pitch/captaincy/transfer
+                          # card visuals locked in the design-consultation phase) is a separate, much larger
+                          # body of work and is NOT included in this patch -- scoped as its own follow-up so
+                          # it can get the same verification rigor rather than being rushed in alongside a
+                          # correctness fix.
+                          # NOTE (2026-09-21): rb_model_app_patch60.zip is CUMULATIVE: Patch 29 through
+                          # 60 together, on top of the manager's Patch 28 baseline. manual_overrides.csv is
+                          # NOT included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

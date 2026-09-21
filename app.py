@@ -31,7 +31,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 59"
+PATCH_VERSION = "Patch 60"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1930,6 +1930,288 @@ def _nav_optimal_squad(_cfg, _proj, team_value, gw):
     return data_pipeline.solve_free_hit_optimal_squad(_cfg, _proj, team_value, gw)
 
 
+# ---------------------------------------------------------------------------
+# Evaluate your own scenario — compute/display separation (Patch 60, manager,
+# 2026-09-21: "the point related to the scenario requires a model run after
+# the scenario was calculated to enable the pitch navigator ... please fix
+# that ... once the scenario was calculated the pitch navigation option
+# should be enabled"). Real fix, not a disclosure caption this time. Root
+# cause (confirmed in code): this whole block used to live entirely AFTER
+# the Pitch Navigator's call site, compute-and-render fused together inside
+# `if st.button(...)`, so a freshly-evaluated scenario was stored into
+# session_state too late for the SAME script pass's navigator render to see
+# it — and, as a second problem found while fixing this, that button-gated
+# design ALSO meant the displayed results vanished the instant the manager
+# touched any other widget on the page (the button's own True state resets
+# after the one rerun that processed the click).
+#
+# Fix: COMPUTE is fully separated from DISPLAY. `_compute_scenario_
+# evaluations()` below is defined here (above the Pitch Navigator) and
+# CALLED immediately before `_render_pitch_navigator()`'s own call site
+# further down, reading the 3 selector widgets' values straight from
+# session_state (safe — Streamlit populates a `key=`-backed widget's
+# session_state entry before the script body runs on a rerun, not as a side
+# effect of reaching that widget's own call site further down the script),
+# and — only when "Evaluate scenario" was actually just clicked
+# (`scenario_evaluate_btn`, an explicit key) — stores every field the
+# display needs into 3 session_state caches (`scenario_target_cache` /
+# `scenario_wc_cache` / `scenario_fh_cache`), on top of the existing
+# navigator-facing keys (`scenario_nav_moves`, `scenario_squad_wc`,
+# `scenario_squad_fh`, etc.). The widgets themselves, and the actual
+# `_render_scenario_results()` call, stay in their normal visual position
+# further down the page (inside the "Evaluate your own scenario" expander),
+# but the display now reads FROM those caches unconditionally (any rerun,
+# not just the one right after the click) — so results also no longer
+# disappear the moment the manager interacts with anything else on the page.
+# ---------------------------------------------------------------------------
+def _compute_scenario_evaluations():
+    target_choice = st.session_state.get("scenario_target", (None, "— none —"))
+    wc_gw_choice = st.session_state.get("scenario_wc_gw")
+    fh_gw_choice = st.session_state.get("scenario_fh_gw")
+    if not st.session_state.get("scenario_evaluate_btn"):
+        return  # not clicked this run — whatever's already cached stays as-is
+
+    if target_choice[0] is None and wc_gw_choice is None and fh_gw_choice is None:
+        st.session_state["scenario_nothing_selected"] = True
+        return
+    st.session_state["scenario_nothing_selected"] = False
+
+    if target_choice[0] is not None:
+        target_eval = recommend.evaluate_target_transfer(
+            squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
+            planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
+            disrupted_codes=_disrupted_codes, bb_play_gw=_bb_play_gw)
+        st.session_state["scenario_target_cache"] = {"label": target_choice[1], "eval": target_eval}
+        if target_eval["moves"]:
+            # Patch 40 — the Pitch Navigator's 3rd toggle for this scenario
+            # (unchanged mechanism: out/in-code reconstruction against the
+            # current squad).
+            st.session_state["scenario_nav_moves"] = target_eval["moves"]
+            st.session_state["scenario_nav_label"] = target_choice[1]
+        else:
+            st.session_state.pop("scenario_nav_moves", None)
+            st.session_state.pop("scenario_nav_label", None)
+    else:
+        st.session_state.pop("scenario_target_cache", None)
+        st.session_state.pop("scenario_nav_moves", None)
+        st.session_state.pop("scenario_nav_label", None)
+
+    if wc_gw_choice is not None:
+        wc_horizon = max(3, horizon)
+        future_gw_list = list(range(wc_gw_choice, wc_gw_choice + wc_horizon))
+        future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list)
+        future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
+        future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
+        wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
+                                                          team_value, future_gw_list)
+        if not wc_eval["feasible"]:
+            st.session_state["scenario_wc_cache"] = {
+                "wc_gw_choice": wc_gw_choice, "feasible": False}
+            st.session_state.pop("scenario_squad_wc", None)
+            st.session_state.pop("scenario_label_wc", None)
+            st.session_state.pop("scenario_gw_list_wc", None)
+        else:
+            wc_gw_col = f"xpts_gw{wc_gw_choice}"
+            full_pool_future = pd.concat([future_squad_proj, future_pool_proj], ignore_index=True, sort=False)
+            if "code" in full_pool_future.columns:
+                full_pool_future = full_pool_future.drop_duplicates(subset=["code"], keep="first")
+            styled_squad = recommend.apply_style_to_wildcard_squad(
+                future_squad_proj, wc_eval["rebuild_squad"], full_pool_future, style_name, cfg, wc_gw_col)
+            # Patch 58/59 — Pitch Navigator's Wildcard-scenario toggle, its
+            # own solved GW window. Now written BEFORE the navigator call
+            # below, so it's live on this same render.
+            st.session_state["scenario_squad_wc"] = styled_squad
+            st.session_state["scenario_label_wc"] = f"GW{wc_gw_choice}"
+            st.session_state["scenario_gw_list_wc"] = future_gw_list
+            xi_result = opt.best_starting_xi(styled_squad, wc_gw_col) if wc_gw_col in styled_squad.columns else None
+            st.session_state["scenario_wc_cache"] = {
+                "wc_gw_choice": wc_gw_choice, "feasible": True, "wc_horizon": wc_horizon,
+                "future_gw_list": future_gw_list, "gap": wc_eval["gap"], "rebuild_total": wc_eval["rebuild_total"],
+                "hold_total": wc_eval["hold_total"], "wc_gw_col": wc_gw_col, "styled_squad": styled_squad,
+                "xi_result": xi_result, "style_name": style_name,
+            }
+    else:
+        st.session_state.pop("scenario_wc_cache", None)
+        st.session_state.pop("scenario_squad_wc", None)
+        st.session_state.pop("scenario_label_wc", None)
+        st.session_state.pop("scenario_gw_list_wc", None)
+
+    if fh_gw_choice is not None:
+        fh_col = f"xpts_gw{fh_gw_choice}"
+        fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice])
+        if fh_col not in fh_proj.columns:
+            st.session_state["scenario_fh_cache"] = {"fh_gw_choice": fh_gw_choice, "feasible": False,
+                                                       "reason": "no_projection"}
+            st.session_state.pop("scenario_squad_fh", None)
+            st.session_state.pop("scenario_label_fh", None)
+            st.session_state.pop("scenario_gw_list_fh", None)
+        else:
+            fh_result = data_pipeline.solve_free_hit_optimal_squad(cfg, fh_proj, team_value, fh_gw_choice)
+            if fh_result is None:
+                st.session_state["scenario_fh_cache"] = {"fh_gw_choice": fh_gw_choice, "feasible": False,
+                                                           "reason": "infeasible"}
+                st.session_state.pop("scenario_squad_fh", None)
+                st.session_state.pop("scenario_label_fh", None)
+                st.session_state.pop("scenario_gw_list_fh", None)
+            else:
+                fh_squad = fh_result["squad"]
+                st.session_state["scenario_squad_fh"] = fh_squad
+                st.session_state["scenario_label_fh"] = f"GW{fh_gw_choice}"
+                st.session_state["scenario_gw_list_fh"] = [fh_gw_choice]
+                current_squad_at_fh_gw = fh_proj[fh_proj["code"].isin(squad_codes)]
+                fh_current_val = opt.rating_gw_value(current_squad_at_fh_gw, fh_col, cfg)["total_realized"]
+                fh_optimal_val = opt.rating_gw_value(fh_squad, fh_col, cfg)["total_realized"]
+                fh_rating = eng.team_rating_pct(fh_current_val, fh_optimal_val, "")
+                st.session_state["scenario_fh_cache"] = {
+                    "fh_gw_choice": fh_gw_choice, "feasible": True, "fh_col": fh_col, "fh_squad": fh_squad,
+                    "fh_result": fh_result, "team_value": team_value,
+                    "fh_current_val": fh_current_val, "fh_optimal_val": fh_optimal_val,
+                    "fh_gap": round(fh_optimal_val - fh_current_val, 2),
+                    "fh_moe": eng.margin_of_error_threshold(fh_optimal_val, cfg),
+                    "fh_rating": fh_rating,
+                }
+    else:
+        st.session_state.pop("scenario_fh_cache", None)
+        st.session_state.pop("scenario_squad_fh", None)
+        st.session_state.pop("scenario_label_fh", None)
+        st.session_state.pop("scenario_gw_list_fh", None)
+
+
+def _render_scenario_results():
+    """Renders whatever is currently cached (see _compute_scenario_
+    evaluations() above) — unconditional on every rerun, not gated behind
+    the button's one-shot True state, so results stay visible until the
+    manager explicitly clears them or evaluates a different scenario."""
+    if st.session_state.get("scenario_nothing_selected"):
+        st.info("Nothing selected — pick a target player, a Wildcard gameweek, and/or a Free Hit "
+                "gameweek above first.")
+
+    t_cache = st.session_state.get("scenario_target_cache")
+    if t_cache:
+        target_eval = t_cache["eval"]
+        st.markdown("**Target player scenario**")
+        if target_eval["summary"]:
+            for line in target_eval["summary"]:
+                st.markdown(f'<div class="tx-reco">🧪 {line}</div>', unsafe_allow_html=True)
+        if target_eval["moves"]:
+            _mv = pd.DataFrame(target_eval["moves"])
+            st.dataframe(_mv[[c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
+                              if c in _mv.columns]], hide_index=True, use_container_width=True)
+        if target_eval.get("plan"):
+            with st.expander("Why — full trace, rule references, and move-by-move detail"):
+                for line in target_eval["plan"]:
+                    st.markdown(f"- {line}")
+
+    wc_cache = st.session_state.get("scenario_wc_cache")
+    if wc_cache:
+        wc_gw_choice = wc_cache["wc_gw_choice"]
+        st.markdown(f"**Wildcard what-if — GW{wc_gw_choice}**")
+        if not wc_cache["feasible"]:
+            st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
+                    f"reach that far yet).")
+        else:
+            if wc_cache["wc_horizon"] != horizon:
+                fgl = wc_cache["future_gw_list"]
+                st.caption(f"Evaluated over GW{fgl[0]}–GW{fgl[-1]} ({wc_cache['wc_horizon']} GWs) — "
+                           f"a 3-GW minimum applies to Wildcard rebuilds regardless of the sidebar horizon "
+                           f"(currently {horizon} GW).")
+            gap = wc_cache["gap"]
+            st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
+                        f'{wc_cache["rebuild_total"]:.1f} xPts vs {wc_cache["hold_total"]:.1f} xPts holding your '
+                        f'current squad, over the same {len(wc_cache["future_gw_list"])}-GW window ({gap:+.1f} '
+                        f'xPts). Informational only — this candidate GW is your own choice, and the model never '
+                        f'names a single "play" date (Standing Rule #32); see Chip Rack above for whether '
+                        f'v6.4\'s own Wildcard trigger is currently active.</div>', unsafe_allow_html=True)
+            st.caption("📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
+
+            styled_squad = wc_cache["styled_squad"]
+            wc_gw_col = wc_cache["wc_gw_col"]
+            xi_result = wc_cache["xi_result"]
+            show_cols = ["web_name", "team", "position", "price", wc_gw_col]
+            col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
+                          "price": "£m", wc_gw_col: f"xPts GW{wc_gw_choice}"}
+            if xi_result is not None:
+                xi_df = xi_result["xi"]
+                wc_bench_df = styled_squad[~styled_squad["code"].isin(xi_df["code"])]
+                d, m, f = xi_result["shape"]
+                st.markdown(f"**Recommended Wildcard XI — GW{wc_gw_choice}** "
+                            f"(formation 1-{d}-{m}-{f}, squad cost £{styled_squad['price'].sum():.1f}m)")
+                xi_show = xi_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                    .rename(columns=col_rename)
+                st.dataframe(xi_show, hide_index=True, use_container_width=True)
+                if not xi_df.empty:
+                    cap_row = xi_df.sort_values(wc_gw_col, ascending=False).iloc[0]
+                    st.caption(f"Suggested captain for GW{wc_gw_choice}: **{cap_row['web_name']}** "
+                               f"({cap_row[wc_gw_col]:.1f} projected xPts that week).")
+                st.markdown("**Bench**")
+                bench_show = wc_bench_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                    .rename(columns=col_rename)
+                st.dataframe(bench_show, hide_index=True, use_container_width=True)
+            else:
+                st.markdown(f"**Recommended Wildcard squad — GW{wc_gw_choice}** (full 15)")
+                full_show = styled_squad.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
+                    .rename(columns=col_rename) if wc_gw_col in styled_squad.columns else styled_squad
+                st.dataframe(full_show, hide_index=True, use_container_width=True)
+            st.caption(f"Style profile **{wc_cache['style_name']}** applied to this rebuild (same EO-pull "
+                       f"tie-break as ordinary transfers). Prices, injuries and fixtures can move before "
+                       f"GW{wc_gw_choice} — re-run this closer to the date rather than treating it as locked in.")
+
+    fh_cache = st.session_state.get("scenario_fh_cache")
+    if fh_cache:
+        fh_gw_choice = fh_cache["fh_gw_choice"]
+        st.markdown(f"**Free Hit optimal squad — GW{fh_gw_choice}**")
+        if not fh_cache["feasible"]:
+            if fh_cache["reason"] == "no_projection":
+                st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
+            else:
+                st.info(f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
+                        f"(projection data may not reach that far yet, or no feasible squad fit the "
+                        f"budget/club constraints).")
+        else:
+            st.caption("📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
+            fh_col = fh_cache["fh_col"]
+            fh_squad = fh_cache["fh_squad"]
+            fh_result = fh_cache["fh_result"]
+            fh_xi = fh_squad[fh_squad["code"].isin(fh_result["xi_codes"])]
+            fh_bench = fh_squad[~fh_squad["code"].isin(fh_result["xi_codes"])]
+            d, m, f = fh_result["shape"]
+            fh_show_cols = ["web_name", "team", "position", "price", fh_col]
+            fh_col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
+                              "price": "£m", fh_col: f"xPts GW{fh_gw_choice}"}
+            st.markdown(f"Starting XI (formation 1-{d}-{m}-{f}, XI cost "
+                        f"£{fh_xi['price'].sum():.1f}m, bench cost £{fh_result['bench_cost']:.1f}m, "
+                        f"total £{fh_result['total_cost']:.1f}m of £{fh_cache['team_value']:.1f}m available)")
+            fh_xi_show = fh_xi.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
+                .rename(columns=fh_col_rename)
+            st.dataframe(fh_xi_show, hide_index=True, use_container_width=True)
+            if not fh_xi.empty:
+                fh_cap_row = fh_xi.sort_values(fh_col, ascending=False).iloc[0]
+                st.caption(f"Suggested captain for GW{fh_gw_choice}: **{fh_cap_row['web_name']}** "
+                           f"({fh_cap_row[fh_col]:.1f} projected xPts that week).")
+            st.markdown("**Bench** (deliberately cheap — a Free Hit's bench only matters if an "
+                        "autosub fires, so budget is routed to the XI above instead)")
+            fh_bench_show = fh_bench.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
+                .rename(columns=fh_col_rename)
+            st.dataframe(fh_bench_show, hide_index=True, use_container_width=True)
+            st.caption(f"Optimized for GW{fh_gw_choice} only — re-run closer to the date",
+                       help=f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
+                            f"gameweek, per Rule #25) — this is the model's single best squad for that "
+                            f"week, not season-shaping, so no Style Profile differential pull is applied. "
+                            f"Prices, injuries and fixtures can move before GW{fh_gw_choice} — re-run "
+                            f"this closer to the date rather than treating it as locked in.")
+            st.markdown("**Your squad vs. this Free Hit optimal**")
+            if fh_cache["fh_rating"]["rating_pct"] is not None:
+                st.markdown(f"Your current squad's best XI this GW: **{fh_cache['fh_current_val']:.1f} xPts** vs. "
+                            f"Free Hit optimal: **{fh_cache['fh_optimal_val']:.1f} xPts** → "
+                            f"**{fh_cache['fh_rating']['rating_pct']}%** (gap: {fh_cache['fh_gap']:.1f} xPts, "
+                            f"margin-of-error threshold: {fh_cache['fh_moe']:.1f} xPts)")
+                if fh_cache["fh_gap"] < fh_cache["fh_moe"]:
+                    st.caption("✓ That gap is inside normal weekly noise — your squad is already "
+                               "effectively at this week's ceiling; a Free Hit's upside here is limited.")
+            else:
+                st.info("Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
+
+
 @st.fragment
 def _render_pitch_navigator():
     st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
@@ -2198,6 +2480,14 @@ def _render_pitch_navigator():
         st.markdown(f'<div class="cap-caption">{cap_caption}</div>', unsafe_allow_html=True)
 
 
+# Patch 60 — compute the manager's own scenario (if "Evaluate scenario" was
+# just clicked, or was clicked on a prior rerun and is still cached) BEFORE
+# the Pitch Navigator renders, so a freshly-evaluated Wildcard/Free
+# Hit/target scenario is selectable in the navigator on THIS SAME render —
+# not only after one extra, unrelated interaction. See the fix-rationale
+# comment above `_compute_scenario_evaluations()`'s definition for the root
+# cause this replaces.
+_compute_scenario_evaluations()
 _render_pitch_navigator()
 
 # ---------------------------------------------------------------------------
@@ -2373,6 +2663,14 @@ with st.expander("Why — full trace, rule references, and move-by-move detail")
 # pick). Nothing chosen here changes anything above — this section is
 # purely additive. Gated behind an explicit button rather than re-running
 # on every widget change, since each evaluation is a fresh MILP solve.
+#
+# Patch 60: the actual compute (`_compute_scenario_evaluations()`) and the
+# actual render (`_render_scenario_results()`) now live ABOVE, before the
+# Pitch Navigator's call site, so a freshly-evaluated scenario is already
+# live in the navigator by the time it renders — see the fix-rationale
+# comment on `_compute_scenario_evaluations()`'s definition for the full
+# root-cause writeup. This block only holds the input widgets themselves
+# (unchanged in behavior) plus the call that displays whatever is cached.
 # ---------------------------------------------------------------------------
 with st.expander("Evaluate your own scenario — a specific target, a candidate Wildcard date, or a Free Hit GW"):
     st.caption("Optional. Pick a target player, a candidate Wildcard gameweek, and/or a candidate Free Hit "
@@ -2385,275 +2683,24 @@ with st.expander("Evaluate your own scenario — a specific target, a candidate 
             pool_sorted = pool_df.sort_values("web_name")
             pool_options += [(r["code"], f"{r['web_name']} ({r.get('team','')}) · £{r.get('price','?')}m")
                               for _, r in pool_sorted.iterrows()]
-        target_choice = st.selectbox("Target player to bring in", options=pool_options,
-                                      format_func=lambda t: t[1], key="scenario_target")
+        st.selectbox("Target player to bring in", options=pool_options,
+                      format_func=lambda t: t[1], key="scenario_target")
     with scen_col2:
         wc_gw_options = [None] + list(range(planning_gw, 39))
-        wc_gw_choice = st.selectbox("Candidate Wildcard gameweek", options=wc_gw_options,
-                                     format_func=lambda g: "— none —" if g is None else f"GW{g}",
-                                     key="scenario_wc_gw")
+        st.selectbox("Candidate Wildcard gameweek", options=wc_gw_options,
+                      format_func=lambda g: "— none —" if g is None else f"GW{g}",
+                      key="scenario_wc_gw")
     with scen_col3:
         fh_gw_options = [None] + list(range(planning_gw, 39))
-        fh_gw_choice = st.selectbox("Candidate Free Hit gameweek", options=fh_gw_options,
-                                     format_func=lambda g: "— none —" if g is None else f"GW{g}",
-                                     key="scenario_fh_gw")
-    if st.button("Evaluate scenario"):
-        if target_choice[0] is None and wc_gw_choice is None and fh_gw_choice is None:
-            st.info("Nothing selected — pick a target player, a Wildcard gameweek, and/or a Free Hit "
-                    "gameweek above first.")
-        if target_choice[0] is not None:
-            target_eval = recommend.evaluate_target_transfer(
-                squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
-                planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
-                disrupted_codes=_disrupted_codes, bb_play_gw=_bb_play_gw)
-            st.markdown("**Target player scenario**")
-            if target_eval["summary"]:
-                for line in target_eval["summary"]:
-                    st.markdown(f'<div class="tx-reco">🧪 {line}</div>', unsafe_allow_html=True)
-            if target_eval["moves"]:
-                st.dataframe(pd.DataFrame(target_eval["moves"])[
-                    [c for c in ["out", "in", "position", "xpts_gain", "hit_cost", "net_gain", "justified"]
-                     if c in pd.DataFrame(target_eval["moves"]).columns]], hide_index=True, use_container_width=True)
-                # Patch 40 (manager, 2026-09-14: "the navigator can have a 3rd
-                # option to read from the scenarios on the section for
-                # 'evaluate the scenario'"). Stash this evaluated scenario's
-                # moves in session_state so the pitch navigator above (it
-                # renders earlier in the script, but this is a full rerun —
-                # not confined to the navigator's own st.fragment — so the
-                # next run picks this up) can offer a 3rd "After evaluated
-                # scenario" toggle alongside "Current squad" / "After
-                # recommended transfer", built the same out_code/in_code
-                # reconstruction way as that existing toggle.
-                st.session_state["scenario_nav_moves"] = target_eval["moves"]
-                st.session_state["scenario_nav_label"] = target_choice[1]
-            elif "scenario_nav_moves" in st.session_state:
-                # Feasible search ran but found no moves to preview (e.g. the
-                # already-owned / no-legal-way branches) — don't leave a
-                # stale, unrelated scenario sitting in the navigator toggle.
-                del st.session_state["scenario_nav_moves"]
-                st.session_state.pop("scenario_nav_label", None)
-            if target_eval.get("plan"):
-                with st.expander("Why — full trace, rule references, and move-by-move detail"):
-                    for line in target_eval["plan"]:
-                        st.markdown(f"- {line}")
-        if wc_gw_choice is not None:
-            # Wildcard-list feature (2026-09-07 discussion): a Wildcard
-            # resets your whole squad for the rest of the season, so
-            # evaluating it against a 1-GW window (whatever the sidebar
-            # horizon happens to be set to) is a bad basis for a decision
-            # this size — always use at least 3 GWs, disclosed explicitly
-            # whenever that overrides the sidebar's own setting.
-            wc_horizon = max(3, horizon)
-            future_gw_list = list(range(wc_gw_choice, wc_gw_choice + wc_horizon))
-            future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list)
-            future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
-            future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
-            wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
-                                                              team_value, future_gw_list)
-            st.markdown(f"**Wildcard what-if — GW{wc_gw_choice}**")
-            if wc_horizon != horizon:
-                st.caption(f"Evaluated over GW{future_gw_list[0]}–GW{future_gw_list[-1]} ({wc_horizon} GWs) — "
-                           f"a 3-GW minimum applies to Wildcard rebuilds regardless of the sidebar horizon "
-                           f"(currently {horizon} GW).")
-            if not wc_eval["feasible"]:
-                st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
-                        f"reach that far yet).")
-                # Patch 58 — don't leave a stale Wildcard scenario in the
-                # navigator toggle if this run's evaluation came back
-                # infeasible (same caution as Patch 40's player-scenario
-                # cleanup below).
-                st.session_state.pop("scenario_squad_wc", None)
-                st.session_state.pop("scenario_label_wc", None)
-                st.session_state.pop("scenario_gw_list_wc", None)
-            else:
-                gap = wc_eval["gap"]
-                st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
-                            f'{wc_eval["rebuild_total"]:.1f} xPts vs {wc_eval["hold_total"]:.1f} xPts holding your '
-                            f'current squad, over the same {len(future_gw_list)}-GW window ({gap:+.1f} xPts). '
-                            f'Informational only — this candidate GW is your own choice, and the model never '
-                            f'names a single "play" date (Standing Rule #32); see Chip Rack above for whether '
-                            f'v6.4\'s own Wildcard trigger is currently active.</div>', unsafe_allow_html=True)
+        st.selectbox("Candidate Free Hit gameweek", options=fh_gw_options,
+                      format_func=lambda g: "— none —" if g is None else f"GW{g}",
+                      key="scenario_fh_gw")
+    # Patch 60 — explicit key so `_compute_scenario_evaluations()` (called
+    # earlier in the script, before the Pitch Navigator) can tell whether
+    # THIS click is what triggered the current rerun.
+    st.button("Evaluate scenario", key="scenario_evaluate_btn")
+    _render_scenario_results()
 
-                wc_gw_col = f"xpts_gw{wc_gw_choice}"
-                full_pool_future = pd.concat([future_squad_proj, future_pool_proj], ignore_index=True, sort=False)
-                if "code" in full_pool_future.columns:
-                    full_pool_future = full_pool_future.drop_duplicates(subset=["code"], keep="first")
-                styled_squad = recommend.apply_style_to_wildcard_squad(
-                    future_squad_proj, wc_eval["rebuild_squad"], full_pool_future, style_name, cfg, wc_gw_col)
-
-                # Patch 58 (manager: "the team navigation should have an
-                # option to navigate the new team evaluated scenario
-                # 'Player, Wildcard or FH'") — stash the built squad AND its
-                # own solved GW window directly (not out/in codes — this is
-                # a full rebuild, there's no "out/in legs" against the
-                # current 15 the way the player-target scenario has), so the
-                # Pitch Navigator above can page through this Wildcard
-                # scenario's XI across its own GW{wc_gw_choice}-GW{end}
-                # window, the same way it already pages the real squad.
-                st.session_state["scenario_squad_wc"] = styled_squad
-                st.session_state["scenario_label_wc"] = f"GW{wc_gw_choice}"
-                st.session_state["scenario_gw_list_wc"] = future_gw_list
-                # Patch 59 (manager: "the scenarios still not appearing on
-                # the pitch navigator") — verified in code: this is a real
-                # Streamlit script-order effect, not the option failing to
-                # register. The Pitch Navigator (app.py ~line 2201) runs
-                # BEFORE this section (~line 2400+) in top-to-bottom script
-                # order, so on THIS SAME rerun (the one processing this
-                # Evaluate click) the navigator already rendered using the
-                # session_state as it stood BEFORE this scenario was stored
-                # — it only becomes selectable on the NEXT rerun (any click
-                # anywhere on the page, e.g. a navigator arrow). Disclosed
-                # explicitly here rather than left silent; a same-rerun fix
-                # (restructuring the display to persist across reruns
-                # instead of being gated behind the button click) is a
-                # larger, separate change, not folded into this patch.
-                st.caption("📍 Now available in the Pitch Navigator above — click any navigator control "
-                           "(◀/▶ or the Squad toggle) once to load it there.")
-
-                xi_result = opt.best_starting_xi(styled_squad, wc_gw_col) if wc_gw_col in styled_squad.columns \
-                    else None
-                show_cols = ["web_name", "team", "position", "price", wc_gw_col]
-                col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
-                              "price": "£m", wc_gw_col: f"xPts GW{wc_gw_choice}"}
-                if xi_result is not None:
-                    xi_df = xi_result["xi"]
-                    wc_bench_df = styled_squad[~styled_squad["code"].isin(xi_df["code"])]
-                    d, m, f = xi_result["shape"]
-                    st.markdown(f"**Recommended Wildcard XI — GW{wc_gw_choice}** "
-                                f"(formation 1-{d}-{m}-{f}, squad cost £{styled_squad['price'].sum():.1f}m)")
-                    xi_show = xi_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
-                        .rename(columns=col_rename)
-                    st.dataframe(xi_show, hide_index=True, use_container_width=True)
-                    if not xi_df.empty:
-                        cap_row = xi_df.sort_values(wc_gw_col, ascending=False).iloc[0]
-                        st.caption(f"Suggested captain for GW{wc_gw_choice}: **{cap_row['web_name']}** "
-                                   f"({cap_row[wc_gw_col]:.1f} projected xPts that week).")
-                    st.markdown("**Bench**")
-                    bench_show = wc_bench_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
-                        .rename(columns=col_rename)
-                    st.dataframe(bench_show, hide_index=True, use_container_width=True)
-                else:
-                    st.markdown(f"**Recommended Wildcard squad — GW{wc_gw_choice}** (full 15)")
-                    full_show = styled_squad.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
-                        .rename(columns=col_rename) if wc_gw_col in styled_squad.columns else styled_squad
-                    st.dataframe(full_show, hide_index=True, use_container_width=True)
-                st.caption(f"Style profile **{style_name}** applied to this rebuild (same EO-pull tie-break as "
-                           f"ordinary transfers). Prices, injuries and fixtures can move before GW{wc_gw_choice} "
-                           f"— re-run this closer to the date rather than treating it as locked in.")
-
-        if fh_gw_choice is not None:
-            # Free Hit "optimal team for this GW" feature (2026-09-07
-            # discussion, Patch 19). Unlike the Wildcard what-if above (a
-            # non-reverting rebuild evaluated over a 3-GW-minimum horizon,
-            # date always the manager's own choice per Rule #32), a Free Hit
-            # squad reverts after one week
-            # (Standing Rule #25 / Horizon-Matching Rule) — so this is
-            # single-GW only, and it deliberately optimizes differently:
-            # highest-scoring legal Starting XI + cheapest legal bench
-            # (optimizer.solve_xi_first_squad via
-            # data_pipeline.solve_free_hit_optimal_squad), not a raw
-            # 15-man-sum rebuild like the Chip Advisor's own play/hold
-            # verdict solve uses. No Style Profile EO-pull is applied here
-            # (unlike the Wildcard squad above) — this shows the model's
-            # single best squad for one specific week, not a season-shaping
-            # decision the manager's differential-risk profile should bend.
-            # proj only covers the sidebar horizon's gw_list — fh_gw_choice can
-            # be well beyond that (same reason the Wildcard block above
-            # re-projects onto its own future_gw_list rather than reusing
-            # proj), so re-project fresh for just this one target GW.
-            fh_col = f"xpts_gw{fh_gw_choice}"
-            fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice])
-            if fh_col not in fh_proj.columns:
-                st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
-                st.session_state.pop("scenario_squad_fh", None)
-                st.session_state.pop("scenario_label_fh", None)
-                st.session_state.pop("scenario_gw_list_fh", None)
-            else:
-                fh_result = data_pipeline.solve_free_hit_optimal_squad(cfg, fh_proj, team_value, fh_gw_choice)
-                st.markdown(f"**Free Hit optimal squad — GW{fh_gw_choice}**")
-                if fh_result is None:
-                    st.info(f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
-                            f"(projection data may not reach that far yet, or no feasible squad fit the "
-                            f"budget/club constraints).")
-                    # Patch 58 — don't leave a stale Free Hit scenario in the
-                    # navigator toggle if this run's solve came back infeasible.
-                    st.session_state.pop("scenario_squad_fh", None)
-                    st.session_state.pop("scenario_label_fh", None)
-                    st.session_state.pop("scenario_gw_list_fh", None)
-                else:
-                    fh_squad = fh_result["squad"]
-                    # Patch 58 — stash directly for the Pitch Navigator, same
-                    # pattern as the Wildcard block above. Single-GW only
-                    # (fh_proj only ever covers [fh_gw_choice]), which matches
-                    # a Free Hit's own single-week scope (Rule #25) exactly —
-                    # no artificial multi-GW window to fabricate here.
-                    st.session_state["scenario_squad_fh"] = fh_squad
-                    st.session_state["scenario_label_fh"] = f"GW{fh_gw_choice}"
-                    st.session_state["scenario_gw_list_fh"] = [fh_gw_choice]
-                    # Patch 59 — see the identical note on the Wildcard block
-                    # above: the Pitch Navigator renders earlier in the
-                    # script than this section, so this becomes selectable
-                    # there on the NEXT interaction, not instantly on this
-                    # same render.
-                    st.caption("📍 Now available in the Pitch Navigator above — click any navigator control "
-                               "(◀/▶ or the Squad toggle) once to load it there.")
-                    fh_xi = fh_squad[fh_squad["code"].isin(fh_result["xi_codes"])]
-                    fh_bench = fh_squad[~fh_squad["code"].isin(fh_result["xi_codes"])]
-                    d, m, f = fh_result["shape"]
-                    fh_show_cols = ["web_name", "team", "position", "price", fh_col]
-                    fh_col_rename = {"web_name": "Player", "team": "Team", "position": "Pos",
-                                      "price": "£m", fh_col: f"xPts GW{fh_gw_choice}"}
-                    st.markdown(f"Starting XI (formation 1-{d}-{m}-{f}, XI cost "
-                                f"£{fh_xi['price'].sum():.1f}m, bench cost £{fh_result['bench_cost']:.1f}m, "
-                                f"total £{fh_result['total_cost']:.1f}m of £{team_value:.1f}m available)")
-                    fh_xi_show = fh_xi.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
-                        .rename(columns=fh_col_rename)
-                    st.dataframe(fh_xi_show, hide_index=True, use_container_width=True)
-                    if not fh_xi.empty:
-                        fh_cap_row = fh_xi.sort_values(fh_col, ascending=False).iloc[0]
-                        st.caption(f"Suggested captain for GW{fh_gw_choice}: **{fh_cap_row['web_name']}** "
-                                   f"({fh_cap_row[fh_col]:.1f} projected xPts that week).")
-                    st.markdown("**Bench** (deliberately cheap — a Free Hit's bench only matters if an "
-                                "autosub fires, so budget is routed to the XI above instead)")
-                    fh_bench_show = fh_bench.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
-                        .rename(columns=fh_col_rename)
-                    st.dataframe(fh_bench_show, hide_index=True, use_container_width=True)
-                    st.caption(f"Optimized for GW{fh_gw_choice} only — re-run closer to the date",
-                               help=f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
-                                    f"gameweek, per Rule #25) — this is the model's single best squad for that "
-                                    f"week, not season-shaping, so no Style Profile differential pull is applied. "
-                                    f"Prices, injuries and fixtures can move before GW{fh_gw_choice} — re-run "
-                                    f"this closer to the date rather than treating it as locked in.")
-
-                    # Rating vs. FH optimal (2026-09-07 discussion) — same
-                    # rating_gw_value() mechanic Patch 20 uses for the main
-                    # Team Rating % (best XI + captain doubled + Rule #12
-                    # bench discount), applied here to a genuinely
-                    # unconstrained single-GW ceiling instead of the main
-                    # rating's free-transfer-limited "reachable ceiling."
-                    # That sidesteps the exact distortion flagged earlier
-                    # this session: this comparison isn't capped to "the one
-                    # best swap available," it's your actual current squad
-                    # against a true from-scratch optimal for this one week
-                    # — a cleaner read on "how far off is my squad, really."
-                    current_squad_at_fh_gw = fh_proj[fh_proj["code"].isin(squad_codes)]
-                    fh_current_val = opt.rating_gw_value(current_squad_at_fh_gw, fh_col, cfg)["total_realized"]
-                    fh_optimal_val = opt.rating_gw_value(fh_squad, fh_col, cfg)["total_realized"]
-                    fh_rating = eng.team_rating_pct(fh_current_val, fh_optimal_val, "")
-                    fh_gap = round(fh_optimal_val - fh_current_val, 2)
-                    fh_moe = eng.margin_of_error_threshold(fh_optimal_val, cfg)
-                    st.markdown("**Your squad vs. this Free Hit optimal**")
-                    if fh_rating["rating_pct"] is not None:
-                        st.markdown(f"Your current squad's best XI this GW: **{fh_current_val:.1f} xPts** vs. "
-                                    f"Free Hit optimal: **{fh_optimal_val:.1f} xPts** → "
-                                    f"**{fh_rating['rating_pct']}%** (gap: {fh_gap:.1f} xPts, "
-                                    f"margin-of-error threshold: {fh_moe:.1f} xPts)")
-                        if fh_gap < fh_moe:
-                            st.caption(f"✓ That gap is inside normal weekly noise — your squad is already "
-                                       f"effectively at this week's ceiling; a Free Hit's upside here is limited.")
-                    else:
-                        st.info("Couldn't compute a comparison — your current squad has no valid XI for this GW "
-                                "this run.")
 
 # ---------------------------------------------------------------------------
 # Captaincy — Patch 4: the standalone "Captaincy Pick" section (two st.metric
