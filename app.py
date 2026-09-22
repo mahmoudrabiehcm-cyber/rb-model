@@ -31,7 +31,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 62 (Release 2 fix)"
+PATCH_VERSION = "Patch 63 (Release 2.1, light theme)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -56,40 +56,44 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 /* ---------------------------------------------------------------------
-   Release 2 (2026-09-21, manager: "the theme and the logo and maybe the
-   model name and layout needs a real change directed more to visuals" —
-   then, after several rounds of mockups, "before patching it ... act as a
-   professional designer ... visualize your recommendation", and finally
-   "start patching the new visuals as Release 2"). This is the app-wide
-   build-out of that locked design system: theme "Signal/Differential"
-   (near-black canvas, cyan as the primary everyday signal color, coral
-   reserved exclusively for the captaincy spotlight + alerts), the
-   "Monogram + Dot" logo, a redesigned pitch with real CSS-drawn markings,
-   and new visual captaincy/transfer components (replacing the old plain-
-   text captions). Because almost every component below already read its
-   colors from these CSS custom properties instead of hardcoding hex
-   values, retinting :root here re-skins the overwhelming majority of the
-   app automatically — component-level rules mostly only needed a font
-   swap (Fraunces -> Space Grotesk, this design phase's locked headline
-   face) and a few dark-mode-specific tweaks (shadow depth, avatar-
-   fallback gradient, etc.), not a rewrite. Class names are kept stable on
-   purpose so no Python markup-generation code needed to change to pick
-   up the new look.
+   Release 2 (2026-09-21) then Release 2.1 (same day, manager: after the
+   dark "Signal/Differential" build ("Patch 61) plus its config.toml fix
+   (Patch 62) still read as "still the same issue after the new patch and
+   rebooting the app, also it's too dark ... modify it to be more friendly
+   ... it's needed to be more clear not dark like this" — a direct design
+   reversal, not another contrast bug. This is that: a light, friendly
+   theme ("Daylight/Differential") replacing the dark canvas outright,
+   while KEEPING every structural Release 2 upgrade that was never about
+   dark-vs-light in the first place — the "Monogram + Dot" logo, the real
+   CSS-drawn pitch markings, the captaincy spotlight card, and the
+   transfer OUT->IN card. Cyan stays the primary everyday signal color and
+   coral stays reserved for captaincy + alerts, just recalibrated for
+   contrast against a light background instead of a dark one (a raw
+   neon-cyan #2FD1D9 reads fine on near-black but is too washed-out for
+   body text on white, so --accent-strong -- the shade actually used for
+   text/headings -- is a deeper teal here, while --accent itself stays the
+   brighter shade for bars/rings/borders where a lighter tone is fine).
+   Because almost every component below reads its colors from these CSS
+   custom properties instead of hardcoded hex, retinting :root here
+   re-skins the overwhelming majority of the app automatically — see the
+   Release 2.1 changelog entry in model_config.yaml for the handful of
+   component-level touch-ups (hardcoded dark-tint text colors, avatar-
+   fallback gradient, pitch markings color) this still required.
    --------------------------------------------------------------------- */
 :root{
-  --bg:#111113; --surface:#18181B; --surface-2:#1E1E22;
-  --ink:#F5F5F6; --ink-muted:#A8A8AF; --ink-faint:#6E6E76;
-  --rule:#2A2A2E; --accent:#2FD1D9; --accent-strong:#5FE1E7; --accent-tint:#132C2E;
-  --gold:#E8A93D; --gold-tint:#2E2313;
-  --blue:#4FA8D8; --blue-tint:#132430;
-  --coral:#FF5A5F; --coral-tint:#2A1717;
-  --warn:#FF5A5F; --bench:#141416;
-  --fdr-easy:#3FE0A0; --fdr-mid:#E8A93D; --fdr-hard:#FF5A5F;
-  --shadow:0 1px 2px rgba(0,0,0,.45), 0 10px 26px -14px rgba(0,0,0,.7);
+  --bg:#F6F8F5; --surface:#FFFFFF; --surface-2:#EEF2EC;
+  --ink:#1C2620; --ink-muted:#54615A; --ink-faint:#8A978F;
+  --rule:#DEE5DA; --accent:#2FBFC7; --accent-strong:#0E7A82; --accent-tint:#E4F6F6;
+  --gold:#C98A26; --gold-tint:#FBEFDC;
+  --blue:#2E6E93; --blue-tint:#E1EDF3;
+  --coral:#E14E54; --coral-tint:#FBE6E6;
+  --warn:#E14E54; --bench:#F1F3ED;
+  --fdr-easy:#2E8B57; --fdr-mid:#C98A26; --fdr-hard:#E14E54;
+  --shadow:0 1px 2px rgba(20,30,22,.06), 0 8px 22px -12px rgba(20,30,22,.16);
   /* Release 2 — position-tag-only neutral accent (FWD label), kept
      separate from --coral now that coral is reserved for captaincy +
      alerts and shouldn't double as a fourth position color. */
-  --violet:#B39CFF;
+  --violet:#7A6BC2;
 }
 html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--ink); }
 .mono{ font-family:"IBM Plex Mono",monospace; }
@@ -140,19 +144,19 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
    plus a subtle grass-stripe backdrop, replacing the old flat single-tint
    rectangle. No image asset, still zero-cost. */
 .pitch{ position:relative; z-index:0; overflow:hidden;
-  background:repeating-linear-gradient(180deg, #132A24 0px, #132A24 44px, #0F231E 44px, #0F231E 88px);
+  background:repeating-linear-gradient(180deg, #E4F0DE 0px, #E4F0DE 44px, #D8E8D1 44px, #D8E8D1 88px);
   border:1px solid var(--rule); border-radius:10px; padding:26px 14px 10px; }
 .pitch::before{ content:""; position:absolute; inset:14px; pointer-events:none; z-index:-1;
-  border:1.5px solid rgba(95,225,231,.22); border-radius:4px;
+  border:1.5px solid rgba(255,255,255,.85); border-radius:4px;
   background:
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) center / 100% 1.5px no-repeat,
-    radial-gradient(circle at center, transparent 34px, transparent 35.5px, rgba(95,225,231,.22) 35.5px, rgba(95,225,231,.22) 37px, transparent 37px) center / 96px 96px no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top / 46% 1.5px no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top 0 left 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) top 0 right 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom / 46% 1.5px no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom 0 left 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(95,225,231,.22), rgba(95,225,231,.22)) bottom 0 right 27% / 1.5px 15% no-repeat;
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) center / 100% 1.5px no-repeat,
+    radial-gradient(circle at center, transparent 34px, transparent 35.5px, rgba(255,255,255,.85) 35.5px, rgba(255,255,255,.85) 37px, transparent 37px) center / 96px 96px no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top / 46% 1.5px no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top 0 right 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom / 46% 1.5px no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 right 27% / 1.5px 15% no-repeat;
 }
 .prow{ display:flex; justify-content:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
 
@@ -217,7 +221,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .badge{ font-family:"IBM Plex Mono"; font-size:9px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
   padding:2px 7px; border-radius:20px; display:inline-block; white-space:nowrap; }
 .badge.play{ background:var(--accent-tint); color:var(--accent-strong); }
-.badge.active{ background:var(--gold-tint); color:#F2C879; }
+.badge.active{ background:var(--gold-tint); color:#7A5A16; }
 .badge.hold{ background:var(--surface-2); color:var(--ink-faint); }
 .badge.caution{ background:var(--coral-tint); color:var(--coral); }
 .badge.used{ background:var(--surface-2); color:var(--ink-faint); }
@@ -238,7 +242,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--surface-2); border:1px solid var(--rule);
   color:var(--ink-muted); font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px;
   cursor:help; white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
-.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#F2C879; }
+.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#7A5A16; }
 
 /* Team Rating % radial gauge (Patch 31) — conic-gradient ring, no SVG/JS
    library needed. Percentage is still the same number the tooltip/expander
@@ -276,7 +280,7 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   padding:1px 5px; border-radius:10px; margin-left:4px; white-space:nowrap; display:inline-block;
   vertical-align:middle; cursor:help; }
 .xm-badge.nailed{ background:var(--accent-tint); color:var(--accent-strong); }
-.xm-badge.rotation{ background:var(--gold-tint); color:#F2C879; }
+.xm-badge.rotation{ background:var(--gold-tint); color:#7A5A16; }
 .xm-badge.risk{ background:var(--coral-tint); color:var(--coral); }
 
 /* Patch 33 — post-transfer preview, promoted out of the "Why" expander to

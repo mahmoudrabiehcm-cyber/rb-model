@@ -1282,6 +1282,62 @@ meta:
                           # ("Release 2 fix") together, on top of the manager's Patch 28 baseline.
                           # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
                           # using your own live copy.
+                          # Patch 63 / "Release 2.1" (2026-09-21, manager: after deploying Patch 62 and
+                          # rebooting, "still the same issue after the new patch and rebooting the app,
+                          # also it's too dark and this isn't looking good at all, modify it to be more
+                          # friendly ... it's needed to be more clear not dark like this"). Two things this
+                          # patch addresses: (1) a direct design reversal away from the dark
+                          # "Signal/Differential" theme entirely -- not another contrast bug to chase, a
+                          # request to go light. (2) a plausible explanation, disclosed to the manager, for
+                          # why Patch 62's fix may not have visibly taken effect after a reboot even though
+                          # it was correct and verified in this sandbox: Streamlit Community Cloud lets an
+                          # app owner set a custom theme directly in that app's Cloud dashboard (Settings),
+                          # and when one is set there it OVERRIDES the repository's own
+                          # .streamlit/config.toml entirely -- "Reboot app" restarts the process, it does
+                          # NOT clear a dashboard-level theme override. This could not be confirmed or ruled
+                          # out from this sandbox (no access to the manager's Cloud dashboard), so it's
+                          # flagged as a real possibility rather than assumed as the cause -- noted directly
+                          # in .streamlit/config.toml itself as a comment for whoever manages that
+                          # deployment to check if colors still look wrong after this patch. Scope, all in
+                          # app.py + .streamlit/config.toml: retinted :root from the dark palette to a new
+                          # light "Daylight/Differential" palette (--bg #F6F8F5, --surface #FFFFFF, --ink
+                          # #1C2620) and updated .streamlit/config.toml to match exactly (base="light",
+                          # matching primary/background/text colors) -- these two files must always agree,
+                          # since config.toml governs every native Streamlit widget (st.expander, st.button,
+                          # st.metric, st.caption) while app.py's <style> block governs everything else,
+                          # exactly the lesson from Patch 62's root cause. Cyan stays the primary everyday
+                          # signal color and coral stays reserved for captaincy + alerts (unchanged from the
+                          # Release 2 design verdict), just recalibrated for contrast against white instead
+                          # of near-black (--accent-strong, the shade actually used for text/headings, is a
+                          # deeper teal #0E7A82-family tone here, since the neon cyan that read fine on
+                          # black is too washed out for body text on white). Component-level touch-ups this
+                          # required: the pitch's grass-stripe backdrop and CSS-drawn markings (halfway
+                          # line/center circle/penalty boxes) recolored from a dark near-black + translucent
+                          # cyan scheme to a traditional light green + translucent white scheme (a "friendly"
+                          # pitch look, not just a palette swap); the three amber text colors changed for
+                          # Patch 62's dark gold-tint (#F2C879, light-on-dark) reverted to the original dark
+                          # amber (#7A5A16, dark-on-now-light-again gold-tint) -- otherwise they'd have been
+                          # the same illegible-inversion bug in the opposite direction. EVERY structural
+                          # Release 2 upgrade that was never actually about dark-vs-light is kept unchanged:
+                          # the "Monogram + Dot" logo, the real CSS-drawn pitch markings (now just recolored,
+                          # not removed), the captaincy spotlight card, and the transfer OUT->IN card.
+                          # Verified: full `ast.parse` syntax check; full existing test suite re-run, all
+                          # prior patch tests pass except test_patch34_impact_check.py (same pre-existing,
+                          # unrelated failure); test_release2_visual_redesign.py rewritten (not just
+                          # re-run) to assert the CURRENT intended design (light) instead of silently
+                          # testing the retired dark one, including a new check that app.py's :root and
+                          # .streamlit/config.toml never drift apart from each other again; REAL visual
+                          # verification before packaging, per the manager's explicit instruction to "test
+                          # before sharing a new patch" -- ran the actual app locally with `streamlit run`
+                          # against the new light config and confirmed via Playwright/Chromium screenshots
+                          # (login screen, and a full component smoke-test standing in for the live
+                          # dashboard since this sandbox has no network route to the official FPL API) that
+                          # every element previously flagged as illegible, PLUS the new captaincy spotlight
+                          # and transfer OUT->IN cards, all render clearly on the light theme.
+                          # NOTE (2026-09-21): rb_model_app_patch63.zip is CUMULATIVE: Patch 29 through 63
+                          # ("Release 2.1") together, on top of the manager's Patch 28 baseline.
+                          # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
+                          # using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
