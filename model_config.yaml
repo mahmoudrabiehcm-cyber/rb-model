@@ -1542,6 +1542,47 @@ meta:
                           # NOTE (2026-09-22): rb_model_app_patch68.zip is CUMULATIVE: Patch 29 through 68
                           # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
                           # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 69 (2026-09-22, manager screenshot of the live Patch 68 deploy, two separate
+                          # fixes on the same batch):
+                          #   1. "this should be on the top of the tab" (pointing at the verdict/rank/rating-
+                          #      gauge dashboard card). Patch 67 had put the new news feed ABOVE that dashboard
+                          #      inside Latest News; the manager wants the at-a-glance dashboard first, with
+                          #      the news feed underneath it. Fixed by moving the news-feed block (unchanged
+                          #      internally) to after the header/verdict/gauges/stale-warning section within
+                          #      tab_news, both still inside the same tab.
+                          #   2. "the 'Manager style' needs to start from the highest and the 0 to be on the
+                          #      top" (pointing at the Season Rank chart's y-axis, with a hand-drawn arrow at
+                          #      the "0" origin). ROOT CAUSE, confirmed in code: st.line_chart (Patch 66) has
+                          #      no axis-reverse option at all -- the Patch 66 changelog entry already disclosed
+                          #      this as a known limitation rather than something that could be fixed with that
+                          #      API, with an on-page caption saying so. Actually fixing it (not just
+                          #      re-disclosing the same limitation) required switching chart libraries: now
+                          #      built with st.altair_chart and an explicit `alt.Scale(reverse=True)` on the y-
+                          #      axis, so rank=0 (best possible) sits at the TOP and the axis climbs downward --
+                          #      an improving (falling) rank now visually reads as the line climbing, matching
+                          #      "climbing the leaderboard." altair itself is NOT a new install cost: Streamlit
+                          #      has depended on it for its own native charting (st.line_chart/st.area_chart/
+                          #      etc.) since long before this app existed, so every environment that can run
+                          #      streamlit already has it -- added as an explicit top-level import and to
+                          #      requirements.txt anyway, rather than silently relying on it as an unpinned
+                          #      transitive dependency.
+                          # Verified: full `ast.parse` syntax check; full existing test suite re-run (34 test
+                          # files total), all prior patch tests pass except test_patch34_impact_check.py (same
+                          # pre-existing, unrelated failure) -- test_patch67_news_feed.py updated in place for
+                          # the news feed's new position within the tab (same in-place-update pattern as
+                          # test_release2_visual_redesign.py and test_patch66_tabs_refactor.py before it); new
+                          # regression test (test_patch69_layout_and_axis.py, 6 checks) confirms the dashboard
+                          # renders before the news feed in source order, the Season Rank chart uses
+                          # st.altair_chart (not st.line_chart) with reverse=True on its y-axis scale, altair is
+                          # imported at module level, and requirements.txt declares it explicitly. Ran the
+                          # actual card/chart-rendering code locally via `streamlit run` against synthetic data
+                          # matching the manager's own screenshot values (GW5 rank dipping to ~7.4M) and
+                          # confirmed via Playwright/Chromium screenshot that the dashboard card renders above
+                          # the news feed, and that the chart's y-axis now reads 0 at the top with the axis
+                          # climbing downward, the GW5 dip correctly plotting low on the (now-inverted) chart.
+                          # NOTE (2026-09-22): rb_model_app_patch69.zip is CUMULATIVE: Patch 29 through 69
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

@@ -12,6 +12,12 @@ import datetime as dt
 import html
 import re
 
+# Patch 69 — altair, used only for the Season Rank chart's reversed y-axis
+# (st.line_chart itself has no axis-reverse option). Not a new install cost:
+# Streamlit has depended on altair for its own native charting (st.line_
+# chart/st.area_chart/etc.) since well before this app existed, so it is
+# already present in every environment that can run streamlit at all.
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -31,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 68 (Pitch is now the default first tab; real Latest News feed)"
+PATCH_VERSION = "Patch 69 (Latest News: dashboard on top; Season Rank y-axis reversed)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1601,84 +1607,6 @@ with tab_captain:
 
 with tab_news:
     # ---------------------------------------------------------------------------
-    # Latest News feed (Patch 67, manager question: "what will be there, can
-    # we fetch the latest news from the FPL app or website?"). ROOT-CAUSE
-    # DISCLOSURE: this tab previously only held the header/verdict/rating-
-    # gauge dashboard below — never actual injury/press-conference news, a
-    # real mismatch against this project's own output_format spec. Verified
-    # in code before building this: the official FPL API (already the sole
-    # data source this app uses, via fpl_data.fetch_bootstrap_official())
-    # already returns per-player `status` (a/d/i/s/u), `news` (free text,
-    # e.g. "Ankle injury - Expected back 12 Oct"), `news_added` (the ISO
-    # timestamp FPL itself puts on that text) and `chance_of_playing_
-    # next_round` (%) — this is the exact same "News" shown on a player's
-    # page in the official app/site, not a scrape of anything else. `status`/
-    # `news` were already carried into the player table; `chance_of_playing_
-    # next_round`/`news_added` were not (added this patch, data_pipeline.py).
-    # Scope + sort per manager confirmation (AskUserQuestion, this session):
-    # scans the full squad + transfer pool (not just your 15), and shows
-    # every currently-flagged player, newest news_added first — no diffing
-    # against a prior run.
-    # ---------------------------------------------------------------------------
-    st.markdown('<div class="section-h">🗞️ Latest News</div>', unsafe_allow_html=True)
-    _news_sev_map = {"i": ("sev-injured", "Injured"), "s": ("sev-suspended", "Suspended"),
-                      "d": ("sev-doubtful", "Doubtful"), "u": ("sev-unavailable", "Unavailable"),
-                      "n": ("sev-unavailable", "Not available")}
-    _news_universe = pd.concat(
-        [squad_df.assign(_in_squad=True) if not squad_df.empty else squad_df,
-         pool_df.assign(_in_squad=False) if not pool_df.empty else pool_df],
-        ignore_index=True, sort=False) if ("status" in squad_df.columns or "status" in pool_df.columns) else pd.DataFrame()
-    if not _news_universe.empty and "status" in _news_universe.columns:
-        _cop = pd.to_numeric(_news_universe.get("chance_of_playing_next_round"), errors="coerce")
-        _flagged_mask = (_news_universe["status"].fillna("a") != "a") | (_cop < 100)
-        _news_rows = _news_universe[_flagged_mask].copy()
-        _news_rows["_cop"] = _cop[_flagged_mask]
-        if not _news_rows.empty:
-            _news_rows["_ts"] = pd.to_datetime(_news_rows.get("news_added"), errors="coerce", utc=True)
-            _news_rows = _news_rows.sort_values("_ts", ascending=False, na_position="last")
-            _NEWS_CAP = 40
-            _shown = _news_rows.head(_NEWS_CAP)
-            for _, nr in _shown.iterrows():
-                _sev_cls, _sev_label = _news_sev_map.get(nr.get("status"), ("sev-doubtful", "Flagged"))
-                _n_photo = _photo_url(nr.get("code", 0))
-                _n_initials = "".join([w[0] for w in str(nr.get("web_name", "??")).split()][:2]).upper() or "??"
-                _n_text = (nr.get("news") or "").strip() or "No further detail published by FPL yet."
-                _n_ts = nr["_ts"]
-                _n_ts_txt = _n_ts.strftime("%d %b %Y, %H:%M UTC") if pd.notna(_n_ts) else "Timestamp unconfirmed"
-                _n_cop = nr.get("_cop")
-                _n_cop_txt = f"{int(_n_cop)}% chance of playing" if pd.notna(_n_cop) else ""
-                _n_scope = "IN YOUR SQUAD" if nr.get("_in_squad") else "WATCHLIST"
-                st.markdown(
-                    '<div class="news-item ' + _sev_cls + '">'
-                    '<div class="ring"><img src="' + _n_photo + '" '
-                    'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
-                    '<div class="avatar-fallback">' + _n_initials + '</div></div>'
-                    '<div class="body">'
-                    '<div class="top-row">'
-                    '<span class="name">' + str(nr.get('web_name', '')) + '</span>'
-                    '<span class="team">' + str(nr.get('team', '')) + ' · ' + str(nr.get('position', '')) + '</span>'
-                    '<span class="status-badge ' + _sev_cls + '">' + _sev_label + '</span>'
-                    '<span class="scope-tag">' + _n_scope + '</span>'
-                    + (('<span class="cop">' + _n_cop_txt + '</span>') if _n_cop_txt else '') +
-                    '</div>'
-                    '<div class="text">' + html.escape(_n_text) + '</div>'
-                    '<div class="ts">' + _n_ts_txt + '</div>'
-                    '</div></div>', unsafe_allow_html=True)
-            if len(_news_rows) > _NEWS_CAP:
-                st.caption(f"Showing the {_NEWS_CAP} most recently updated of {len(_news_rows)} flagged players "
-                           f"across your squad + the transfer pool.")
-            st.caption("Source: official FPL API (status/news/chance-of-playing-next-round), the same data shown "
-                       "on a player's page in the official app/site — refreshed every model run, not scraped "
-                       "from anywhere else. \"IN YOUR SQUAD\" = one of your 15; \"WATCHLIST\" = anyone else in "
-                       "the transfer pool, so a target's injury shows up here before you'd notice it manually.")
-        else:
-            st.caption("No live injury/status news for your squad or the transfer pool right now — every "
-                       "scanned player is currently 'a' (available) with no doubt flag from FPL.")
-    else:
-        st.caption("News feed unavailable this run — player status/news columns weren't present in this run's "
-                   "data (see any staleness warning below).")
-
-    # ---------------------------------------------------------------------------
     # Header + verdict
     # ---------------------------------------------------------------------------
     col1, col2 = st.columns([2, 1])
@@ -1852,6 +1780,88 @@ with tab_news:
                            f"above is a faster single-GW read for day-to-day use and is labeled as such.")
     if snap.stale_warning:
         st.warning(snap.stale_warning)
+
+    # ---------------------------------------------------------------------------
+    # Patch 69 (manager screenshot) — moved BELOW the header/verdict/rating-
+    # gauge dashboard: the manager wants the at-a-glance rank/rating card at
+    # the top of this tab, with the news feed underneath it, not the other
+    # way around (Patch 67 originally put the feed first).
+    # Latest News feed (Patch 67, manager question: "what will be there, can
+    # we fetch the latest news from the FPL app or website?"). ROOT-CAUSE
+    # DISCLOSURE: this tab previously only held the header/verdict/rating-
+    # gauge dashboard above — never actual injury/press-conference news, a
+    # real mismatch against this project's own output_format spec. Verified
+    # in code before building this: the official FPL API (already the sole
+    # data source this app uses, via fpl_data.fetch_bootstrap_official())
+    # already returns per-player `status` (a/d/i/s/u), `news` (free text,
+    # e.g. "Ankle injury - Expected back 12 Oct"), `news_added` (the ISO
+    # timestamp FPL itself puts on that text) and `chance_of_playing_
+    # next_round` (%) — this is the exact same "News" shown on a player's
+    # page in the official app/site, not a scrape of anything else. `status`/
+    # `news` were already carried into the player table; `chance_of_playing_
+    # next_round`/`news_added` were not (added this patch, data_pipeline.py).
+    # Scope + sort per manager confirmation (AskUserQuestion, this session):
+    # scans the full squad + transfer pool (not just your 15), and shows
+    # every currently-flagged player, newest news_added first — no diffing
+    # against a prior run.
+    # ---------------------------------------------------------------------------
+    st.markdown('<div class="section-h">🗞️ Latest News</div>', unsafe_allow_html=True)
+    _news_sev_map = {"i": ("sev-injured", "Injured"), "s": ("sev-suspended", "Suspended"),
+                      "d": ("sev-doubtful", "Doubtful"), "u": ("sev-unavailable", "Unavailable"),
+                      "n": ("sev-unavailable", "Not available")}
+    _news_universe = pd.concat(
+        [squad_df.assign(_in_squad=True) if not squad_df.empty else squad_df,
+         pool_df.assign(_in_squad=False) if not pool_df.empty else pool_df],
+        ignore_index=True, sort=False) if ("status" in squad_df.columns or "status" in pool_df.columns) else pd.DataFrame()
+    if not _news_universe.empty and "status" in _news_universe.columns:
+        _cop = pd.to_numeric(_news_universe.get("chance_of_playing_next_round"), errors="coerce")
+        _flagged_mask = (_news_universe["status"].fillna("a") != "a") | (_cop < 100)
+        _news_rows = _news_universe[_flagged_mask].copy()
+        _news_rows["_cop"] = _cop[_flagged_mask]
+        if not _news_rows.empty:
+            _news_rows["_ts"] = pd.to_datetime(_news_rows.get("news_added"), errors="coerce", utc=True)
+            _news_rows = _news_rows.sort_values("_ts", ascending=False, na_position="last")
+            _NEWS_CAP = 40
+            _shown = _news_rows.head(_NEWS_CAP)
+            for _, nr in _shown.iterrows():
+                _sev_cls, _sev_label = _news_sev_map.get(nr.get("status"), ("sev-doubtful", "Flagged"))
+                _n_photo = _photo_url(nr.get("code", 0))
+                _n_initials = "".join([w[0] for w in str(nr.get("web_name", "??")).split()][:2]).upper() or "??"
+                _n_text = (nr.get("news") or "").strip() or "No further detail published by FPL yet."
+                _n_ts = nr["_ts"]
+                _n_ts_txt = _n_ts.strftime("%d %b %Y, %H:%M UTC") if pd.notna(_n_ts) else "Timestamp unconfirmed"
+                _n_cop = nr.get("_cop")
+                _n_cop_txt = f"{int(_n_cop)}% chance of playing" if pd.notna(_n_cop) else ""
+                _n_scope = "IN YOUR SQUAD" if nr.get("_in_squad") else "WATCHLIST"
+                st.markdown(
+                    '<div class="news-item ' + _sev_cls + '">'
+                    '<div class="ring"><img src="' + _n_photo + '" '
+                    'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'flex\';">'
+                    '<div class="avatar-fallback">' + _n_initials + '</div></div>'
+                    '<div class="body">'
+                    '<div class="top-row">'
+                    '<span class="name">' + str(nr.get('web_name', '')) + '</span>'
+                    '<span class="team">' + str(nr.get('team', '')) + ' · ' + str(nr.get('position', '')) + '</span>'
+                    '<span class="status-badge ' + _sev_cls + '">' + _sev_label + '</span>'
+                    '<span class="scope-tag">' + _n_scope + '</span>'
+                    + (('<span class="cop">' + _n_cop_txt + '</span>') if _n_cop_txt else '') +
+                    '</div>'
+                    '<div class="text">' + html.escape(_n_text) + '</div>'
+                    '<div class="ts">' + _n_ts_txt + '</div>'
+                    '</div></div>', unsafe_allow_html=True)
+            if len(_news_rows) > _NEWS_CAP:
+                st.caption(f"Showing the {_NEWS_CAP} most recently updated of {len(_news_rows)} flagged players "
+                           f"across your squad + the transfer pool.")
+            st.caption("Source: official FPL API (status/news/chance-of-playing-next-round), the same data shown "
+                       "on a player's page in the official app/site — refreshed every model run, not scraped "
+                       "from anywhere else. \"IN YOUR SQUAD\" = one of your 15; \"WATCHLIST\" = anyone else in "
+                       "the transfer pool, so a target's injury shows up here before you'd notice it manually.")
+        else:
+            st.caption("No live injury/status news for your squad or the transfer pool right now — every "
+                       "scanned player is currently 'a' (available) with no doubt flag from FPL.")
+    else:
+        st.caption("News feed unavailable this run — player status/news columns weren't present in this run's "
+                   "data (see any staleness warning below).")
 
 with tab_chips:
     # ---------------------------------------------------------------------------
@@ -3130,13 +3140,19 @@ with tab_style:
                      "floor on merit.")
 
     # -----------------------------------------------------------------------
-    # Season rank chart (Patch 66) — bundled into this same patch alongside
-    # the tab refactor per manager confirmation via AskUserQuestion ("Season
-    # rank chart/dashboard"). Reuses `cur_hist` (history["current"], already
-    # fetched/computed above for the Season Ledger table right above this —
-    # not a new API call) so the chart and the ledger table can never
-    # disagree. st.line_chart (native, zero-cost — no new dependency) rather
-    # than matplotlib/plotly, consistent with the rest of this app.
+    # Season rank chart (Patch 66; y-axis reversal Patch 69 — manager
+    # screenshot, annotated "0 here" pointing at the y-axis origin: wanted
+    # rank=0 at the TOP and the axis climbing downward, so an improving
+    # (falling) rank line visually reads as climbing the chart, the same
+    # sense as "climbing the leaderboard"). Bundled into Patch 66 per manager
+    # confirmation via AskUserQuestion ("Season rank chart/dashboard").
+    # Reuses `cur_hist` (history["current"], already fetched/computed above
+    # for the Season Ledger table right above this — not a new API call) so
+    # the chart and the ledger table can never disagree.
+    # st.line_chart itself has no axis-reverse option (disclosed in the
+    # Patch 66 changelog entry) -- switched to st.altair_chart, with an
+    # explicit reversed alt.Scale on the y-axis, to actually fix this rather
+    # than just re-disclosing the same limitation again.
     # -----------------------------------------------------------------------
     st.markdown('<div class="section-h">Season Rank</div>', unsafe_allow_html=True)
     if cur_hist:
@@ -3146,11 +3162,25 @@ with tab_style:
                       for r in sorted(cur_hist, key=lambda x: x["event"]) if r.get("overall_rank") is not None or
                       (r["event"] == squad_gw and live_overall_rank is not None)]
         if _rank_rows:
-            _rank_df = pd.DataFrame(_rank_rows).set_index("GW")
-            st.line_chart(_rank_df, use_container_width=True)
-            st.caption("Overall rank by gameweek — lower is better (chart y-axis is not inverted). "
-                       "Uses the same live-corrected GW figure as the Season Ledger table above, so the two "
-                       "never disagree on the current, not-yet-finalized gameweek.")
+            _rank_df = pd.DataFrame(_rank_rows)
+            _rank_chart = (
+                alt.Chart(_rank_df)
+                .mark_line(point=True, color="#2FBFC7")
+                .encode(
+                    x=alt.X("GW:O", title="Gameweek"),
+                    y=alt.Y("Overall rank:Q", title="Overall rank",
+                            scale=alt.Scale(reverse=True, zero=True, nice=True),
+                            axis=alt.Axis(format=",.0f")),
+                    tooltip=[alt.Tooltip("GW:O", title="GW"),
+                             alt.Tooltip("Overall rank:Q", title="Overall rank", format=",.0f")],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(_rank_chart, use_container_width=True)
+            st.caption("Overall rank by gameweek — axis is reversed (0 at the top) so an improving rank reads "
+                       "as the line climbing, same sense as climbing the leaderboard. Uses the same live-"
+                       "corrected GW figure as the Season Ledger table above, so the two never disagree on the "
+                       "current, not-yet-finalized gameweek.")
         else:
             st.caption("No overall-rank data yet this season — chart will populate once a gameweek finishes.")
     else:
