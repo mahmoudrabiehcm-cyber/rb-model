@@ -438,6 +438,22 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "price": price_vals.values,
         "status": pl["status"].values if "status" in pl.columns else None,
         "news": pl["news"].values if "news" in pl.columns else None,
+        # Patch 67 (manager question: "can we fetch the latest news from the
+        # FPL app or website?") — both already sit on every bootstrap-static
+        # element (same source `pl["news"]`/`pl["status"]` above already come
+        # from), just never previously selected out into the player table.
+        # chance_of_playing_next_round was already read further upstream
+        # (build_player_table's own numcols coercion, see the Rule #24 note
+        # near the top of this function) for xm/rescue-flag purposes, but
+        # was never itself carried through to this returned table — added
+        # here so the news feed can show the actual percentage, not just the
+        # a/d/i/s/u status letter. news_added is new: the ISO timestamp FPL
+        # itself puts on that news text, used to sort the news feed newest-
+        # first and to give it the exact, verified timestamp this project's
+        # Standing Rules require for any news item referenced.
+        "chance_of_playing_next_round": (pl["chance_of_playing_next_round"].values
+                                          if "chance_of_playing_next_round" in pl.columns else None),
+        "news_added": pl["news_added"].values if "news_added" in pl.columns else None,
         "selected_by_percent": pl["selected_by_percent"].values if "selected_by_percent" in pl.columns else None,
         "transfers_in_event": pl.get("transfers_in_event", pd.Series(np.nan, index=pl.index)).values,
         "transfers_out_event": pl.get("transfers_out_event", pd.Series(np.nan, index=pl.index)).values,

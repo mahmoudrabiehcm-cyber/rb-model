@@ -1338,6 +1338,210 @@ meta:
                           # ("Release 2.1") together, on top of the manager's Patch 28 baseline.
                           # manual_overrides.csv is NOT included (see the Patch 58 addendum above) -- keep
                           # using your own live copy.
+                          # Patch 64 (2026-09-22, manager screenshot on the LIVE Patch-63 deployment: a
+                          # visible border/box around the GW pagination label and around the paired GW
+                          # xPts/Rating st.metric block -- both look out of place against the rest of the
+                          # page's borderless layout). Investigated in code first, per this project's
+                          # verification-first standing rule, before treating it as actionable: confirmed
+                          # app.py has NO `border=True` on any st.columns/st.container call anywhere, and no
+                          # CSS rule of this app's own ever targets those elements with a border -- so this
+                          # was never something this app's own code drew on purpose. Root cause, disclosed as
+                          # a genuine possibility rather than proven from this sandbox (no access to the
+                          # manager's live Streamlit Community Cloud deploy to compare Streamlit versions
+                          # directly): requirements.txt pins only `streamlit>=1.38` with no upper bound, so
+                          # Community Cloud installs whatever the newest matching release is at deploy
+                          # time -- not necessarily the same version this was tested against locally (this
+                          # sandbox runs 1.62.0, which reproduces no such border) -- and Streamlit has, across
+                          # its own releases, changed the default chrome around st.metric/st.columns more
+                          # than once. Fix: rather than chase the exact version, added an explicit CSS reset
+                          # targeting Streamlit's own internal container/metric testids
+                          # (`[data-testid="stMetric"]`, `[data-testid="stHorizontalBlock"]`,
+                          # `[data-testid="column"]`, and element-container wrappers) forcing
+                          # `border:none / box-shadow:none / background:transparent`, so this app's own
+                          # intentional borders (`.card`, `.tx-card`, `.cap-spotlight`, etc.) are the only
+                          # ones ever visible, regardless of which exact Streamlit release actually deploys
+                          # in the future -- this should hold even if Streamlit's own default chrome changes
+                          # again later. Verified: full `ast.parse` syntax check; CSS brace-balance check (160
+                          # open / 160 close); full existing test suite re-run, all prior patch tests pass
+                          # except test_patch34_impact_check.py (same pre-existing, unrelated failure); ran
+                          # the actual app locally with `streamlit run` (per the manager's standing "test
+                          # before sharing" instruction) rebuilding the exact pagination + metric-pair layout
+                          # and confirmed via Playwright/Chromium screenshot that it renders border-free and
+                          # otherwise unchanged -- this sandbox's own Streamlit version doesn't reproduce the
+                          # reported border, so this specific screenshot could only confirm the reset causes
+                          # no regression, not that it eliminates a border this sandbox never showed in the
+                          # first place; the manager's own next live screenshot is what actually closes this
+                          # out.
+                          # NOTE (2026-09-22): rb_model_app_patch64.zip is CUMULATIVE: Patch 29 through 64
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 65 (2026-09-22, manager screenshot: the Transfer Recommendations section
+                          # still showed the old plain-text line, not a photo card, while running "Hit if
+                          # worth it" + a 2-GW horizon -- "why the transfers doesn't have photos like we
+                          # agreed to be like the armbands"). ROOT CAUSE, confirmed in code: that combination
+                          # of settings produces a chained weekly-pacing-plan result
+                          # (rec["is_weekly_schedule"] == True), and Release 2's transfer OUT->IN card
+                          # section in app.py was gated with `not rec.get("is_weekly_schedule")` -- a guard
+                          # that was never actually necessary. Verified directly against recommend.py:
+                          # suggest_transfers()'s weekly-schedule path (~line 744) builds each week's moves
+                          # with the exact same `_move_row()` helper used by every single-decision path
+                          # (~lines 1081/1221/1543/1570), so the move dicts are identically shaped either
+                          # way (out/out_code/out_team/in/in_code/in_team/position/hit_cost/net_gain/gw) --
+                          # and recommend.py already flattens every week's moves into the top-level
+                          # rec["moves"] list specifically so callers don't have to special-case it
+                          # (`"moves": [m for wk in weekly_plan for m in wk["moves"]]`). Fixed by simply
+                          # removing the guard -- the chained-plan case now gets the same visual cards as
+                          # the single-decision case, one per move across every week in the plan, still
+                          # added above the unchanged existing text (nothing hidden). Verified: full
+                          # `ast.parse` syntax check; full existing test suite re-run, all prior patch tests
+                          # pass except test_patch34_impact_check.py (same pre-existing, unrelated failure);
+                          # new regression test (test_patch65_weekly_plan_tx_cards.py) reuses test_patch13's
+                          # exact chained-pacing-plan scenario against the REAL recommend.suggest_transfers()
+                          # (not a synthetic/guessed shape) to confirm both that the resulting moves carry
+                          # every field the card renderer reads and that app.py's gating condition no longer
+                          # excludes this case; ran the actual card-rendering code locally against that same
+                          # real scenario's output via `streamlit run` and confirmed via Playwright/Chromium
+                          # screenshot that both GW4 and GW5 moves render as OUT->IN photo cards, matching
+                          # the single-decision case exactly.
+                          # NOTE (2026-09-22): rb_model_app_patch65.zip is CUMULATIVE: Patch 29 through 65
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 66 (2026-09-22, manager screenshot + follow-up: "when we can start on the
+                          # sections navigations as a taps on top as discussed"). Adds top-tab section
+                          # navigation matching this project's 5 standing output sections exactly (confirmed
+                          # via AskUserQuestion: "Match the project's 5 output sections") -- Latest News /
+                          # Transfer Recommendations / Captaincy Pick / Chip Plan / Manager Style Fit, in that
+                          # order, via a single `st.tabs([...])` call. Implementation note: Streamlit renders
+                          # every tab's body on each script run regardless of which tab is visually active, so
+                          # this was done as a pure structural wrap -- each `with tabX:` block routes an
+                          # already-existing, UNMOVED block of code into its tab's container, via indentation
+                          # only. No compute-order or session-state-dependent logic was reordered anywhere.
+                          # Two other changes bundled into this same patch, per the manager's explicit
+                          # confirmation (AskUserQuestion: "is there anything else already agreed that should
+                          # land in the same patch?" -> "Season rank chart/dashboard") and follow-up request
+                          # ("the next patch should contain all we agreed"):
+                          #   1. Captaincy Pick is now its own standalone tab, not just an armband/caption
+                          #      buried inside the Pitch Navigator. This required an actual extraction, not
+                          #      just a re-wrap: the Release 2 captaincy spotlight card (Patch 61) previously
+                          #      lived inside `_render_pitch_navigator()`'s @st.fragment body, gated on
+                          #      `at_planning_gw and cap_caption and cap_pick_row is not None` -- that
+                          #      `at_planning_gw` condition was never a real dependency, only a side effect of
+                          #      where the navigator's own cursor happened to be scrolled (captaincy is
+                          #      computed once, for planning_gw only, well before the navigator's own function
+                          #      definition even runs). The card's markup was moved out of that function
+                          #      entirely into its own `with tab_captain:` block (placed right after the
+                          #      `st.tabs()` call, since cap_pick_row/cap_alt_row/cap_caption/cap_xp are already
+                          #      computed far earlier in the script) and the `at_planning_gw` condition dropped
+                          #      -- confirmed in code (test_patch66_tabs_refactor.py Test 5) that
+                          #      `_render_pitch_navigator()` itself no longer renders the cap-spotlight card,
+                          #      so it's never shown twice.
+                          #   2. A new Season Rank chart in the Manager Style Fit tab, built with
+                          #      `st.line_chart` (native, zero new dependency -- consistent with the rest of
+                          #      this zero-cost app; no matplotlib/plotly added). Confirmed in code before
+                          #      building it that the needed data already exists: `cur_hist` (=
+                          #      `history.get("current", [])`, from `_load_data()`'s existing
+                          #      `fpl_data.fetch_entry_history_official()` call -- no new API call) is the same
+                          #      list of per-GW dicts the Season Ledger table right above it already reads,
+                          #      each carrying `event` (GW) and `overall_rank`. The chart reuses the exact same
+                          #      live-rank-correction logic the ledger table uses for the current,
+                          #      not-yet-finalized GW (`live_overall_rank` substituted in for `squad_gw`'s row)
+                          #      so the chart and the table can never show two different numbers for the same
+                          #      GW. Y-axis is not inverted (a genuine st.line_chart limitation) -- disclosed
+                          #      directly in an on-page caption ("lower is better") rather than silently
+                          #      left ambiguous.
+                          # Verified: full `ast.parse` syntax check; full existing test suite re-run (31 test
+                          # files), all prior patch tests pass except test_patch34_impact_check.py (same
+                          # pre-existing, unrelated failure documented since Patch 55) -- including
+                          # test_patch60_scenario_nav_timing.py, whose own line-number assertions shifted
+                          # correctly with the refactor and still passed; new regression test
+                          # (test_patch66_tabs_refactor.py, 7 checks) confirms all 5 tabs are declared in the
+                          # project's own order, every tab is actually entered at least once, the captaincy
+                          # card lives only in tab_captain (not duplicated inside the navigator, and with no
+                          # at_planning_gw dependency left in its actual code), and the season rank chart
+                          # exists and reuses cur_hist rather than a new data source. Ran the real app locally
+                          # via `streamlit run` (per the manager's standing "test before sharing" instruction)
+                          # -- confirmed via Playwright/Chromium screenshot that the tab bar renders all 5
+                          # sections in order with the correct icons, that the Captaincy Pick tab renders the
+                          # cap-spotlight card standalone (synthetic Haaland/Salah data, since this sandbox has
+                          # no network route to the official FPL API), and that the Season Rank tab renders a
+                          # clean line chart with the "lower is better" caption. Also ran the actual app.py
+                          # itself (not just a synthetic smoke script) locally and confirmed it boots to the
+                          # gate screen without a traceback; could not verify the live-data path end-to-end in
+                          # this sandbox (no FPL API network access here), so the manager's own first live
+                          # screenshot on this patch is what closes that out, same disclosed limitation as
+                          # every prior patch this session that touched a live-data-dependent screen.
+                          # NOTE (2026-09-22): rb_model_app_patch66.zip is CUMULATIVE: Patch 29 through 66
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 67 (2026-09-22, manager question: "what will be there [in Latest News], can
+                          # we fetch the latest news from the FPL app or website?"). ROOT-CAUSE DISCLOSURE given
+                          # first, per this project's verification-first standing rule: the Latest News tab
+                          # (Patch 66) only ever held the header/verdict/rating-gauge dashboard -- never actual
+                          # injury/press-conference news, a real mismatch against this project's own
+                          # output_format spec. Checked in code before building anything: the official FPL API
+                          # (the sole data source this app already uses, fpl_data.fetch_bootstrap_official())
+                          # already returns per-player `status` (a/d/i/s/u), `news` (free text, e.g. "Ankle
+                          # injury - Expected back 12 Oct"), `news_added` (FPL's own ISO timestamp on that
+                          # text) and `chance_of_playing_next_round` (%) -- exactly the same "News" shown on a
+                          # player's page in the official app/site, not a scrape of anything else.
+                          # `status`/`news` were already carried into the player table (data_pipeline.py); the
+                          # other two were fetched into the raw bootstrap frame but never selected into the
+                          # returned table, and `chance_of_playing_next_round` was separately read upstream
+                          # only for internal xm/rescue-flag purposes (never surfaced). Manager confirmed scope
+                          # + sort via AskUserQuestion: scan the full squad + transfer pool (not just the 15),
+                          # and show every currently-flagged player newest-first by news_added (no diffing
+                          # against a prior run). Built: (1) data_pipeline.py's build_player_table() now also
+                          # returns chance_of_playing_next_round/news_added (scalar_reference.py, the parallel
+                          # scalar implementation test_patch50_vectorized_correctness.py diffs against for
+                          # exact numeric equality, kept in sync with the same two fields in the same position
+                          # -- this is what that test's "old/new columns differ" failure during this patch was,
+                          # a real and expected diff, fixed by updating scalar_reference.py rather than the
+                          # test); (2) a real news feed in tab_news, scanning squad_df + pool_df, filtering on
+                          # status != 'a' or chance_of_playing_next_round < 100, sorted newest-first, one
+                          # `.news-item` card per flagged player (photo, name/team/position, a severity-colored
+                          # status badge, chance-of-playing %, the raw FPL news text, an "IN YOUR SQUAD" /
+                          # "WATCHLIST" tag, and the exact news_added timestamp -- satisfying this project's
+                          # Standing Rule requirement that any news item carry an exact, verified timestamp).
+                          # Verified: full `ast.parse` syntax check; full existing test suite re-run, all prior
+                          # patch tests pass except test_patch34_impact_check.py (same pre-existing, unrelated
+                          # failure); new regression test (test_patch67_news_feed.py) confirms both
+                          # implementations carry the new fields and that tab_news's actual code builds the
+                          # feed as scoped/sorted; ran the actual card-rendering code locally against synthetic
+                          # squad+pool data (5 players spanning injured/suspended/doubtful/unavailable/fully-
+                          # fit) via `streamlit run` and confirmed via Playwright/Chromium screenshot that the
+                          # feed renders correctly sorted newest-first with the right severity colors, badges,
+                          # tags and timestamps, and that a fully-fit player is correctly excluded.
+                          # NOTE (2026-09-22): rb_model_app_patch67.zip is CUMULATIVE: Patch 29 through 67
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 68 (2026-09-22, manager, immediately after seeing Patch 66 live: "The pitch
+                          # should be the first tab and by default appears"). Streamlit's st.tabs() has no
+                          # separate "default tab" setting -- it always opens on whichever tab is listed first
+                          # -- so making the Pitch Navigator the default view means making it the first tab.
+                          # Added a new ⚽ Pitch tab ahead of 🗞️ Latest News (now 6 tabs total: Pitch / Latest
+                          # News / Transfer Recommendations / Captaincy Pick / Chip Plan / Manager Style Fit)
+                          # and moved `_compute_scenario_evaluations()` / `_render_pitch_navigator()`'s call
+                          # site out of tab_transfers (where Patch 66 had put it) into this new tab_pitch. The
+                          # "Evaluate your own scenario" expander (which drives the scenario the navigator can
+                          # show) stays inside Transfer Recommendations -- its widget keys are still read by
+                          # `_compute_scenario_evaluations()` via st.session_state, which Streamlit populates
+                          # before ANY of the script body runs on a given rerun (the same mechanism Patch 60's
+                          # original same-render timing fix already relied on), so moving the compute+render
+                          # call to an earlier tab in script order doesn't break that wiring -- confirmed by
+                          # test_patch60_scenario_nav_timing.py still passing unmodified. GW Breakdown, the
+                          # transfer OUT->IN cards, the "Why" expander and "Evaluate your own scenario" itself
+                          # all stay in Transfer Recommendations, unmoved. Verified: full `ast.parse` syntax
+                          # check; full existing test suite re-run, all prior patch tests pass except
+                          # test_patch34_impact_check.py (same pre-existing, unrelated failure);
+                          # test_patch66_tabs_refactor.py updated in place (same pattern as
+                          # test_release2_visual_redesign.py across Patches 61-63) to check all 6 tabs, Pitch
+                          # listed first, and that the navigator's calls live only in tab_pitch, not duplicated
+                          # in tab_transfers; ran the actual app locally via `streamlit run` and confirmed via
+                          # Playwright/Chromium screenshot that the Pitch tab is the one already open on page
+                          # load, with no click needed, tab bar showing all 6 in the correct order.
+                          # NOTE (2026-09-22): rb_model_app_patch68.zip is CUMULATIVE: Patch 29 through 68
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

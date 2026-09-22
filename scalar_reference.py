@@ -89,6 +89,12 @@ def compute_all_scalar_reference(cfg: dict, snap, players: pd.DataFrame,
             "code": p.get("code"), "id": p.get("id"), "web_name": p.get("web_name"),
             "team": short, "team_id": team_id, "position": pos, "price": price(p.get("now_cost")),
             "status": p.get("status"), "news": p.get("news"),
+            # Patch 67 — kept in sync with data_pipeline.py's vectorized
+            # build_player_table() (this scalar path is the parallel
+            # reference implementation test_patch50_vectorized_correctness.py
+            # diffs against for exact numeric equality).
+            "chance_of_playing_next_round": p.get("chance_of_playing_next_round"),
+            "news_added": p.get("news_added"),
             "selected_by_percent": p.get("selected_by_percent"),
             "transfers_in_event": p.get("transfers_in_event"),
             "transfers_out_event": p.get("transfers_out_event"),
