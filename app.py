@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 69 (Latest News: dashboard on top; Season Rank y-axis reversed)"
+PATCH_VERSION = "Patch 70 (crash fix: solve_squad hardened against MILP build failures)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 

@@ -10,6 +10,7 @@ Also used to produce Ceiling_xPts for §1a's Team Rating %.
 Free & open-source: PuLP with its bundled CBC solver, no license, no cost.
 """
 from __future__ import annotations
+import sys
 import pandas as pd
 
 try:
@@ -145,54 +146,91 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     if df.empty:
         return None
 
-    prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-    x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in df.index}
+    # Patch 70 (manager, live TypeError crash: "This app has encountered an
+    # error", traceback pointing at this exact dict-comprehension line) —
+    # two hardening fixes, applied together since the redacted Streamlit
+    # Cloud error hid the actual exception message and this couldn't be
+    # reproduced locally against synthetic data with the current pulp
+    # version (3.3.2), so this addresses the two concrete risks code review
+    # actually found here rather than guessing at one unconfirmed cause:
+    #
+    # 1. `df`'s index, at this point, is whatever survived dropna/position/
+    #    exclude/status filtering from the CALLER's `players` frame — not
+    #    guaranteed unique (a caller could hand in an already-concatenated
+    #    or otherwise non-reset-index frame). A duplicate index label here
+    #    is a real, confirmed-in-code latent bug: `df.loc[i, objective_col]`
+    #    for a duplicated `i` returns a pandas Series (not a scalar), which
+    #    a later line multiplies against an LpVariable — an operation pulp
+    #    cannot know how to perform. Reset to a clean, guaranteed-unique
+    #    RangeIndex here — nothing below this point depends on the index's
+    #    original values, only on it being consistent with itself.
+    df = df.reset_index(drop=True)
 
-    prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
+    # 2. Every other failure mode in this function (pulp missing, an empty
+    #    candidate pool, an infeasible/non-Optimal solve) already returns
+    #    None and every caller already handles that gracefully (`if
+    #    reachable else 0.0`, etc.) — but an unexpected exception during
+    #    the actual MILP construction/solve was NOT caught, so it propagated
+    #    all the way up and crashed the entire page instead of degrading
+    #    like every other failure path here already does. Wrapping this in
+    #    try/except turns any such exception into the same graceful "this
+    #    solve didn't work out this run" None-return every caller already
+    #    expects, and prints the real exception (class + message + which
+    #    solve this was) to stderr so it's visible in Streamlit Cloud's
+    #    "Manage app" logs even though the user-facing page redacts it.
+    try:
+        prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
+        x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in df.index}
 
-    prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= budget
-    prob += pulp.lpSum(x[i] for i in df.index) == cfg["squad_rules"]["squad_size"]
+        prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
 
-    formation = cfg["squad_rules"]["formation"]
-    for pos, count in formation.items():
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == pos) == count
+        prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= budget
+        prob += pulp.lpSum(x[i] for i in df.index) == cfg["squad_rules"]["squad_size"]
 
-    max_per_club = cfg["squad_rules"]["max_per_club"]
-    for team in df["team"].unique():
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
+        formation = cfg["squad_rules"]["formation"]
+        for pos, count in formation.items():
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == pos) == count
 
-    for code in must_include_codes:
-        idxs = df[df["code"] == code].index
-        for i in idxs:
-            prob += x[i] == 1
+        max_per_club = cfg["squad_rules"]["max_per_club"]
+        for team in df["team"].unique():
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
 
-    # Patch 15 — pin data-gap protected players too (see comment above):
-    # forced to stay exactly as they are this run, the same as an explicit
-    # must_include, so their fabricated 0.0 placeholder can never be read by
-    # the solver as "safe/attractive to drop."
-    for code in pinned_gap_codes:
-        idxs = df[df["code"] == code].index
-        for i in idxs:
-            prob += x[i] == 1
+        for code in must_include_codes:
+            idxs = df[df["code"] == code].index
+            for i in idxs:
+                prob += x[i] == 1
 
-    if retain_pool_codes and min_retain > 0:
-        idxs = df[df["code"].isin(retain_pool_codes)].index
-        if len(idxs) > 0:
-            prob += pulp.lpSum(x[i] for i in idxs) >= min(min_retain, len(idxs))
+        # Patch 15 — pin data-gap protected players too (see comment above):
+        # forced to stay exactly as they are this run, the same as an explicit
+        # must_include, so their fabricated 0.0 placeholder can never be read by
+        # the solver as "safe/attractive to drop."
+        for code in pinned_gap_codes:
+            idxs = df[df["code"] == code].index
+            for i in idxs:
+                prob += x[i] == 1
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        if retain_pool_codes and min_retain > 0:
+            idxs = df[df["code"].isin(retain_pool_codes)].index
+            if len(idxs) > 0:
+                prob += pulp.lpSum(x[i] for i in idxs) >= min(min_retain, len(idxs))
 
-    if pulp.LpStatus[prob.status] != "Optimal":
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+
+        if pulp.LpStatus[prob.status] != "Optimal":
+            return None
+
+        chosen = [i for i in df.index if x[i].value() == 1]
+        squad = df.loc[chosen].sort_values(["position", objective_col], ascending=[True, False])
+        return {
+            "squad": squad,
+            "total_xpts": round(squad[objective_col].sum(), 2),
+            "cost": round(squad["price"].sum(), 1),
+            "data_gap_codes": data_gap_codes,
+        }
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 70 note above
+        print(f"[optimizer.solve_squad] MILP build/solve failed ({objective_col}, "
+              f"{len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
         return None
-
-    chosen = [i for i in df.index if x[i].value() == 1]
-    squad = df.loc[chosen].sort_values(["position", objective_col], ascending=[True, False])
-    return {
-        "squad": squad,
-        "total_xpts": round(squad[objective_col].sum(), 2),
-        "cost": round(squad["price"].sum(), 1),
-        "data_gap_codes": data_gap_codes,
-    }
 
 
 def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str) -> dict | None:

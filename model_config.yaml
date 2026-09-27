@@ -1583,6 +1583,77 @@ meta:
                           # NOTE (2026-09-22): rb_model_app_patch69.zip is CUMULATIVE: Patch 29 through 69
                           # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
                           # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 70 (2026-09-27, manager screenshot of a LIVE CRASH: "This app has
+                          # encountered an error" / TypeError, on the deployed GW6 run). Traceback: app.py's
+                          # Team Rating % section (calling data_pipeline.solve_reachable_ceiling()) ->
+                          # data_pipeline.py's solve_reachable_ceiling() -> opt.solve_squad() -> optimizer.py's
+                          # MILP-variable dict comprehension. This session's cloud container had been reclaimed
+                          # between conversations (a known property of this ephemeral environment) and had no
+                          # local copy of the repo any more, so the manager shared the GitHub repo
+                          # (github.com/mahmoudrabiehcm-cyber/rb-model) and this was diagnosed directly against
+                          # the actual deployed source, per this project's verification-first standing rule --
+                          # not from memory of what a past patch shipped. IMPORTANT DISCLOSURE: Streamlit
+                          # Community Cloud redacts the actual exception message on-screen ("the original error
+                          # message is redacted to prevent data leaks") -- only the exception CLASS (TypeError)
+                          # and the call stack were visible, not the real underlying message. This could not be
+                          # reproduced locally against realistic synthetic squad/pool data using the current
+                          # pulp release (3.3.2, since requirements.txt's `pulp>=2.7` has no upper bound -- the
+                          # same open-ended-pin pattern already disclosed for streamlit/altair in earlier
+                          # patches). Rather than guess at one specific unconfirmed trigger, a full read of
+                          # optimizer.py's solve_squad() found two concrete, confirmable risks and fixed both:
+                          #   1. `df`'s index at the MILP-build point is whatever survived the caller's own
+                          #      filtering -- never explicitly reset, so it isn't guaranteed unique. A
+                          #      duplicate index label makes `df.loc[i, objective_col]` return a pandas Series
+                          #      instead of a scalar for that `i`, which a few lines later gets multiplied
+                          #      against an LpVariable -- pulp has no defined behavior for that and it can
+                          #      surface as a TypeError. Reproduced directly: concatenating two overlapping
+                          #      slices of a synthetic 620-player pool (a duplicate index, the same shape a
+                          #      caller could hand in without realizing it) into solve_squad() before this
+                          #      fix. Fixed with an explicit `df = df.reset_index(drop=True)` right before the
+                          #      MILP is built -- nothing downstream depends on the index's original values,
+                          #      only on it being internally consistent, which a clean RangeIndex guarantees.
+                          #   2. Separately, and regardless of whether #1 was the actual live trigger: every
+                          #      OTHER failure path already inside solve_squad() (pulp not installed, an empty
+                          #      candidate pool after filtering, an infeasible/non-Optimal CBC solve) already
+                          #      returns None, and every caller already handles that None gracefully (`if
+                          #      reachable else 0.0`, etc., confirmed by reading every call site) -- but the
+                          #      actual MILP construction/solve block itself had no try/except at all, so ANY
+                          #      unexpected exception there (this TypeError, or any other cause a future week's
+                          #      live data might trigger) propagated all the way up through
+                          #      solve_reachable_ceiling() and app.py and crashed the ENTIRE page instead of
+                          #      degrading like every sibling failure path here already does. Wrapped the whole
+                          #      block in try/except Exception, returning None (the same contract every caller
+                          #      already expects) and printing the real exception's class + message to stderr,
+                          #      which lands in Streamlit Cloud's "Manage app" logs even though the user-facing
+                          #      page itself redacts it -- so if this happens again for a different underlying
+                          #      reason, the actual cause is now recoverable from the logs instead of only ever
+                          #      showing "TypeError" with no message.
+                          # Verified: full `ast.parse` syntax check on every .py file in the repo; every core
+                          # module (fpl_data/fpl_engine/data_pipeline/optimizer/style_profiles/chip_protocol/
+                          # transfers/recommend/setpiece/scalar_reference) imports cleanly. NOTE: the full
+                          # historical regression test suite built up across Patches 29-69 did NOT survive this
+                          # session's cloud container being reclaimed between conversations (test files are
+                          # deliberately excluded from every delivered patch zip, by design, and the prior
+                          # session's scratchpad sync did not carry over either) -- rebuilt the load-bearing
+                          # checks fresh instead of skipping verification: new test_patch70_solve_squad_
+                          # hardening.py (4 checks) confirms solve_squad() still returns a legal, budget-
+                          # respecting, correctly-shaped 15-man squad on an ordinary input; confirms a genuine
+                          # duplicate-index input (synthetically constructed the same way a real caller could
+                          # produce one) no longer crashes and still solves correctly; confirms a forced
+                          # internal exception (an intentionally malformed cfg) is caught and degrades to None
+                          # rather than propagating; and confirms both source-level fixes are actually present.
+                          # Also ran the actual app.py locally via `streamlit run` and confirmed via
+                          # Playwright/Chromium screenshot that it boots clean to the gate screen with no
+                          # traceback -- this sandbox still has no network route to the official FPL API, so
+                          # the exact live crash scenario (this gameweek's real squad/pool data) could not be
+                          # re-run end-to-end here; the manager's own next live run is what closes that out,
+                          # same disclosed limitation as every prior patch this session that touched a live-
+                          # data-dependent path.
+                          # NOTE (2026-09-27): rb_model_app_patch70.zip is CUMULATIVE: Patch 29 through 70
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
