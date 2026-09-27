@@ -281,6 +281,15 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
     df = df[df["status"] == "a"]
     if df.empty:
         return None
+    # Patch 71 (manager, live TypeError crash on this exact function --
+    # `_solve_xi_for_shape` below -- immediately after Patch 70 hardened the
+    # sibling solve_squad() but missed this second, separate MILP builder in
+    # this same file). Same fix, same reasoning as solve_squad()'s Patch 70
+    # note: `df`'s index here is whatever survived dropna/position/status
+    # filtering from the caller's frame, never explicitly reset, so it's not
+    # guaranteed unique -- and `bench_pool` below is filtered straight from
+    # this same `df`, so resetting it here also covers Stage 2's bench solve.
+    df = df.reset_index(drop=True)
 
     # Cheap-bench budget reserve estimate for Stage 1: the 4 lowest prices
     # available across GK/DEF/MID/FWD that a bench (1 GK + 3 outfield, in
@@ -296,22 +305,35 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
     xi_budget_cap = max(0.0, budget - bench_reserve_estimate)
 
     def _solve_xi_for_shape(d: int, m: int, f: int) -> dict | None:
-        prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
-        x = {i: pulp.LpVariable(f"xi_{i}", cat="Binary") for i in df.index}
-        prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
-        prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "DEF") == d
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "MID") == m
-        prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
-        for team in df["team"].unique():
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
-        if pulp.LpStatus[prob.status] != "Optimal":
+        # Patch 71 — same try/except hardening as solve_squad() (Patch 70):
+        # every OTHER failure path in this module already returns None on a
+        # genuine infeasible/non-Optimal solve, and the caller already
+        # tolerates individual shapes failing (`if result: xi_candidates.
+        # append(result)`) -- but an unexpected exception during THIS solve
+        # previously wasn't caught at all, so it crashed the whole page
+        # instead of just skipping this one shape like an infeasible shape
+        # already does.
+        try:
+            prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
+            x = {i: pulp.LpVariable(f"xi_{i}", cat="Binary") for i in df.index}
+            prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
+            prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "DEF") == d
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "MID") == m
+            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
+            for team in df["team"].unique():
+                prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
+            prob.solve(pulp.PULP_CBC_CMD(msg=0))
+            if pulp.LpStatus[prob.status] != "Optimal":
+                return None
+            chosen = [i for i in df.index if x[i].value() == 1]
+            xi = df.loc[chosen]
+            return {"xi": xi, "total": round(xi[gw_col].sum(), 2), "shape": (d, m, f)}
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 71 note above
+            print(f"[optimizer.solve_xi_first_squad._solve_xi_for_shape] MILP build/solve failed "
+                  f"(shape {(d, m, f)}, {len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
             return None
-        chosen = [i for i in df.index if x[i].value() == 1]
-        xi = df.loc[chosen]
-        return {"xi": xi, "total": round(xi[gw_col].sum(), 2), "shape": (d, m, f)}
 
     def _solve_bench_for_xi(xi_result: dict) -> dict | None:
         xi_df = xi_result["xi"]
@@ -327,32 +349,45 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         remaining_budget = max(0.0, budget - xi_cost)
         bench_pool = df[~df["code"].isin(xi_codes)]
 
-        prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
-        y = {i: pulp.LpVariable(f"bn_{i}", cat="Binary") for i in bench_pool.index}
-        prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
-        prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
-        for pos, n in need.items():
-            prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "position"] == pos) == n
-        for team in bench_pool["team"].unique():
-            already = xi_club_counts.get(team, 0)
-            prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
-                <= max(0, max_per_club - already)
-        prob2.solve(pulp.PULP_CBC_CMD(msg=0))
-        if pulp.LpStatus[prob2.status] != "Optimal":
-            return None
+        # Patch 71 — same try/except hardening as _solve_xi_for_shape above
+        # and solve_squad() (Patch 70): an unexpected exception during this
+        # solve previously crashed the whole page instead of degrading to
+        # None like every genuine infeasible-solve path already does (the
+        # caller already falls back to the next-best XI candidate when a
+        # bench solve returns None, so this is a safe, already-expected
+        # failure mode to route an exception into).
+        try:
+            prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
+            y = {i: pulp.LpVariable(f"bn_{i}", cat="Binary") for i in bench_pool.index}
+            prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
+            prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
+            for pos, n in need.items():
+                prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "position"] == pos) == n
+            for team in bench_pool["team"].unique():
+                already = xi_club_counts.get(team, 0)
+                prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
+                    <= max(0, max_per_club - already)
+            prob2.solve(pulp.PULP_CBC_CMD(msg=0))
+            if pulp.LpStatus[prob2.status] != "Optimal":
+                return None
 
-        bench_chosen = [i for i in bench_pool.index if y[i].value() == 1]
-        bench_df = bench_pool.loc[bench_chosen]
-        squad = pd.concat([xi_df, bench_df], ignore_index=False, sort=False) \
-            .sort_values(["position", gw_col], ascending=[True, False])
-        return {
-            "squad": squad,
-            "xi_codes": xi_codes,
-            "shape": xi_result["shape"],
-            "xi_total": xi_result["total"],
-            "bench_cost": round(float(bench_df["price"].sum()), 1),
-            "total_cost": round(xi_cost + float(bench_df["price"].sum()), 1),
-        }
+            bench_chosen = [i for i in bench_pool.index if y[i].value() == 1]
+            bench_df = bench_pool.loc[bench_chosen]
+            squad = pd.concat([xi_df, bench_df], ignore_index=False, sort=False) \
+                .sort_values(["position", gw_col], ascending=[True, False])
+            return {
+                "squad": squad,
+                "xi_codes": xi_codes,
+                "shape": xi_result["shape"],
+                "xi_total": xi_result["total"],
+                "bench_cost": round(float(bench_df["price"].sum()), 1),
+                "total_cost": round(xi_cost + float(bench_df["price"].sum()), 1),
+            }
+        except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 71 note above
+            print(f"[optimizer.solve_xi_first_squad._solve_bench_for_xi] MILP build/solve failed "
+                  f"(shape {xi_result.get('shape')}, {len(bench_pool)} candidates): "
+                  f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            return None
 
     # Solve every shape's XI, then try Stage 2 against them in descending
     # XI-score order — the single best-scoring XI can still leave Stage 2

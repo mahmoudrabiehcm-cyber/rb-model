@@ -1654,6 +1654,67 @@ meta:
                           # included (see the Patch 58 addendum above) -- keep using your own live copy. This
                           # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
                           # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 71 (2026-09-27, manager screenshot of a SECOND LIVE CRASH, reported after
+                          # Patch 70 was deployed AND the app was rebooted: "i rebooted the app and it's the
+                          # same issue after patch 70"). Traceback this time: app.py:1129's Free Hit "optimal
+                          # team for this GW" auto-build (calling data_pipeline.solve_free_hit_optimal_squad())
+                          # -> data_pipeline.py:555 -> opt.solve_xi_first_squad() -> optimizer.py:369's inner
+                          # closure _solve_xi_for_shape() -> optimizer.py:300's MILP-variable dict comprehension
+                          # `x = {i: pulp.LpVariable(f"xi_{i}", cat="Binary") for i in df.index}`. This is a
+                          # DIFFERENT function than Patch 70 touched -- Patch 70 only hardened solve_squad();
+                          # solve_xi_first_squad() is a second, separate MILP builder in the same file that
+                          # nobody had touched, and it has the exact same latent shape: a `df` built from the
+                          # caller's frame via dropna/position/status filtering with no explicit index reset,
+                          # feeding an MILP-build/solve block with no try/except anywhere. The manager rebooting
+                          # and hitting a NEW traceback location (not the same line as before) is exactly what
+                          # you'd expect if Patch 70's specific fix was correct but incomplete, rather than
+                          # evidence it was wrong -- confirmed by grepping this file for every
+                          # `pulp.LpVariable(...)` construction site: there are exactly 3 in the whole codebase
+                          # (line 183 solve_squad, already fixed in Patch 70; line 300 _solve_xi_for_shape; line
+                          # 331 _solve_bench_for_xi's `y` dict) and a repo-wide grep for `import pulp`/
+                          # `LpVariable` outside optimizer.py confirms no fourth call site exists anywhere else
+                          # in the app -- this closes out the same class of bug for good, not just for this one
+                          # function. Fixed with the identical two-part pattern as Patch 70, applied to BOTH
+                          # inner closures (not just the one named in the traceback -- _solve_bench_for_xi
+                          # filters its own `bench_pool` straight from this same un-reset `df`, so it carries
+                          # the identical risk even though the manager's screenshot happened to catch the
+                          # crash in the other closure first):
+                          #   1. `df = df.reset_index(drop=True)` added right after solve_xi_first_squad()'s
+                          #      existing empty-check, before either closure is defined -- covers both Stage 1
+                          #      (_solve_xi_for_shape) and Stage 2 (_solve_bench_for_xi, whose bench_pool is
+                          #      filtered from this same df).
+                          #   2. _solve_xi_for_shape()'s and _solve_bench_for_xi()'s entire MILP build/solve
+                          #      bodies each wrapped in their own try/except Exception, returning None and
+                          #      printing the real exception's class + message to stderr on failure -- matching
+                          #      every genuine infeasible-solve path in this function, which the caller already
+                          #      tolerates (an infeasible shape is skipped via `if result: xi_candidates.
+                          #      append(result)`; a failed bench solve falls through to the next-best XI
+                          #      candidate).
+                          # Verified: full `ast.parse` syntax check on optimizer.py and app.py; every core
+                          # module still imports cleanly. New test_patch71_solve_xi_first_squad_hardening.py (4
+                          # checks, mirroring test_patch70_solve_squad_hardening.py's structure) confirms
+                          # solve_xi_first_squad() still returns a legal, budget-respecting, correctly-shaped
+                          # XI+bench squad on an ordinary input; confirms a synthetically-constructed
+                          # duplicate-index input (the same shape that crashed the live app) no longer crashes
+                          # and still solves correctly -- this is the direct reproduction-and-fix of the
+                          # manager's exact live crash; confirms a forced internal exception (an intentionally
+                          # malformed cfg) is caught in both closures and degrades to None rather than
+                          # propagating; and confirms all three source-level fixes (the reset_index line, plus
+                          # both closures' try/except blocks) are actually present. Re-ran
+                          # test_patch70_solve_squad_hardening.py alongside it -- both pass, no regression on
+                          # solve_squad(). This session's cloud workspace was NOT reclaimed between Patch 70 and
+                          # Patch 71 (unlike the earlier reset before Patch 70), so this is a fresh diagnosis
+                          # against the same live source, not a re-guess. Confirmed via `ast.parse` that
+                          # optimizer.py still parses correctly after these edits. This sandbox still has no
+                          # network route to the official FPL API, so the exact live crash scenario (this
+                          # gameweek's real squad/pool data feeding the Free Hit auto-build) could not be
+                          # re-run end-to-end here -- the manager's own next live run against a real Free Hit
+                          # scenario is what closes that out, same disclosed limitation as Patch 70.
+                          # NOTE (2026-09-27): rb_model_app_patch71.zip is CUMULATIVE: Patch 29 through 71
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
