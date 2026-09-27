@@ -37,7 +37,20 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 77 (real fix, verified against a genuine PuLP 4.0.0 install: LpVariable + PULP_CBC_CMD + LpStatus all rewritten in v4, migrated properly)"
+PATCH_VERSION = "Patch 78 (GapLimit-status fix verified against a genuine PuLP 4.0.0 install; header/Wildcard-pill text shortened)"
+
+# Patch 78 (manager feedback: "why under the logo we are seeing this" —
+# screenshot showed the full PATCH_VERSION technical changelog sentence
+# rendered raw under the header logo). The deploy-confirmation STAMP itself
+# (line 38's original reasoning: "a permanent, visible version stamp so
+# [whether a fix redeployed] is answerable at a glance") is still genuinely
+# useful and is kept — just as a short "Patch NN" tag instead of the whole
+# internal changelog sentence, which now only shows on hover (title=) and in
+# the full PATCH_VERSION string used everywhere else (diagnostics, forensics,
+# model_config.yaml changelog). Regex, not a second hand-maintained constant,
+# so it can never drift out of sync with PATCH_VERSION.
+_PATCH_TAG_MATCH = re.search(r"^Patch\s+\d+", PATCH_VERSION)
+PATCH_TAG = _PATCH_TAG_MATCH.group(0) if _PATCH_TAG_MATCH else PATCH_VERSION
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -702,7 +715,8 @@ entry_id = st.session_state.team_id
 with st.sidebar:
     st.markdown(f'<div class="brand-row">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div class="brand-tag">v5.0 engine · {PATCH_VERSION.lower()} · live · zero-cost</div><br>',
+                f'<div class="brand-tag" title="{html.escape(PATCH_VERSION)}">v5.0 engine · {PATCH_TAG.lower()} · '
+                f'live · zero-cost</div><br>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="side-note">TEAM ID</div>'
                 f'<div style="font-family:\'IBM Plex Mono\'; color:var(--accent-strong); '
@@ -1997,6 +2011,25 @@ with tab_chips:
     # wildcard_trigger_check(), chip_recommendations(), wildcard_freehit_
     # shape_test() and disruption_check() directly, not guessed from shape) —
     # nothing here fabricates data the note didn't already carry.
+    def _wc_active_pill_headline(trigger: dict) -> str:
+        """Short headline for the ACTIVE 'Wildcard trigger ACTIVE' pill
+        (Patch 78 — manager feedback: this was the one pill Patch 51/52 never
+        migrated off the always-full-sentence _flag_pill(text) single-arg
+        call, so it stayed a large uneven box next to the three short ones).
+        Pulls the same avg_rating_pct/cumulative_gap fields
+        wildcard_trigger_check() always returns when active — the identical
+        fields _wc_not_active_pill_headline() already uses for the inactive
+        case, just phrased for 'active.' Full original wildcard_trigger_flag()
+        sentence (with the rank-worsening color note, if any) stays unabridged
+        in this pill's tooltip via the existing _flag_pill(short, full) call
+        shape."""
+        pct = trigger.get("avg_rating_pct")
+        gap = trigger.get("cumulative_gap")
+        if pct is not None and gap is not None:
+            return f"Wildcard trigger ACTIVE ({pct}%, {gap:.1f} xPts gap)"
+        return "Wildcard trigger ACTIVE"
+
+
     def _wc_not_active_pill_headline(trigger: dict) -> str:
         """Short headline for the 'Wildcard trigger: not active' pill. Pulls
         the two numbers wildcard_trigger_check() always returns when inactive
@@ -2064,7 +2097,7 @@ with tab_chips:
 
     pill_items = []
     if wc_flag:
-        pill_items.append(_flag_pill(wc_flag))
+        pill_items.append(_flag_pill(_wc_active_pill_headline(wc_trigger), wc_flag))
         if _wc_check_note:
             pill_items.append(_flag_pill(_wc_check_headline, _wc_check_note))
     elif much_more:

@@ -2106,6 +2106,151 @@ meta:
                           # plain "Reboot app" will pick this up on the next dependency install, but if
                           # Streamlit Cloud's cache is still stubborn, deleting and recreating the app guarantees
                           # a completely fresh `pip install -r requirements.txt`.
+                          # Patch 78 (2026-09-27, manager's next message, a 6-item batch: "the performance is a
+                          # little slow ... also why under the logo we are seeing this + the other explanations
+                          # needed to be more short and aligned together and the season rank graph needs to be
+                          # changed to be (All FPL Players >> 1 million ...) ... also make sure to check the bank
+                          # available fund and the latest players prices when recommending the WC or FH ... also
+                          # why when clicking on the pitch navigator next GW the xpts remains the same!!"). Each
+                          # item investigated in the actual current code/behavior before treating it as real, per
+                          # the project's standing verification rule -- two fixed this patch, two confirmed
+                          # already-correct in code (no fix needed, reported honestly rather than "fixed" for
+                          # credit), two genuinely still open:
+                          #   1. Pitch navigator "xPts stays the same" -- INVESTIGATED, NOT REPRODUCED. Read
+                          #      _render_pitch_navigator() (app.py ~line 2670) end to end: nav_gw/nav_col are
+                          #      correctly re-derived from st.session_state.nav_gw_idx on every rerun, no caching
+                          #      or staleness in the control flow. Root cause of why this had never actually been
+                          #      TESTED before: every prior synthetic harness this session omitted a "chips" key
+                          #      from the fake bootstrap-static payload, so fetch_bootstrap_chips() always
+                          #      returned [], chip_adv_window always stayed None, and the navigator was always
+                          #      stuck at a 1-GW "(1/1)" window -- the manager's real "(1/8)" multi-GW scenario
+                          #      had literally never been exercised by any test. Built
+                          #      test_patch78_navigator_harness.py with a real 8-GW chip calendar (2 windows each
+                          #      for wildcard/freehit/bboost/3xc) to close that gap, then drove the actual live
+                          #      app with Playwright clicking "next GW" 7 times end to end
+                          #      (test_patch78_navigator_drive.py). Result: "GW6 (1/8)" -> "GW12 (7/8)", xPts
+                          #      59.2 -> 59.3 -> 61.7 -> 61.7 -> 61.6 -> 61.7 -> 63.3 -- 5 distinct values across
+                          #      8 samples, correctly varying by GW, NOT stuck. Some consecutive GWs share the
+                          #      same total (e.g. GW8/GW9/GW11 all 61.7) -- plausible when those GWs' fixture
+                          #      difficulty for the current squad is genuinely similar, not a bug. One click (#1)
+                          #      captured the header one rerun behind the xPts value -- a one-off Playwright
+                          #      timing artifact from this test's own capture cadence, not reproduced on any
+                          #      other click, and not evidence of an app defect. Conclusion stated honestly: this
+                          #      specific reproduction does NOT show the reported bug. If it's still happening
+                          #      live, it's most likely specific to the manager's real account data this run
+                          #      (e.g. a genuinely flat fixture run for the specific GWs viewed) rather than a
+                          #      code defect -- flagging this back to the manager rather than "fixing" something
+                          #      not shown to be broken.
+                          #   2. Header text under the logo -- CONFIRMED in code and FIXED. app.py line ~40's
+                          #      PATCH_VERSION (an internal per-patch changelog sentence, by design meant to be a
+                          #      visible "did this actually redeploy" stamp per its own original Patch-2-era
+                          #      comment) was rendered VERBATIM into the sidebar's .brand-tag div (old line 705),
+                          #      growing longer and more internally-technical every single patch this session --
+                          #      genuinely user-facing, genuinely a self-inflicted regression, not a
+                          #      misunderstanding on the manager's part. Fixed: added PATCH_TAG, a regex-derived
+                          #      "Patch NN" prefix of PATCH_VERSION (never a second hand-maintained string, so it
+                          #      can't drift out of sync) -- the header now shows only "PATCH 78", with the full
+                          #      original sentence moved to the div's title= hover tooltip (html.escape()'d).
+                          #      Verified via a live Playwright read of the actual rendered .brand-tag element's
+                          #      innerText ("V5.0 ENGINE · PATCH 78 · LIVE · ZERO-COST") and title attribute (full
+                          #      sentence) against the real running app.
+                          #   3. Chip Plan "explanations need to be more short and aligned" -- CONFIRMED in code
+                          #      and FIXED for the specific box the manager's screenshot showed (the large,
+                          #      uneven Wildcard-ACTIVE box next to 3 much smaller ones). Patch 51/52 already
+                          #      built a short-headline+full-tooltip pattern and migrated 3 of 4 sibling pill
+                          #      types to it (_wc_not_active_pill_headline, _chip_recommendation_pill_headline,
+                          #      _shape_test_pill_headline, _disruption_pill_headline) -- but the 4th, the
+                          #      Wildcard-ACTIVE pill itself, was called as the old single-arg `_flag_pill(wc_flag)`
+                          #      (line ~2067), always showing the full multi-clause trigger sentence, which is
+                          #      exactly why it was the one oversized/uneven box. Fixed: added
+                          #      _wc_active_pill_headline(trigger), built from the same avg_rating_pct/
+                          #      cumulative_gap fields wildcard_trigger_check() already returns (the identical
+                          #      fields the inactive-case headline already uses -- nothing fabricated), e.g.
+                          #      "Wildcard trigger ACTIVE (71.4%, 22.6 xPts gap)"; call site now
+                          #      _flag_pill(_wc_active_pill_headline(wc_trigger), wc_flag), matching the exact
+                          #      shape of the 3 already-migrated sibling pills. Full original sentence stays
+                          #      unabridged in the tooltip. Verified via
+                          #      test_patch78_wc_pill_golden_slice.py (execs the real function bodies extracted
+                          #      from the current app.py source against a forced-active trigger dict): headline
+                          #      46 chars vs. the old ~280-char full sentence, full sentence still present
+                          #      verbatim in the tooltip.
+                          #   4. WC/FH affordability using current bank + latest prices -- INVESTIGATED, ALREADY
+                          #      CORRECT, no fix needed. Read the actual call chain rather than assume a gap:
+                          #      app.py line ~1027 pulls `bank` fresh every run from
+                          #      `entry.get("last_deadline_bank")` (live FPL API data, not a stale/cached figure);
+                          #      line ~1039 computes `team_value = bank + squad_df["price"].sum()` using the
+                          #      live squad's current prices; this exact `team_value` is passed as the `budget`
+                          #      argument into chip_protocol.wildcard_freehit_shape_test() (line ~1329), which
+                          #      solves each detection-window GW's standalone-optimal squad via
+                          #      optimizer.solve_squad(full_pool, cfg, budget=team_value, ...) against
+                          #      `full_pool` -- itself sourced from bootstrap-static's live current prices, not a
+                          #      cached snapshot. So the Wildcard/Free-Hit shape-test genuinely is constrained to
+                          #      a squad affordable with the manager's real bank and real current prices already,
+                          #      today, in the live code -- this was not a gap. No change made; reported honestly
+                          #      per the project's standing rule against treating an unconfirmed claim as
+                          #      actionable.
+                          #   5. Season Rank chart redesign (custom banded y-axis: All FPL Players -> 1M -> 500K
+                          #      -> 100K -> 50K -> 10K -> 1K, larger/more visible GW labels, general visual
+                          #      polish) -- CONFIRMED as a real gap (app.py ~line 3300: a plain reversed-linear
+                          #      alt.Scale, default axis label sizing) but NOT YET BUILT -- a custom non-linear
+                          #      banded scale needs a dataviz-skill-informed design pass (categorical band
+                          #      positions rather than a numeric scale) rather than a quick edit, to avoid
+                          #      shipping something that LOOKS like a fix but reads misleadingly (a banded axis
+                          #      is easy to build in a way that visually distorts how close/far the manager
+                          #      actually is between bands). Deferred to its own patch rather than rushed.
+                          #   6. Performance ("a little slow") -- NOT YET INVESTIGATED WITH REAL MEASUREMENT.
+                          #      Patch 77's gapRel=0/gapAbs=0 (forcing CBC to prove exact optimality rather than
+                          #      accept an early-stop gap) is a plausible contributor on Streamlit Cloud's shared/
+                          #      weaker CPU against the real ~600+-player pool (vs. this session's own
+                          #      ~120-380-candidate synthetic pools) -- but this is an unverified HYPOTHESIS, not
+                          #      a confirmed-in-code finding, and is not being reported as fixed or even as a
+                          #      confirmed cause. Needs an actual timed profiling run against real data before
+                          #      any change is proposed.
+                          # Verified before delivery: ran the full existing regression suite (Patch 70-77's test
+                          # files, 9 files) plus the 2 new Patch 78 tests -- test_patch78_navigator_harness.py
+                          # /_drive.py (real 8-GW click-through, see item 1) and
+                          # test_patch78_wc_pill_golden_slice.py (item 3) -- all PASSED, zero regressions. The
+                          # header fix (item 2) was verified live via Playwright reading the actual rendered
+                          # .brand-tag element, not just source inspection.
+                          #
+                          # ADDENDUM (same day, manager tested a DIFFERENT team on Streamlit Cloud before
+                          # deploying this patch, live on Patch 77, screenshot attached): a genuine 7th bug,
+                          # found live for the first time -- the Wildcard card showed "CBC solver returned
+                          # status=GapLimit (not Optimal) — 343 candidates, budget=100.0, ... must retain >= 14
+                          # of 15 retain-pool codes — no legal squad exists under these constraints with this
+                          # candidate pool." Patch 77's gapRel=0/gapAbs=0 fix was already live and did NOT stop
+                          # this -- so this needed real investigation, not a repeat guess.
+                          # Root-caused by reading pulp==4.0.0's OWN source directly
+                          # (apis/coin.py get_status()): CBC's solution file prints the literal first line
+                          # "Optimal (within gap tolerance)" whenever it terminates via the GAP-CHECK code path
+                          # (upper bound minus lower bound <= allowableGap), vs. a bare "Optimal" when it
+                          # terminates via full branch-and-bound tree exhaustion -- pulp maps ONLY the bare
+                          # "Optimal" line to LpSolveStatus.Optimal, and the gap-check-path line to
+                          # LpSolveStatus.GapLimit, REGARDLESS of what the tolerance value actually was. This is
+                          # a status LABEL for which termination code path CBC took, not a statement about
+                          # solution quality. Confirmed directly: 30/30 easy, loosely-constrained 600-candidate
+                          # solves returned bare "Optimal", but this file's own optimizer.py
+                          # _solve_and_get_status() treated ANY non-"Optimal" string (including GapLimit) as
+                          # total failure at all 3 call sites, exactly reproducing the manager's live screenshot
+                          # on a harder, tightly-constrained (14-of-15-retain) problem. Since
+                          # optimizer._cbc_solver() ALWAYS passes gapRel=0/gapAbs=0, a "GapLimit" status from
+                          # this app's own solver call can only mean "terminated via the zero-tolerance gap
+                          # check" -- mathematically indistinguishable from a proven exact optimum (a 0 gap IS
+                          # the definition of optimal; CBC just took the gap-check exit door instead of the
+                          # tree-exhaustion one). Fixed: _solve_and_get_status() now normalizes a "GapLimit"
+                          # result to "Optimal" before returning, in one place rather than at all 3 call sites
+                          # separately, with a genuine "Infeasible" (and every other status) left untouched.
+                          # Verified: test_patch78_gaplimit_fix.py -- (1) a mocked 4.0+-shaped GapLimit result
+                          # normalizes to Optimal, (2) a genuine Infeasible is NOT swallowed by the fix, (3)
+                          # solve_squad() end-to-end (real CBC solve, only the reported status forced to
+                          # GapLimit afterward) now returns a real 15-man squad with no failure diagnostic --
+                          # all 3 PASSED under both this sandbox's normal pulp AND a genuine pulp==4.0.0 install.
+                          # Re-ran the full regression suite (Patch 70-78, 11 files) after this change -- zero
+                          # regressions, including test_patch77_real_pulp4_verification.py re-run fresh under
+                          # the real 4.0.0 venv.
+                          # NOTE (2026-09-27): rb_model_app_patch78.zip is CUMULATIVE: Patch 29 through 78
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

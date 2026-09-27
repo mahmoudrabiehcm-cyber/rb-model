@@ -152,11 +152,41 @@ def _solve_and_get_status(prob, solver) -> str:
     `prob.solve(solver)` instead returns an `LpSolveStats` object whose
     `.status` is an enum with a `.name` equal to the same string ("Optimal",
     etc.). Every CBC-status diagnostic string elsewhere in this file already
-    expects exactly this string, unchanged either way."""
+    expects exactly this string, unchanged either way.
+
+    Patch 78 (manager, live screenshot testing a different team: the
+    Wildcard card showed "CBC solver returned status=GapLimit (not Optimal)
+    ... no legal squad exists" on a genuinely solvable 343-candidate,
+    14-of-15-retain problem -- Patch 77's gapRel=0/gapAbs=0 fix was already
+    live (header showed Patch 77) and did NOT stop this. Root-caused by
+    reading pulp 4.0.0's OWN source directly (not assumed):
+    apis/coin.py's `get_status()` maps CBC's solution-file first line
+    "Optimal (within gap tolerance)" to `LpSolveStatus.GapLimit`, and only a
+    BARE "Optimal" (no suffix) maps to `LpSolveStatus.Optimal` -- entirely a
+    label for WHICH CODE PATH CBC took to declare termination (gap check vs.
+    full branch-and-bound tree exhaustion), independent of the actual
+    tolerance value used. Reproduced directly: 30/30 easy 600-candidate
+    unconstrained solves returned bare "Optimal", but harder/more
+    constrained problems (confirmed via the manager's own live 343-candidate
+    retain-constrained case) can legitimately terminate via the gap-check
+    path even at gapRel=0/gapAbs=0 and get the "(within gap tolerance)"
+    phrasing -- CBC's internal choice, not evidence of a worse-quality
+    solution. Since `_cbc_solver()` (above) ALWAYS passes gapRel=0,
+    gapAbs=0, a "GapLimit" status from our own solver call can only mean
+    "terminated via the zero-tolerance gap check" -- mathematically
+    indistinguishable from a proven exact optimum (a 0 gap between the
+    incumbent and the LP bound already IS the definition of optimal; CBC
+    just took the gap-check exit door instead of the tree-exhaustion one to
+    get there). Normalized here rather than reproducing this same reasoning
+    at all 3 call sites separately."""
     result = prob.solve(solver)
     if hasattr(result, "status") and hasattr(result.status, "name"):
-        return result.status.name
-    return pulp.LpStatus[prob.status]
+        status = result.status.name
+    else:
+        status = pulp.LpStatus[prob.status]
+    if status == "GapLimit":
+        return "Optimal"
+    return status
 
 
 # -----------------------------------------------------------------------------
