@@ -1954,6 +1954,84 @@ meta:
                           # included (see the Patch 58 addendum above) -- keep using your own live copy. This
                           # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
                           # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 76 (2026-09-27, manager report, real deployed screenshots: "GW6 Rating: no
+                          # result this run ... TypeError: LpVariable.init() got an unexpected keyword argument
+                          # 'cat'" -- appearing on the Pitch tab, Latest News tab, AND the Wildcard card, i.e.
+                          # every single one of Patch 71-75's diagnostics, in one run). Manager, correctly and
+                          # rightly: "what are you doing, nothing fixed ... i need a full analysis with the
+                          # issue root cause and fix to be tested before moving forward".
+                          #
+                          # FULL ROOT-CAUSE ANALYSIS:
+                          # This is the actual root cause behind EVERY "—"/"N/A" reported across this entire
+                          # multi-patch thread (Patch 70 through 75) -- not a new bug, and not something any of
+                          # those patches introduced. Patch 70/71's try/except hardening was correctly catching
+                          # this exact exception all along and degrading to None (previously silent -- the
+                          # exception only ever reached stderr, which is why it took this long to surface); once
+                          # Patch 72-75's diagnostic channel was wired all the way through to a visible on-page
+                          # caption, it finally printed the real underlying reason for the first time -- which is
+                          # this TypeError, thrown from every one of solve_squad()/solve_xi_first_squad()'s 3
+                          # `pulp.LpVariable(f"..._{i}", cat="Binary")` call sites (optimizer.py, confirmed by
+                          # grep: every one of the 3 sites in this file uses this exact pattern).
+                          #
+                          # Verified in code, not inferred: `cat` is not a new, unstable, or optional pulp
+                          # keyword -- it is installed and tested directly, one at a time, in clean venvs, for
+                          # EVERY publicly released pulp version from 2.7.0 (this project's own requirements.txt
+                          # floor) through the current latest 3.3.2 (`pip index versions pulp` confirms 3.3.2 is
+                          # genuinely the latest published release, ruling out "requirements.txt's unpinned
+                          # pulp>=2.7 happened to resolve to a broken pre-release" as the explanation) -- `cat=
+                          # "Binary"` works with zero error on every single one. So the manager's deployed
+                          # Streamlit Cloud environment is doing something this sandbox cannot reproduce with a
+                          # normal, fresh pip install of any real pulp release -- most likely a stale/cached
+                          # virtualenv on Streamlit Community Cloud that predates some change, a partial/
+                          # corrupted install, or an import shadowing another same-named module -- disclosed
+                          # explicitly as environment-specific rather than claimed with false certainty, per the
+                          # project's verification-first standing rule.
+                          #
+                          # FIX (defends against the actual failure regardless of its underlying cause):
+                          # Added optimizer._binary_var(name), used at all 3 call sites in place of the raw
+                          # `pulp.LpVariable(..., cat="Binary")` call. It tries the normal call first (the fast,
+                          # ordinary path on a healthy install) and, ONLY on this exact TypeError, falls back to
+                          # constructing the variable plain and then replicating cat="Binary"'s real internal
+                          # effect by hand: lowBound=0, upBound=1, cat="Integer" (verified directly against
+                          # pulp's own __init__ source -- cat="Binary" is not just a label, it also sets those
+                          # bounds and internally stores cat as "Integer"; an earlier draft of this fix only set
+                          # `.cat = "Binary"` post-construction and left the bounds at the plain constructor's
+                          # None default, i.e. a genuinely UNBOUNDED variable, which made every solve fail with
+                          # CBC status=Unbounded instead of Optimal when first tested -- caught and fixed before
+                          # delivery, not after). A different TypeError (not mentioning `cat`) is re-raised
+                          # untouched, so this never masks a real, different failure. Also added
+                          # optimizer._pulp_forensics() -- appended to every remaining unexpected-exception
+                          # diagnostic, printing the active pulp version + file path, so if any other pulp
+                          # incompatibility surfaces later it's identifiable from the manager's own screenshot
+                          # without needing server-log access.
+                          #
+                          # Verified BEFORE delivery, per the manager's explicit instruction, with the closest
+                          # thing to reproducing their exact reported failure this sandbox allows:
+                          #   1. New test_patch76_pulp_cat_compat.py monkeypatches pulp.LpVariable itself to
+                          #      raise the manager's EXACT TypeError on every `cat=` call (reproducing their
+                          #      reported error message verbatim, not a re-derived approximation), then drives
+                          #      the REAL solve_squad() and solve_xi_first_squad() end to end under that broken
+                          #      condition -- both now return a real, correct, budget-respecting squad instead
+                          #      of None. A third check confirms zero regression with a healthy pulp.
+                          #   2. Re-ran all 8 prior test files (Patch 70-75) -- all still pass.
+                          #   3. Full live E2E: relaunched the real app.py under Streamlit with the SAME broken-
+                          #      pulp.LpVariable monkeypatch applied process-wide, against a healthy (non-
+                          #      artificially-broken) synthetic FPL dataset, drove it with Playwright end to end,
+                          #      and confirmed via actual rendered screenshots that the Pitch tab's "GW6 Rating"
+                          #      and the Latest News tab's "GW6 Rating"/"Team Rating %" all show real percentages
+                          #      (51%/52%, identical to a genuinely healthy pulp run) -- not "—", and with zero
+                          #      TypeError/LpVariable/cat= text appearing anywhere on the rendered page. No
+                          #      traceback, no server error in the Streamlit log.
+                          # NOTE (2026-09-27): rb_model_app_patch76.zip is CUMULATIVE: Patch 29 through 76
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # STRONGLY RECOMMENDED alongside applying this patch: on Streamlit Community Cloud,
+                          # do a full "Reboot app" (or, if that doesn't clear it, delete and recreate the app)
+                          # rather than a plain redeploy -- if a stale/cached virtualenv is what's actually
+                          # causing the live TypeError, only a full environment rebuild clears it, and this
+                          # patch's fallback is defense-in-depth on top of that, not a substitute for it.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

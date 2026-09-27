@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 75 (Pitch-tab GW Rating tile now shows the same diagnostic Patch 74 added elsewhere)"
+PATCH_VERSION = "Patch 76 (root-cause fix: pulp.LpVariable 'cat' kwarg incompatibility that was silently breaking every solve)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 

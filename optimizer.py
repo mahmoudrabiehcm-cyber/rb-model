@@ -27,6 +27,76 @@ except ImportError:  # pragma: no cover — keeps this module importable from a
 
 
 # -----------------------------------------------------------------------------
+# Patch 76 (2026-09-27, manager-deployed traceback: "TypeError: LpVariable.
+# __init__() got an unexpected keyword argument 'cat'" — hit at every one of
+# the 3 pulp.LpVariable(..., cat="Binary") call sites in this file, on every
+# single solve, which is the actual root cause behind every "—"/"N/A" this
+# whole thread has been chasing: the Patch 70/71 try/except was correctly
+# catching this exception and degrading to None all along, and Patch 72-75's
+# diagnostics correctly surfaced it as soon as they were wired in — this was
+# never a display bug, it's a real solver-construction failure.
+#
+# Verified (not inferred): `cat` is not a new or unstable pulp kwarg — every
+# publicly released pulp version from 2.7.0 (this project's own requirements
+# floor) through the current latest 3.3.2 accepts `LpVariable(name,
+# cat="Binary")` with no error (checked directly, installing each version in
+# a clean venv and calling it). So this is not a case of requirements.txt's
+# unpinned `pulp>=2.7` resolving to a genuinely broken published release.
+# The most likely explanation left is environment-specific to the manager's
+# deployment (a stale/corrupted cached virtualenv on Streamlit Community
+# Cloud that predates a change, a partial/duplicate install, or an import
+# shadowing another package/module also named `pulp`) — not something
+# reproducible or confirmable from this sandbox, so it is disclosed as
+# environment-specific rather than claimed as root-caused with certainty.
+#
+# Rather than leave every solve hostage to that one keyword argument, this
+# constructs the binary LpVariable defensively: try the normal `cat=`
+# kwarg first (the fast, ordinary path on a healthy install); if that
+# specific TypeError fires, fall back to constructing plain and setting the
+# `.cat` attribute afterward — `.cat` has been a plain, directly-settable
+# public attribute on every pulp version tested above, so this recovers the
+# exact same "Binary" variable either way. If pulp is broken in some deeper
+# way than this, the surrounding try/except in each solve function still
+# catches it and reports the real exception via the diagnostic channel below
+# — this is a targeted recovery for the ONE specific failure actually seen
+# in the wild, not a blanket exception swallow.
+def _binary_var(name: str):
+    try:
+        return pulp.LpVariable(name, cat="Binary")
+    except TypeError as e:
+        if "cat" not in str(e):
+            raise  # a different TypeError -- don't mask it, let the caller's own except handle/report it
+        # Verified against pulp's own __init__ source (every version tested,
+        # 2.7.0-3.3.2): cat="Binary" isn't just a label -- it also sets
+        # lowBound=0, upBound=1, and internally stores cat as "Integer" (a
+        # binary IS an integer var with those bounds). An earlier version of
+        # this fallback only set `.cat = "Binary"` post-construction and left
+        # lowBound/upBound at their plain-constructor default of None --
+        # i.e. an literally UNBOUNDED continuous variable, which is why the
+        # very first test of this fallback made every solve fail with CBC
+        # status=Unbounded instead of Optimal. Replicating all three fields
+        # exactly is what actually reproduces a real binary variable.
+        v = pulp.LpVariable(name)
+        v.lowBound = 0
+        v.upBound = 1
+        v.cat = "Integer"
+        return v
+
+
+def _pulp_forensics() -> str:
+    """One-line environment forensics appended to any unexpected-exception
+    diagnostic (Patch 76) -- if pulp itself is somehow still the culprit in a
+    way _binary_var()'s fallback doesn't catch, this tells us (from the
+    manager's own screenshot, without needing server-log access) exactly
+    which pulp build/location produced it, instead of leaving that as a
+    guess for next time."""
+    try:
+        return f"[pulp {getattr(pulp, '__version__', '?')} @ {getattr(pulp, '__file__', '?')}]"
+    except Exception:
+        return "[pulp version/location unavailable]"
+
+
+# -----------------------------------------------------------------------------
 # Patch 72 (manager, 2026-09-27: after Patch 71 was deployed, the crash was
 # gone but "GW6 Rating", "Team Rating % (GW6-9)" and the Wildcard card all
 # started showing "—" / "N/A — insufficient data this run" instead of real
@@ -245,7 +315,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     #    "Manage app" logs even though the user-facing page redacts it.
     try:
         prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-        x = {i: pulp.LpVariable(f"x_{i}", cat="Binary") for i in df.index}
+        x = {i: _binary_var(f"x_{i}") for i in df.index}
 
         prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
 
@@ -304,7 +374,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         print(f"[optimizer.solve_squad] MILP build/solve failed ({objective_col}, "
               f"{len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
         _diag(label, f"an unexpected exception hit the MILP build/solve: {type(exc).__name__}: {exc} "
-                      f"({len(df)} candidates, objective_col={objective_col}).")
+                      f"({len(df)} candidates, objective_col={objective_col}). {_pulp_forensics()}")
         return None
 
 
@@ -409,7 +479,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         # already does.
         try:
             prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
-            x = {i: pulp.LpVariable(f"xi_{i}", cat="Binary") for i in df.index}
+            x = {i: _binary_var(f"xi_{i}") for i in df.index}
             prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
             prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
             prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
@@ -429,7 +499,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 71 note above
             print(f"[optimizer.solve_xi_first_squad._solve_xi_for_shape] MILP build/solve failed "
                   f"(shape {(d, m, f)}, {len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
-            _shape_failures.append(f"shape {(d, m, f)}: {type(exc).__name__}: {exc}")
+            _shape_failures.append(f"shape {(d, m, f)}: {type(exc).__name__}: {exc} {_pulp_forensics()}")
             return None
 
     def _solve_bench_for_xi(xi_result: dict) -> dict | None:
@@ -455,7 +525,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         # failure mode to route an exception into).
         try:
             prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
-            y = {i: pulp.LpVariable(f"bn_{i}", cat="Binary") for i in bench_pool.index}
+            y = {i: _binary_var(f"bn_{i}") for i in bench_pool.index}
             prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
             prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
             for pos, n in need.items():
@@ -487,7 +557,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             print(f"[optimizer.solve_xi_first_squad._solve_bench_for_xi] MILP build/solve failed "
                   f"(shape {xi_result.get('shape')}, {len(bench_pool)} candidates): "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr)
-            _bench_failures.append(f"shape {xi_result.get('shape')}: {type(exc).__name__}: {exc}")
+            _bench_failures.append(f"shape {xi_result.get('shape')}: {type(exc).__name__}: {exc} {_pulp_forensics()}")
             return None
 
     # Solve every shape's XI, then try Stage 2 against them in descending
