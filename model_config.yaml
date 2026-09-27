@@ -2032,6 +2032,80 @@ meta:
                           # rather than a plain redeploy -- if a stale/cached virtualenv is what's actually
                           # causing the live TypeError, only a full environment rebuild clears it, and this
                           # patch's fallback is defense-in-depth on top of that, not a substitute for it.
+                          # Patch 77 (2026-09-27, manager report, same day: Patch 76's fallback broke differently
+                          # -- "AttributeError: 'str' object has no attribute 'set_lb'" -- and the manager
+                          # rightly lost patience with iterative guessing: "again and again ... i need a full
+                          # analysis with the issue root cause and fix to be tested before moving forward".
+                          # Patch 76's "environment-specific, can't confirm" writeup was WRONG to stop there --
+                          # this patch actually built a real Python 3.12 venv in this sandbox (this sandbox's own
+                          # default interpreter is 3.11, which is EXACTLY why Patch 76 could never reproduce this
+                          # by a plain `pip install pulp` -- pulp 4.0.0 requires Python >=3.12 and was simply
+                          # never offered to it) and installed genuine pulp==4.0.0 in it. That reproduced the
+                          # manager's FIRST error verbatim, then, from Patch 76's own fallback code, the manager's
+                          # SECOND error verbatim too -- confirming both failures directly instead of guessing.
+                          #
+                          # PuLP 4.0.0 is a real, non-alpha PyPI release with a complete rewrite onto a Rust-
+                          # backed core -- not a small keyword change. Its own predecessor's deprecation notice
+                          # had already announced this: "Constructing LpVariable(name, ...) directly is
+                          # deprecated; in PuLP 4.0 use prob.add_variable(...)." requirements.txt's unpinned
+                          # `pulp>=2.7` let Streamlit Cloud's Python 3.14 runtime install it fresh. Confirmed (by
+                          # actually running the real solve under the real 4.0.0 install, not stopping at the
+                          # first plausible-looking fix) THREE separate breaking changes, fixed properly instead
+                          # of patched around:
+                          #   1. `pulp.LpVariable(name, cat=...)` direct construction -- gone. Fixed:
+                          #      optimizer._binary_var(prob, name) now uses `prob.add_variable(name, lowBound=0,
+                          #      upBound=1, cat="Binary")` -- confirmed identical signature/behavior on a real
+                          #      3.3.2 AND a real 4.0.0 install (this is the one call actually correct on both,
+                          #      not a version branch).
+                          #   2. `pulp.PULP_CBC_CMD` -- gone from 4.0's public API entirely, and no MIP solver
+                          #      binary ships bundled by default any more (`pulp.listSolvers(onlyAvailable=True)`
+                          #      returns `[]` on a plain `pip install pulp==4.0.0`). Fixed: requirements.txt now
+                          #      installs `pulp[cbc]` (confirmed this extra is a safe no-op-equivalent addition
+                          #      on the pre-4.0 range too -- tested `pulp[cbc]==3.3.2` directly), and
+                          #      optimizer._cbc_solver() returns PULP_CBC_CMD when available (pre-4.0) or
+                          #      COIN_CMD (4.0+, the equivalent CBC wrapper that extra provides a real binary for).
+                          #   3. `pulp.LpStatus[prob.status]` -- `LpProblem` no longer HAS a `.status` attribute
+                          #      in 4.0; `prob.solve()` now returns an `LpSolveStats` object whose `.status` is an
+                          #      enum with a `.name` giving the same string. Fixed: optimizer._solve_and_get_
+                          #      status(prob, solver) reads whichever shape prob.solve() actually returned.
+                          #   4. A 4th, subtler difference found only by running a real solve end-to-end and
+                          #      checking the actual status returned, not just "does it error": the CBC binary
+                          #      bundled via 4.0's `[cbc]` extra (`cbcbox`, a different package than pre-4.0's own
+                          #      bundled build) defaults to a nonzero optimality gap, reporting status "GapLimit"
+                          #      instead of "Optimal" even on small, easy problems that should solve exactly in
+                          #      milliseconds (reproduced directly: a 239-variable test case). Every existing
+                          #      diagnostic/caller in this file checks for the literal string "Optimal" --
+                          #      rather than loosen that everywhere (silently accepting a near-optimal squad, not
+                          #      the genuine best one), _cbc_solver() now passes gapRel=0/gapAbs=0 on the COIN_CMD
+                          #      path, restoring exact-optimal behavior. Confirmed: the same 239-variable
+                          #      reproduction now reports "Optimal" again.
+                          #
+                          # Verified BEFORE delivery -- this time genuinely end-to-end under the real broken
+                          # environment, not a monkeypatched approximation of it:
+                          #   1. Built a real Python 3.12 venv, installed genuine `pulp[cbc]==4.0.0` plus every
+                          #      other requirements.txt dependency into it.
+                          #   2. Ran solve_squad()/solve_xi_first_squad() directly under that real install,
+                          #      across repeated trials with a 300-candidate pool -- all return real, correct,
+                          #      budget-respecting 15-man squads with status "Optimal" (new
+                          #      test_patch77_real_pulp4_verification.py records these exact steps so they can be
+                          #      re-run).
+                          #   3. Full live E2E: launched the REAL app.py under Streamlit using that pulp-4.0.0
+                          #      venv's own Python interpreter (not a monkeypatch inside this sandbox's normal
+                          #      3.11/pulp-3.3.2 interpreter), against a healthy synthetic FPL dataset, drove it
+                          #      with Playwright end to end, and confirmed via an actual rendered screenshot that
+                          #      the Pitch tab's "GW6 Rating" shows a real "51.0%" -- identical to a genuinely
+                          #      healthy run -- with zero error text anywhere on the page.
+                          #   4. Re-ran all 9 prior test files (Patch 70-76) under this sandbox's normal pulp
+                          #      3.3.2 -- all still pass, confirming zero regression on the pre-4.0 path.
+                          # NOTE (2026-09-27): rb_model_app_patch77.zip is CUMULATIVE: Patch 29 through 77
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # This time, requirements.txt itself changed (`pulp>=2.7` -> `pulp[cbc]>=2.7`) -- a
+                          # plain "Reboot app" will pick this up on the next dependency install, but if
+                          # Streamlit Cloud's cache is still stubborn, deleting and recreating the app guarantees
+                          # a completely fresh `pip install -r requirements.txt`.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

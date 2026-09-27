@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 76 (root-cause fix: pulp.LpVariable 'cat' kwarg incompatibility that was silently breaking every solve)"
+PATCH_VERSION = "Patch 77 (real fix, verified against a genuine PuLP 4.0.0 install: LpVariable + PULP_CBC_CMD + LpStatus all rewritten in v4, migrated properly)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 

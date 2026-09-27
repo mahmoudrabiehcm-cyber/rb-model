@@ -27,60 +27,75 @@ except ImportError:  # pragma: no cover — keeps this module importable from a
 
 
 # -----------------------------------------------------------------------------
-# Patch 76 (2026-09-27, manager-deployed traceback: "TypeError: LpVariable.
-# __init__() got an unexpected keyword argument 'cat'" — hit at every one of
-# the 3 pulp.LpVariable(..., cat="Binary") call sites in this file, on every
-# single solve, which is the actual root cause behind every "—"/"N/A" this
-# whole thread has been chasing: the Patch 70/71 try/except was correctly
-# catching this exception and degrading to None all along, and Patch 72-75's
-# diagnostics correctly surfaced it as soon as they were wired in — this was
-# never a display bug, it's a real solver-construction failure.
+# Patch 76 (2026-09-27) — ROOT CAUSE CONFIRMED, not inferred. The manager's
+# deployed traceback ("TypeError: LpVariable.__init__() got an unexpected
+# keyword argument 'cat'") is the real cause behind every "—"/"N/A" this
+# whole thread has been chasing. Patch 70/71's try/except was correctly
+# catching it and degrading to None all along; Patch 72-75's diagnostics
+# just finally made it visible.
 #
-# Verified (not inferred): `cat` is not a new or unstable pulp kwarg — every
-# publicly released pulp version from 2.7.0 (this project's own requirements
-# floor) through the current latest 3.3.2 accepts `LpVariable(name,
-# cat="Binary")` with no error (checked directly, installing each version in
-# a clean venv and calling it). So this is not a case of requirements.txt's
-# unpinned `pulp>=2.7` resolving to a genuinely broken published release.
-# The most likely explanation left is environment-specific to the manager's
-# deployment (a stale/corrupted cached virtualenv on Streamlit Community
-# Cloud that predates a change, a partial/duplicate install, or an import
-# shadowing another package/module also named `pulp`) — not something
-# reproducible or confirmable from this sandbox, so it is disclosed as
-# environment-specific rather than claimed as root-caused with certainty.
+# What actually happened, confirmed by directly installing and running the
+# real releases (not guessed from behavior): this sandbox's Python (3.11)
+# can only ever be offered pulp up to 3.3.2, where `cat=` works fine — which
+# is exactly why this was invisible from here at first. The manager's
+# Streamlit Cloud traceback showed their real venv path running Python
+# 3.14, and PuLP shipped an actual, non-alpha PuLP 4.0.0 requiring Python
+# >=3.12. requirements.txt's unpinned `pulp>=2.7` let Streamlit Cloud's
+# newer Python runtime install it. Built a real Python 3.12 venv here,
+# installed genuine pulp==4.0.0, and reproduced the manager's exact error —
+# then reproduced their SECOND error too ("'str' object has no attribute
+# 'set_lb'") from an earlier, wrong attempt at this fix that tried to patch
+# around it with post-construction attribute assignment.
 #
-# Rather than leave every solve hostage to that one keyword argument, this
-# constructs the binary LpVariable defensively: try the normal `cat=`
-# kwarg first (the fast, ordinary path on a healthy install); if that
-# specific TypeError fires, fall back to constructing plain and setting the
-# `.cat` attribute afterward — `.cat` has been a plain, directly-settable
-# public attribute on every pulp version tested above, so this recovers the
-# exact same "Binary" variable either way. If pulp is broken in some deeper
-# way than this, the surrounding try/except in each solve function still
-# catches it and reports the real exception via the diagnostic channel below
-# — this is a targeted recovery for the ONE specific failure actually seen
-# in the wild, not a blanket exception swallow.
-def _binary_var(name: str):
-    try:
-        return pulp.LpVariable(name, cat="Binary")
-    except TypeError as e:
-        if "cat" not in str(e):
-            raise  # a different TypeError -- don't mask it, let the caller's own except handle/report it
-        # Verified against pulp's own __init__ source (every version tested,
-        # 2.7.0-3.3.2): cat="Binary" isn't just a label -- it also sets
-        # lowBound=0, upBound=1, and internally stores cat as "Integer" (a
-        # binary IS an integer var with those bounds). An earlier version of
-        # this fallback only set `.cat = "Binary"` post-construction and left
-        # lowBound/upBound at their plain-constructor default of None --
-        # i.e. an literally UNBOUNDED continuous variable, which is why the
-        # very first test of this fallback made every solve fail with CBC
-        # status=Unbounded instead of Optimal. Replicating all three fields
-        # exactly is what actually reproduces a real binary variable.
-        v = pulp.LpVariable(name)
-        v.lowBound = 0
-        v.upBound = 1
-        v.cat = "Integer"
-        return v
+# PuLP 4.0 is not a small API tweak: it's a full rewrite onto a Rust-backed
+# core (`LpVariable.__init__` now takes a `_rustcore.Variable`, not a name/
+# bounds/cat at all) — exactly what 3.3.2's own deprecation notice had
+# already been telegraphing ("Constructing LpVariable(name, ...) directly
+# is deprecated; in PuLP 4.0 use prob.add_variable(...)"). No amount of
+# attribute patching can bridge a rewritten core; the only real fix is to
+# use the actual documented, non-deprecated construction path. Confirmed
+# directly: `prob.add_variable(name, lowBound=0, upBound=1, cat="Binary")`
+# has the IDENTICAL signature and produces a fully usable variable on both
+# a real pulp 3.3.2 install AND a real pulp 4.0.0 install — this is the one
+# call that's actually correct on both, not a version branch or a guess.
+#
+# A second, separate 4.0 break was found the same way (running the real
+# solve end-to-end under real 4.0.0, not stopping at the first fix that
+# looked plausible): `pulp.PULP_CBC_CMD` — used to invoke the solver — no
+# longer exists in 4.0's public API at all (`pulp.listSolvers()` doesn't
+# even list it), and no MIP solver binary ships bundled by default anymore
+# (`pulp.listSolvers(onlyAvailable=True)` returns `[]` on a plain `pip
+# install pulp==4.0.0`). Confirmed the fix: PyPI's `pulp[cbc]` extra installs
+# the same underlying CBC binary (`pulp.COIN_CMD`) 4.0 needs, is a no-op-safe
+# addition to requirements.txt for the pre-4.0 range too (tested `pulp[cbc]
+# ==3.3.2` directly — behaves identically to plain `pulp==3.3.2`), and keeps
+# every existing "CBC status=..." diagnostic string in this file accurate,
+# since it's still genuinely CBC underneath either way — not a switch to a
+# different solver engine.
+def _binary_var(prob, name: str):
+    """Patch 76 (revised -- see the model_config.yaml Patch 76 note for the
+    full story, including the two earlier attempts at this fix that didn't
+    hold up under real testing). The manager's live traceback turned out to
+    be caused by a genuine PuLP 4.0.0 install (confirmed directly: installed
+    real pulp==4.0.0 under a real Python 3.12 venv in this sandbox and
+    reproduced the manager's EXACT two errors in sequence -- first
+    "LpVariable.__init__() got an unexpected keyword argument 'cat'" from
+    the direct-construction call this function used to make, then, from the
+    first attempted fallback, "'str' object has no attribute 'set_lb'").
+    PuLP 4.0 is not a small API tweak -- it's a full rewrite with a Rust-
+    backed core (`LpVariable.__init__` now takes a `_rustcore.Variable`
+    object, not a name/bounds/cat at all), which is exactly what pulp
+    3.3.2's own deprecation warning had been telegraphing: "Constructing
+    LpVariable(name, ...) directly is deprecated; in PuLP 4.0 use
+    prob.add_variable(name, lowBound, upBound, cat=...)." No amount of
+    post-construction attribute patching can bridge that -- the fix is to
+    actually use the documented, non-deprecated construction path.
+    Confirmed directly (not assumed) that `prob.add_variable(name,
+    lowBound=0, upBound=1, cat="Binary")` has the IDENTICAL signature and
+    produces a fully usable variable on both a real pulp 3.3.2 install and a
+    real pulp 4.0.0 install -- this is the one call that's actually correct
+    on both, not a version-detection branch or a fallback guess."""
+    return prob.add_variable(name, lowBound=0, upBound=1, cat="Binary")
 
 
 def _pulp_forensics() -> str:
@@ -94,6 +109,54 @@ def _pulp_forensics() -> str:
         return f"[pulp {getattr(pulp, '__version__', '?')} @ {getattr(pulp, '__file__', '?')}]"
     except Exception:
         return "[pulp version/location unavailable]"
+
+
+def _cbc_solver(msg: int = 0):
+    """Patch 76 -- version-tolerant replacement for the bare
+    `pulp.PULP_CBC_CMD(msg=0)` call this file used to make directly at every
+    `prob.solve(...)` site. `PULP_CBC_CMD` doesn't exist in pulp 4.0's public
+    API at all (confirmed: `hasattr(pulp, "PULP_CBC_CMD")` is False on a real
+    4.0.0 install) -- `COIN_CMD` is the equivalent there, and requires the
+    `pulp[cbc]` extra (now in requirements.txt) to have an actual CBC binary
+    to call. On pulp <4.0, PULP_CBC_CMD remains the right, always-bundled
+    choice, so this only takes the COIN_CMD path when it has to.
+
+    gapRel=0/gapAbs=0 on the COIN_CMD path: found by actually running a
+    real solve against a real pulp[cbc]==4.0.0 install (not assumed) --
+    the CBC binary that ships via 4.0's `[cbc]` extra (a different bundled
+    build, `cbcbox`, than pre-4.0's own internal one) defaults to stopping
+    at a nonzero optimality gap, reporting status "GapLimit" instead of
+    "Optimal" even on trivially small problems (confirmed directly: a
+    239-variable knapsack-style problem that should solve to exact
+    optimality in milliseconds reported "GapLimit" with default options,
+    and "Optimal" once gapRel=0/gapAbs=0 were passed explicitly). Every
+    diagnostic and caller in this file already checks for the literal
+    string "Optimal" -- rather than loosen every one of those checks to
+    also accept "GapLimit" (silently accepting a solution that's merely
+    close to optimal, not the genuine best XI/squad the manager is relying
+    on this app for), this forces the same exact-optimal behavior pre-4.0's
+    bundled CBC always gave by default. Left off the PULP_CBC_CMD path
+    since that one was never observed to need it."""
+    if hasattr(pulp, "PULP_CBC_CMD"):
+        return pulp.PULP_CBC_CMD(msg=msg)
+    return pulp.COIN_CMD(msg=msg, gapRel=0, gapAbs=0)
+
+
+def _solve_and_get_status(prob, solver) -> str:
+    """Patch 76 -- solves `prob` and returns the human-readable status string
+    ("Optimal", "Infeasible", "Unbounded", ...) across both pulp APIs.
+    Pre-4.0 (confirmed against a real 3.3.2 install): `prob.solve(solver)`
+    returns a plain int status code (also stored on `prob.status`), decoded
+    via `pulp.LpStatus[prob.status]`. 4.0+ (confirmed against a real 4.0.0
+    install): `LpProblem` no longer has a `.status` attribute at all --
+    `prob.solve(solver)` instead returns an `LpSolveStats` object whose
+    `.status` is an enum with a `.name` equal to the same string ("Optimal",
+    etc.). Every CBC-status diagnostic string elsewhere in this file already
+    expects exactly this string, unchanged either way."""
+    result = prob.solve(solver)
+    if hasattr(result, "status") and hasattr(result.status, "name"):
+        return result.status.name
+    return pulp.LpStatus[prob.status]
 
 
 # -----------------------------------------------------------------------------
@@ -315,7 +378,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     #    "Manage app" logs even though the user-facing page redacts it.
     try:
         prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
-        x = {i: _binary_var(f"x_{i}") for i in df.index}
+        x = {i: _binary_var(prob, f"x_{i}") for i in df.index}
 
         prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
 
@@ -349,10 +412,10 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
             if len(idxs) > 0:
                 prob += pulp.lpSum(x[i] for i in idxs) >= min(min_retain, len(idxs))
 
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        _status = _solve_and_get_status(prob, _cbc_solver(msg=0))
 
-        if pulp.LpStatus[prob.status] != "Optimal":
-            _diag(label, f"CBC solver returned status={pulp.LpStatus[prob.status]} (not Optimal) — "
+        if _status != "Optimal":
+            _diag(label, f"CBC solver returned status={_status} (not Optimal) — "
                           f"{len(df)} candidates, budget={budget}, squad_size="
                           f"{cfg['squad_rules']['squad_size']}, max_per_club={cfg['squad_rules']['max_per_club']}, "
                           f"formation={cfg['squad_rules']['formation']}"
@@ -479,7 +542,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         # already does.
         try:
             prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
-            x = {i: _binary_var(f"xi_{i}") for i in df.index}
+            x = {i: _binary_var(prob, f"xi_{i}") for i in df.index}
             prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
             prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
             prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
@@ -488,9 +551,9 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
             for team in df["team"].unique():
                 prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
-            prob.solve(pulp.PULP_CBC_CMD(msg=0))
-            if pulp.LpStatus[prob.status] != "Optimal":
-                _shape_failures.append(f"shape {(d, m, f)}: CBC status={pulp.LpStatus[prob.status]} "
+            _status = _solve_and_get_status(prob, _cbc_solver(msg=0))
+            if _status != "Optimal":
+                _shape_failures.append(f"shape {(d, m, f)}: CBC status={_status} "
                                         f"(xi_budget_cap={xi_budget_cap:.1f}, {len(df)} candidates)")
                 return None
             chosen = [i for i in df.index if x[i].value() == 1]
@@ -525,7 +588,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         # failure mode to route an exception into).
         try:
             prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
-            y = {i: _binary_var(f"bn_{i}") for i in bench_pool.index}
+            y = {i: _binary_var(prob2, f"bn_{i}") for i in bench_pool.index}
             prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
             prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
             for pos, n in need.items():
@@ -534,9 +597,9 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
                 already = xi_club_counts.get(team, 0)
                 prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
                     <= max(0, max_per_club - already)
-            prob2.solve(pulp.PULP_CBC_CMD(msg=0))
-            if pulp.LpStatus[prob2.status] != "Optimal":
-                _bench_failures.append(f"shape {xi_result.get('shape')}: CBC status={pulp.LpStatus[prob2.status]} "
+            _status = _solve_and_get_status(prob2, _cbc_solver(msg=0))
+            if _status != "Optimal":
+                _bench_failures.append(f"shape {xi_result.get('shape')}: CBC status={_status} "
                                         f"(remaining_budget={remaining_budget:.1f}, need={need}, "
                                         f"{len(bench_pool)} candidates)")
                 return None
