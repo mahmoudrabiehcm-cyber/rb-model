@@ -1788,6 +1788,68 @@ meta:
                           # included (see the Patch 58 addendum above) -- keep using your own live copy. This
                           # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
                           # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 73 (2026-09-27, manager report: "nothing changed after patch 72!! don't
+                          # share any patches before testing it to avoid time wasting" -- after applying
+                          # Patch 72, the Wildcard card's tooltip still just read "insufficient data ...."
+                          # with no diagnostic appended). Investigated directly in code, per the manager's
+                          # explicit instruction, rather than re-guessing: fpl_engine.wildcard_trigger_check()
+                          # does NOT return None on failure -- it returns a placeholder dict (`empty =
+                          # {"active": False, "avg_rating_pct": None, "cumulative_gap": None, "by_gw": {},
+                          # "reason": "insufficient data to evaluate this run"}`) whenever squad_df/
+                          # reachable_squad_df is None/empty or detect_gw_list is falsy (fpl_engine.py,
+                          # wildcard_trigger_check(), confirmed by reading its actual return statements).
+                          # Patch 72's app.py check was literally `wc_trigger is None`, which that placeholder
+                          # dict can NEVER satisfy (it's always a real, non-None dict) -- so the diagnostic-
+                          # append code Patch 72 added for this card was dead code from the moment it shipped,
+                          # and every one of Patch 72's own tests passed because they all tested optimizer.py/
+                          # data_pipeline.py directly, never the actual app.py branch condition itself. This
+                          # is a genuinely different bug from anything Patch 70/71/72 touched.
+                          #
+                          # Fixed by moving the diagnosis to where each real precondition is actually known,
+                          # rather than trying to infer it after the fact from wildcard_trigger_check()'s
+                          # output (whose own "reason" field doesn't distinguish its four different possible
+                          # empty-triggering conditions either): a new `wc_diag_reason` is now built at the
+                          # exact point in app.py where _wc_available_now / shape_proj / squad_detect /
+                          # reachable_detect / detect_gw_list are each evaluated, correctly identifying which
+                          # one actually failed (Wildcard unavailable this run; no detection window/squad;
+                          # squad_detect empty; the reachable-squad solve returned no result -- reusing Patch
+                          # 72's opt.get_diagnostic("reachable_ceiling") for the real reason; reachable solve
+                          # returned an empty squad; or no GW had matching projection columns on both sides).
+                          # The tooltip-building code then checks `wc_diag_reason` (correct) instead of
+                          # `wc_trigger is None` (impossible).
+                          #
+                          # Given the manager's explicit instruction not to ship another unverified patch,
+                          # this was tested differently from Patch 70/71/72's own unit tests, which is exactly
+                          # what let this bug through: three new "golden-slice" tests extract the ACTUAL,
+                          # unmodified source blocks from app.py (via exec() in a controlled namespace with
+                          # fabricated inputs standing in for a live run) for all THREE cards Patch 72 touched
+                          # -- Wildcard, "GW{n} Rating", and "Team Rating % (GWx-y)" -- rather than
+                          # hand-re-deriving the logic in the test (which is how Patch 72's tests all "passed"
+                          # while testing the wrong condition). Each proves, against the REAL shipped code:
+                          # (a) the manager's exact reported failure scenario now produces a real "Diagnostic
+                          # (Patch 72/73): ..." line in that exact card's tooltip, with the specific true cause
+                          # named, and (b) a genuinely successful run shows no diagnostic at all (the fix
+                          # doesn't fire spuriously). The other two cards (GW{n} Rating, Team Rating %) were
+                          # confirmed NOT to share the Wildcard's bug -- data_pipeline.solve_free_hit_optimal_
+                          # squad()/solve_ceiling() both return None directly on failure with no wrapping
+                          # placeholder-dict pattern, so Patch 72's `is None` checks for those two were correct
+                          # -- this was verified with the same golden-slice method, not assumed from an earlier
+                          # code read.
+                          # Verified: full `ast.parse` syntax check on app.py; every core module still imports
+                          # cleanly. Re-ran test_patch70/71/72's suites alongside the three new golden-slice
+                          # tests -- all 6 test files pass, no regression. Booted the real app.py locally via
+                          # `streamlit run` and confirmed via HTTP 200 + Playwright/Chromium screenshot that it
+                          # still comes up clean to the gate screen with no traceback. This sandbox still has
+                          # no network route to the official FPL API, so the manager's exact live GW6 scenario
+                          # still can't be reproduced end-to-end here -- but unlike Patch 72, this fix was
+                          # proven against the manager's own reported symptom (the Wildcard tooltip showing no
+                          # diagnostic) using the manager's own test standard: don't claim it works, prove it
+                          # against the real code before sending it.
+                          # NOTE (2026-09-27): rb_model_app_patch73.zip is CUMULATIVE: Patch 29 through 73
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

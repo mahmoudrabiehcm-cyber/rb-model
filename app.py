@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 72 (diagnostics: solve failures now explain why, not just —/N/A)"
+PATCH_VERSION = "Patch 73 (fixes Patch 72's dead diagnostic code on the Wildcard card)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1261,11 +1261,53 @@ with st.spinner("Fetching live data and computing xPts..."):
     shape_test = None
     shape_proj = proj if (detect_gw_list is not None and not squad_df.empty) else None
 
-    if _wc_available_now and shape_proj is not None:
+    # Patch 73 (manager, 2026-09-27: confirmed in code that Patch 72's
+    # Wildcard diagnostic could NEVER fire — eng.wildcard_trigger_check()
+    # does not return None on failure, it returns a placeholder dict
+    # (`empty = {"active": False, "avg_rating_pct": None, ..., "reason":
+    # "insufficient data to evaluate this run"}`, see fpl_engine.py). Patch
+    # 72's app.py check was `wc_trigger is None`, which that placeholder
+    # dict never satisfies — so the tooltip kept showing the exact same
+    # generic text as before Patch 72, with the diagnostic code silently
+    # never executing. This is a genuinely different bug from anything
+    # Patch 70/71/72 touched, found only by reading wildcard_trigger_check's
+    # actual return statements, not by re-guessing.
+    #
+    # wc_diag_reason is now built HERE, at the point each precondition is
+    # actually known, rather than trying to reverse-engineer which of
+    # wildcard_trigger_check's four possible empty-triggering conditions
+    # fired from its output alone (its own "reason" field doesn't
+    # distinguish them either — all four collapse to the same generic
+    # string).
+    wc_diag_reason = None
+    if not _wc_available_now:
+        wc_diag_reason = ("Wildcard isn't available to evaluate this run (_wc_available_now is False — e.g. "
+                           "already played with no next window open yet this season, or otherwise out of season).")
+    elif shape_proj is None:
+        wc_diag_reason = ("detect_gw_list is empty/None, or the current squad is empty this run — the Wildcard "
+                           "trigger has no gameweek window or squad to evaluate against.")
+    else:
         squad_detect = shape_proj[shape_proj["code"].isin(squad_codes)]
         reachable_detect = data_pipeline.solve_reachable_ceiling(cfg, shape_proj, squad_codes, ft["free_transfers"])
         wc_trigger = eng.wildcard_trigger_check(
             squad_detect, reachable_detect["squad"] if reachable_detect else None, detect_gw_list, cfg)
+        if wc_trigger.get("avg_rating_pct") is None:
+            if squad_detect.empty:
+                wc_diag_reason = (f"squad_detect is empty — none of the {len(squad_codes)} current squad codes "
+                                   f"matched this run's projected pool.")
+            elif reachable_detect is None:
+                _rc_diag = opt.get_diagnostic("reachable_ceiling")
+                wc_diag_reason = (f"the reachable-squad solve (data_pipeline.solve_reachable_ceiling) returned no "
+                                   f"result — {_rc_diag}" if _rc_diag else
+                                   "the reachable-squad solve returned no result, but no specific reason was "
+                                   "recorded — please report this exact combination so it can be added.")
+            elif reachable_detect["squad"].empty:
+                wc_diag_reason = "the reachable-squad solve returned an empty squad."
+            elif not detect_gw_list:
+                wc_diag_reason = "detect_gw_list is empty."
+            else:
+                wc_diag_reason = ("no GW in detect_gw_list had a valid xpts_gw{n} column present in both the "
+                                   "current squad's and the reachable squad's projections this run.")
 
     wc_flag = chip_protocol.wildcard_trigger_flag(wc_trigger, rank_history_display) if wc_trigger else None
 
@@ -2089,17 +2131,15 @@ with tab_chips:
                                     "Insufficient data to evaluate the trigger this run."))
     wc_card_tooltip += " Wildcard's trigger condition is mechanical (Standing Rule #24/#41), but the specific play " \
                         "date is never a mechanical verdict — it's a rolling re-test per Standing Rule #32."
-    # Patch 72 (manager, 2026-09-27: this card started showing "N/A —
-    # insufficient data this run" after Patch 71). wc_trigger is only ever
-    # None when reachable_detect (data_pipeline.solve_reachable_ceiling(),
-    # label="reachable_ceiling") came back None — surface the real reason.
-    if not wc_flag and not much_more and wc_trigger is None:
-        _wc_diag = opt.get_diagnostic("reachable_ceiling")
-        wc_card_tooltip += (f" ⚠ Diagnostic (Patch 72): this run's reachable-squad solve returned no result — "
-                            f"{_wc_diag}" if _wc_diag else
-                            " ⚠ Diagnostic (Patch 72): this run's reachable-squad solve returned no result, but no "
-                            "specific reason was recorded — please report this exact combination so it can be "
-                            "added.")
+    # Patch 73 (fixes a confirmed-broken Patch 72 check — see the
+    # wc_diag_reason note above where it's computed. wc_trigger is NEVER
+    # actually None on a "insufficient data" run; it's always a placeholder
+    # dict, which is why Patch 72's `wc_trigger is None` check could never
+    # fire and the tooltip kept showing the same generic text with no
+    # diagnostic appended. wc_diag_reason is the corrected replacement,
+    # computed right where each real precondition is known.
+    if not wc_flag and not much_more and wc_diag_reason:
+        wc_card_tooltip += f" ⚠ Diagnostic (Patch 73): {wc_diag_reason}"
     if wc_flag and _wc_check_note:
         wc_card_tooltip += " " + _wc_check_note
     if wc_flag:
