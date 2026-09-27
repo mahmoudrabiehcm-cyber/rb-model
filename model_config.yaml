@@ -1715,6 +1715,79 @@ meta:
                           # included (see the Patch 58 addendum above) -- keep using your own live copy. This
                           # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
                           # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 72 (2026-09-27, manager screenshots: right after Patch 71 was deployed,
+                          # "GW6 Rating" and "Team Rating % (GW6-9)" both showed "--", and the Wildcard card
+                          # showed "N/A -- insufficient data this run" -- no crash this time, but three
+                          # separate features silently went blank at once). Traced directly in code, not
+                          # inferred: all three depend on the SAME two solves Patch 70/71 hardened --
+                          # data_pipeline.solve_ceiling()/solve_reachable_ceiling() -> opt.solve_squad(), and
+                          # data_pipeline.solve_free_hit_optimal_squad() -> opt.solve_xi_first_squad() -- and
+                          # every caller already degrades to "--"/"N/A" when either returns None (confirmed by
+                          # reading app.py's fh_auto_rating/compliant_rating/wc_trigger chains: eng.
+                          # team_rating_pct() returns rating_pct=None whenever its ceiling argument is 0.0,
+                          # which is exactly what every caller substitutes when the corresponding solve came
+                          # back None). This means Patch 70/71's hardening is doing exactly its job -- no
+                          # crash -- but the UNDERLYING reason those two solves keep returning None on the
+                          # manager's actual live GW6 data was never actually identified (both patches
+                          # explicitly disclosed they could not reproduce the manager's exact live trigger
+                          # locally, only a synthetic duplicate-index shape) -- so the failure just moved from
+                          # "crashes the page" to "silently shows blank," with the real cause sitting in
+                          # Streamlit Cloud's "Manage app" logs (stderr), a place the manager has already
+                          # reported difficulty finding.
+                          #
+                          # Rather than guess at a fourth unconfirmed synthetic cause, this patch makes the
+                          # real reason self-reporting, directly in the UI, with no log access needed at all:
+                          #   1. optimizer.py gains a small in-process diagnostic channel (_DIAGNOSTICS dict +
+                          #      get_diagnostic(label)/set_diagnostic(label, msg)). Every None-return path in
+                          #      solve_squad() and solve_xi_first_squad() (empty candidate pool after
+                          #      filtering, an infeasible/non-Optimal CBC status, or an exception -- the exact
+                          #      three failure modes Patch 70/71 already made non-fatal) now records a
+                          #      specific, plain-English reason there, keyed by an optional `label` param each
+                          #      call site passes. A successful solve clears its label's entry, so a stale
+                          #      reason from an earlier failed run is never shown once whatever caused it
+                          #      stops happening.
+                          #   2. data_pipeline.py's three real call sites now each pass a label: solve_ceiling()
+                          #      -> "theoretical_ceiling" (feeds Team Rating % (GW6-9)'s ceiling side),
+                          #      solve_reachable_ceiling() -> "reachable_ceiling" (feeds the Wildcard trigger),
+                          #      solve_free_hit_optimal_squad() -> "free_hit_optimal" (feeds "GW{n} Rating").
+                          #      solve_free_hit_optimal_squad()'s own "column not in proj" early-return (which
+                          #      never even reaches optimizer.py) now also calls the new opt.set_diagnostic()
+                          #      public wrapper directly, so that path is diagnosable too.
+                          #   3. app.py reads opt.get_diagnostic(label) back immediately after each of these
+                          #      three None results and appends it, prefixed "Diagnostic (Patch 72):", to that
+                          #      exact card/badge's existing tooltip (fh_auto_tooltip for "GW{n} Rating",
+                          #      _compliant_tooltip for "Team Rating % (GWx-y)", wc_card_tooltip for the
+                          #      Wildcard card) -- hovering the "--"/"N/A" on the manager's very next live run
+                          #      will show the real cause (e.g. "CBC solver returned status=Infeasible... budget
+                          #      too tight" or "empty candidate pool: 0 of N rows survived... if xpts_gw6 is
+                          #      mostly missing this gameweek, that alone would empty the pool").
+                          #
+                          # This is a diagnosability fix, not a claimed root-cause fix -- explicitly disclosed:
+                          # without either the manager's Streamlit Cloud stderr logs or live network access to
+                          # reproduce their exact GW6 pool (still unavailable in this sandbox), guessing a
+                          # fourth synthetic cause risked repeating the same pattern as Patch 70/71 (a plausible
+                          # but unconfirmed fix). This patch instead guarantees the actual cause surfaces in the
+                          # UI itself on the next real run, closing the loop for good.
+                          # Verified: full `ast.parse` syntax check on optimizer.py/app.py/data_pipeline.py;
+                          # every core module still imports cleanly. New test_patch72_solve_diagnostics.py (6
+                          # checks) confirms a successful solve leaves no stale diagnostic, an empty-pool
+                          # None-return and an infeasible-solve None-return each record distinct specific
+                          # reasons for both solve_squad() and solve_xi_first_squad(), the "column not in proj"
+                          # early-return records a diagnostic via the new public wrapper, and all three real
+                          # call sites/UI read-backs are present in source. Re-ran test_patch70_solve_squad_
+                          # hardening.py and test_patch71_solve_xi_first_squad_hardening.py alongside it -- all
+                          # pass, no regression. Booted the real app.py locally via `streamlit run` and
+                          # confirmed via HTTP 200 + Playwright/Chromium screenshot that it still comes up
+                          # clean to the gate screen with no traceback. This sandbox still has no network route
+                          # to the official FPL API, so the manager's exact live GW6 "--"/"N/A" scenario
+                          # couldn't be reproduced end-to-end here -- the manager's own next live run, with the
+                          # new diagnostic text now visible on hover, is what will finally reveal the real
+                          # cause so it can be fixed directly instead of guessed at again.
+                          # NOTE (2026-09-27): rb_model_app_patch72.zip is CUMULATIVE: Patch 29 through 72
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

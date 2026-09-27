@@ -26,6 +26,64 @@ except ImportError:  # pragma: no cover — keeps this module importable from a
     st = None
 
 
+# -----------------------------------------------------------------------------
+# Patch 72 (manager, 2026-09-27: after Patch 71 was deployed, the crash was
+# gone but "GW6 Rating", "Team Rating % (GW6-9)" and the Wildcard card all
+# started showing "—" / "N/A — insufficient data this run" instead of real
+# numbers). Traced directly in code: all three depend on solve_squad() and/or
+# solve_xi_first_squad() returning a real result; when either returns None
+# (empty candidate pool, an infeasible/non-Optimal CBC solve, or an exception
+# now caught by Patch 70/71's try/except), every caller downstream degrades
+# to "—"/"N/A" exactly as designed — the crash-hardening is working. What it
+# was NEVER able to do is explain WHY a given solve returned None on the
+# manager's actual live data, because Streamlit Cloud redacts on-page errors
+# and this sandbox has no network route to the live FPL API to reproduce the
+# manager's exact GW6 pool. Every previous patch this session (70, 71) could
+# only print the failure to stderr, which lands in Streamlit Cloud's "Manage
+# app" logs — a place the manager has already reported difficulty finding.
+#
+# This module-level dict is a lightweight, in-process diagnostic channel:
+# every None-return path in solve_squad()/solve_xi_first_squad() below now
+# also records a plain-English reason here, keyed by an optional `label`
+# each call site can pass (e.g. "team_rating_ceiling", "wildcard_reachable",
+# "free_hit_optimal"). app.py reads it back with get_diagnostic(label)
+# immediately after a None result and surfaces it directly in that card's
+# own tooltip — so the NEXT real run against live data will show the actual
+# cause (e.g. "CBC status: Infeasible" or "empty candidate pool: 0/612 rows
+# survived filtering") right there in the UI, with no Streamlit Cloud log
+# access needed at all. A successful solve clears its label's entry, so a
+# stale reason is never shown once whatever caused it stops happening.
+# -----------------------------------------------------------------------------
+_DIAGNOSTICS: dict[str, str] = {}
+
+
+def _diag(label: str | None, message: str) -> None:
+    if label:
+        _DIAGNOSTICS[label] = message
+
+
+def _clear_diag(label: str | None) -> None:
+    if label:
+        _DIAGNOSTICS.pop(label, None)
+
+
+def get_diagnostic(label: str) -> str | None:
+    """Patch 72 — the most recent None-return reason recorded for this
+    label, or None if that label's last call either succeeded or has never
+    run. See the module-level _DIAGNOSTICS note above for why this exists."""
+    return _DIAGNOSTICS.get(label)
+
+
+def set_diagnostic(label: str, message: str) -> None:
+    """Patch 72 — public wrapper around _diag(), for callers OUTSIDE this
+    module (data_pipeline.py's solve_free_hit_optimal_squad/rebuild, which
+    can return None before ever calling into optimizer.py at all, when the
+    target GW's projection column isn't in `proj` yet) that still want their
+    own None-return reason to show up wherever the caller reads
+    get_diagnostic(label)."""
+    _diag(label, message)
+
+
 def _cache_decorator(fn):
     """Patch 42 (manager, 2026-09-15: "the performance is too too slow" —
     traced to Patch 39's own weekly-planner hit-cost extension, which made
@@ -53,7 +111,8 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
                  exclude_codes: list | None = None,
                  retain_pool_codes: list | None = None,
                  min_retain: int = 0,
-                 objective_col: str = "xpts_horizon_sum") -> dict | None:
+                 objective_col: str = "xpts_horizon_sum",
+                 label: str | None = None) -> dict | None:
     """players needs columns: code, web_name, team, position, price,
     <objective_col>, status. Returns dict with squad picks, total_xpts, cost.
     Only picks status=='a' (available) players unless explicitly must_include.
@@ -73,6 +132,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     best squad actually reachable this week," not a fantasy ideal that
     ignores you already own 15 players and only have N free moves."""
     if pulp is None:
+        _diag(label, "pulp (the MILP library this solver needs) is not installed/importable in this environment.")
         return None
 
     must_include_codes = must_include_codes or []
@@ -137,6 +197,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
                 if col in players.columns:
                     players.loc[gap_rows_mask & players[col].isna(), col] = 0.0
 
+    _players_in = len(players)
     df = players.dropna(subset=["price", objective_col, "position"]).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     if exclude_codes:
@@ -144,6 +205,10 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     df = df[(df["status"] == "a") | (df["code"].isin(must_include_codes)) |
             (df["code"].isin(retain_pool_codes or []))]
     if df.empty:
+        _diag(label, f"empty candidate pool after filtering: 0 of {_players_in} input rows survived the "
+                      f"price/{objective_col}/position not-null check, GK/DEF/MID/FWD position check, exclude-list, "
+                      f"and status=='a' (or must-include/retain-pool) filters — nothing left for the solver to "
+                      f"choose from.")
         return None
 
     # Patch 70 (manager, live TypeError crash: "This app has encountered an
@@ -217,10 +282,18 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         prob.solve(pulp.PULP_CBC_CMD(msg=0))
 
         if pulp.LpStatus[prob.status] != "Optimal":
+            _diag(label, f"CBC solver returned status={pulp.LpStatus[prob.status]} (not Optimal) — "
+                          f"{len(df)} candidates, budget={budget}, squad_size="
+                          f"{cfg['squad_rules']['squad_size']}, max_per_club={cfg['squad_rules']['max_per_club']}, "
+                          f"formation={cfg['squad_rules']['formation']}"
+                          + (f", must retain >= {min(min_retain, len(df[df['code'].isin(retain_pool_codes or [])]))} "
+                             f"of {len(retain_pool_codes or [])} retain-pool codes" if retain_pool_codes and min_retain > 0 else "")
+                          + " — no legal squad exists under these constraints with this candidate pool.")
             return None
 
         chosen = [i for i in df.index if x[i].value() == 1]
         squad = df.loc[chosen].sort_values(["position", objective_col], ascending=[True, False])
+        _clear_diag(label)
         return {
             "squad": squad,
             "total_xpts": round(squad[objective_col].sum(), 2),
@@ -230,10 +303,13 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
     except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 70 note above
         print(f"[optimizer.solve_squad] MILP build/solve failed ({objective_col}, "
               f"{len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
+        _diag(label, f"an unexpected exception hit the MILP build/solve: {type(exc).__name__}: {exc} "
+                      f"({len(df)} candidates, objective_col={objective_col}).")
         return None
 
 
-def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str) -> dict | None:
+def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str,
+                          label: str | None = None) -> dict | None:
     """Free Hit "optimal team for this GW" feature (2026-09-07 discussion,
     Patch 19) — Option A (two-stage, manager-confirmed): unlike solve_squad()
     (which maximizes the raw sum of all 15 players' projections and has no
@@ -270,16 +346,23 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
     a Free Hit squad for this GW this run," same as solve_squad() returning
     None."""
     if pulp is None:
+        _diag(label, "pulp (the MILP library this solver needs) is not installed/importable in this environment.")
         return None
 
     VALID_SHAPES = [(3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3)]
     max_per_club = cfg["squad_rules"]["max_per_club"]
     formation = cfg["squad_rules"]["formation"]  # {GK: 2, DEF: 5, MID: 5, FWD: 3}
 
+    _players_in = len(players)
     df = players.dropna(subset=["price", gw_col, "position"]).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     df = df[df["status"] == "a"]
     if df.empty:
+        _diag(label, f"empty candidate pool after filtering: 0 of {_players_in} input rows survived the "
+                      f"price/{gw_col}/position not-null check, GK/DEF/MID/FWD position check and status=='a' "
+                      f"filter — nothing left for the solver to choose from. If {gw_col} is mostly missing this "
+                      f"gameweek (e.g. this GW's fixture/projection data hasn't fully loaded), that alone would "
+                      f"empty the pool.")
         return None
     # Patch 71 (manager, live TypeError crash on this exact function --
     # `_solve_xi_for_shape` below -- immediately after Patch 70 hardened the
@@ -298,11 +381,22 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
     cheapest_by_pos = {pos: sorted(df[df["position"] == pos]["price"].tolist())
                         for pos in ["GK", "DEF", "MID", "FWD"]}
     if any(len(v) == 0 for v in cheapest_by_pos.values()):
+        _missing_pos = [pos for pos, v in cheapest_by_pos.items() if len(v) == 0]
+        _diag(label, f"no available (status=='a') candidates at all in position(s) {_missing_pos} after "
+                      f"filtering — a bench needs at least one of every position, so the reserve estimate "
+                      f"can't even be computed.")
         return None
     bench_reserve_estimate = (cheapest_by_pos["GK"][0] +
                                sum(sorted(cheapest_by_pos["DEF"] + cheapest_by_pos["MID"] +
                                           cheapest_by_pos["FWD"])[:3]))
     xi_budget_cap = max(0.0, budget - bench_reserve_estimate)
+
+    # Patch 72 — per-shape/per-attempt failure reasons, collected here (not
+    # returned from the closures themselves, which must keep their existing
+    # None-on-failure contract intact for the caller loop below) so a
+    # diagnostic can still be recorded if EVERY shape/bench attempt fails.
+    _shape_failures: list[str] = []
+    _bench_failures: list[str] = []
 
     def _solve_xi_for_shape(d: int, m: int, f: int) -> dict | None:
         # Patch 71 — same try/except hardening as solve_squad() (Patch 70):
@@ -326,6 +420,8 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
                 prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
             prob.solve(pulp.PULP_CBC_CMD(msg=0))
             if pulp.LpStatus[prob.status] != "Optimal":
+                _shape_failures.append(f"shape {(d, m, f)}: CBC status={pulp.LpStatus[prob.status]} "
+                                        f"(xi_budget_cap={xi_budget_cap:.1f}, {len(df)} candidates)")
                 return None
             chosen = [i for i in df.index if x[i].value() == 1]
             xi = df.loc[chosen]
@@ -333,6 +429,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         except Exception as exc:  # noqa: BLE001 -- deliberately broad, see Patch 71 note above
             print(f"[optimizer.solve_xi_first_squad._solve_xi_for_shape] MILP build/solve failed "
                   f"(shape {(d, m, f)}, {len(df)} candidates): {type(exc).__name__}: {exc}", file=sys.stderr)
+            _shape_failures.append(f"shape {(d, m, f)}: {type(exc).__name__}: {exc}")
             return None
 
     def _solve_bench_for_xi(xi_result: dict) -> dict | None:
@@ -369,6 +466,9 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
                     <= max(0, max_per_club - already)
             prob2.solve(pulp.PULP_CBC_CMD(msg=0))
             if pulp.LpStatus[prob2.status] != "Optimal":
+                _bench_failures.append(f"shape {xi_result.get('shape')}: CBC status={pulp.LpStatus[prob2.status]} "
+                                        f"(remaining_budget={remaining_budget:.1f}, need={need}, "
+                                        f"{len(bench_pool)} candidates)")
                 return None
 
             bench_chosen = [i for i in bench_pool.index if y[i].value() == 1]
@@ -387,6 +487,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             print(f"[optimizer.solve_xi_first_squad._solve_bench_for_xi] MILP build/solve failed "
                   f"(shape {xi_result.get('shape')}, {len(bench_pool)} candidates): "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr)
+            _bench_failures.append(f"shape {xi_result.get('shape')}: {type(exc).__name__}: {exc}")
             return None
 
     # Solve every shape's XI, then try Stage 2 against them in descending
@@ -406,10 +507,26 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             xi_candidates.append(result)
     xi_candidates.sort(key=lambda r: r["total"], reverse=True)
 
+    # Patch 72 — if every shape failed, that's the diagnosable reason (no
+    # legal Starting XI at all under xi_budget_cap/max_per_club this run).
+    if not xi_candidates:
+        _diag(label, f"no feasible Starting XI found across any of the 8 valid shapes this run "
+                      f"(xi_budget_cap={xi_budget_cap:.1f}, {len(df)} candidates). Per-shape detail: "
+                      + "; ".join(_shape_failures))
+        return None
+
     for xi_result in xi_candidates:
         solved = _solve_bench_for_xi(xi_result)
         if solved:
+            _clear_diag(label)
             return solved
+    # Patch 72 — every shape found a legal XI, but none of them left a
+    # buildable bench (budget/club-limit conflict at Stage 2 for all of
+    # them) — a genuinely different failure mode than "no XI at all," worth
+    # distinguishing in the diagnostic.
+    _diag(label, f"found {len(xi_candidates)} feasible Starting XI shape(s) this run, but no legal bench "
+                  f"(budget + max-per-club) could be built for any of them. Per-attempt detail: "
+                  + "; ".join(_bench_failures))
     return None
 
 

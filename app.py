@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 71 (crash fix: solve_xi_first_squad hardened against MILP build failures)"
+PATCH_VERSION = "Patch 72 (diagnostics: solve failures now explain why, not just —/N/A)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1169,6 +1169,20 @@ with st.spinner("Fetching live data and computing xPts..."):
                        f"fixed 3-4 GW horizon) — see 'Team Rating % (GW{compliant_gw_start}-{compliant_gw_end})' "
                        f"below (full-pool, {len(compliant_gw_list)}-GW) for that doc-compliant metric. "
                        f"Explore a different candidate gameweek in 'Evaluate your own scenario' below.")
+    # Patch 72 (manager, 2026-09-27: this card started showing "—" after
+    # Patch 71 — the crash was fixed but nothing explained WHY the solve
+    # behind it kept returning None on live data). If fh_auto_result is
+    # None, opt.get_diagnostic("free_hit_optimal") now carries the actual
+    # reason (recorded inside data_pipeline.solve_free_hit_optimal_squad /
+    # optimizer.solve_xi_first_squad themselves) — surfaced directly here so
+    # the NEXT live run shows the real cause with no Streamlit Cloud log
+    # access needed.
+    if fh_auto_result is None:
+        _fh_diag = opt.get_diagnostic("free_hit_optimal")
+        fh_auto_tooltip += (f" ⚠ Diagnostic (Patch 72): this run's solve returned no result — {_fh_diag}"
+                            if _fh_diag else
+                            " ⚠ Diagnostic (Patch 72): this run's solve returned no result, but no specific "
+                            "reason was recorded — please report this exact combination so it can be added.")
 
     # captaincy — starting XI only, never the bench. "code" is carried through
     # (Patch 2) so the pitch view can match the recommendation back to its
@@ -1640,7 +1654,11 @@ with tab_news:
                            f'style="background:conic-gradient({_gcol} {_rp*3.6:.0f}deg, var(--rule) 0deg);">'
                            f'<span class="gauge-val">{_rp:.0f}%</span></div></div>')
         else:
-            _gauge_html = '<span class="info-dot" title="Not enough data this run">—</span>'
+            # Patch 72 — was a hardcoded generic "Not enough data this run"
+            # with no way to see why; now reuses fh_auto_tooltip, which
+            # already carries the Patch 72 diagnostic appended above when
+            # fh_auto_result is None.
+            _gauge_html = f'<span class="info-dot" title="{fh_auto_tooltip}">—</span>'
 
         # Patch 51 (2026-09-16, §1a compliance fix) — second, visually distinct
         # badge for the doc-compliant multi-GW "Team Rating %" (compliant_rating,
@@ -1660,6 +1678,18 @@ with tab_news:
             f"(GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown' below for the full disclosure."
         )
         _crp = compliant_rating['rating_pct']
+        # Patch 72 (manager, 2026-09-27: this badge started showing "—" after
+        # Patch 71 — see the fh_auto_tooltip note above for the same pattern).
+        # compliant_ceiling_total is 0.0 exactly when theoretical_ceiling
+        # (data_pipeline.solve_ceiling(), label="theoretical_ceiling") came
+        # back None — surface the real reason here too.
+        if _crp is None:
+            _ceiling_diag = opt.get_diagnostic("theoretical_ceiling")
+            _compliant_tooltip += (f" ⚠ Diagnostic (Patch 72): this run's ceiling solve returned no result — "
+                                    f"{_ceiling_diag}" if _ceiling_diag else
+                                    " ⚠ Diagnostic (Patch 72): this run's ceiling solve returned no result, but no "
+                                    "specific reason was recorded — please report this exact combination so it can "
+                                    "be added.")
         if _crp is not None:
             _ccol = "var(--accent-strong)" if _crp >= 79 else ("var(--gold)" if _crp >= 65 else "var(--coral)")
             _compliant_gauge_html = (f'<div class="gauge-wrap"><div class="gauge-ring" title="{_compliant_tooltip}" '
@@ -2059,6 +2089,17 @@ with tab_chips:
                                     "Insufficient data to evaluate the trigger this run."))
     wc_card_tooltip += " Wildcard's trigger condition is mechanical (Standing Rule #24/#41), but the specific play " \
                         "date is never a mechanical verdict — it's a rolling re-test per Standing Rule #32."
+    # Patch 72 (manager, 2026-09-27: this card started showing "N/A —
+    # insufficient data this run" after Patch 71). wc_trigger is only ever
+    # None when reachable_detect (data_pipeline.solve_reachable_ceiling(),
+    # label="reachable_ceiling") came back None — surface the real reason.
+    if not wc_flag and not much_more and wc_trigger is None:
+        _wc_diag = opt.get_diagnostic("reachable_ceiling")
+        wc_card_tooltip += (f" ⚠ Diagnostic (Patch 72): this run's reachable-squad solve returned no result — "
+                            f"{_wc_diag}" if _wc_diag else
+                            " ⚠ Diagnostic (Patch 72): this run's reachable-squad solve returned no result, but no "
+                            "specific reason was recorded — please report this exact combination so it can be "
+                            "added.")
     if wc_flag and _wc_check_note:
         wc_card_tooltip += " " + _wc_check_note
     if wc_flag:

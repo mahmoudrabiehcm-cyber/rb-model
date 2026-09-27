@@ -493,8 +493,13 @@ def solve_ceiling(cfg: dict, proj: pd.DataFrame):
     max-3-per-club squad from the FULL pool, ignoring what you currently own
     or how many transfers you have. Kept as the "theoretical" reference
     number (Standing Rules #16/#18 disclosure) alongside the reachable
-    ceiling below, which is what the Team Rating % headline now uses."""
-    return opt.solve_squad(proj, cfg, budget=cfg["squad_rules"]["budget"])
+    ceiling below, which is what the Team Rating % headline now uses.
+
+    label="theoretical_ceiling" (Patch 72) — lets app.py surface the real
+    None-return reason (via opt.get_diagnostic()) directly in the "Team
+    Rating % (GWx-y)" card's tooltip if this returns None on a live run,
+    instead of just a silent "—" with no explanation."""
+    return opt.solve_squad(proj, cfg, budget=cfg["squad_rules"]["budget"], label="theoretical_ceiling")
 
 
 def solve_reachable_ceiling(cfg: dict, proj: pd.DataFrame, current_squad_codes: list,
@@ -514,8 +519,12 @@ def solve_reachable_ceiling(cfg: dict, proj: pd.DataFrame, current_squad_codes: 
     current price stands in for it (disclosed simplification, same standard
     as the Bench Value Rule's autosub discount in model_config.yaml)."""
     min_retain = max(0, min(15, 15 - max(0, free_transfers)))
+    # label="reachable_ceiling" (Patch 72) — surfaces the real None-return
+    # reason (via opt.get_diagnostic()) in the Wildcard trigger card's
+    # tooltip when this returns None on a live run.
     return opt.solve_squad(proj, cfg, budget=cfg["squad_rules"]["budget"],
-                            retain_pool_codes=current_squad_codes, min_retain=min_retain)
+                            retain_pool_codes=current_squad_codes, min_retain=min_retain,
+                            label="reachable_ceiling")
 
 
 def solve_free_hit_rebuild(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
@@ -548,8 +557,17 @@ def solve_free_hit_optimal_squad(cfg: dict, proj: pd.DataFrame, total_value: flo
     cheapest legal bench, via optimizer.solve_xi_first_squad(). Same
     Horizon-Matching Rule basis (single target GW only, never a multi-GW
     sum, since a Free Hit squad reverts after one week) and same total-value
-    budget basis (Rule #25) as the play/hold solve."""
+    budget basis (Rule #25) as the play/hold solve.
+
+    label="free_hit_optimal" (Patch 72) — surfaces the real None-return
+    reason (via opt.get_diagnostic()) in the "GW{n} Rating" card's tooltip
+    when this returns None on a live run, including the case right below
+    where the column itself is missing (never even reaches optimizer.py)."""
     col = f"xpts_gw{gw}"
     if col not in proj.columns:
+        opt.set_diagnostic("free_hit_optimal", f"projection column '{col}' is not present in this run's "
+                                                 f"player pool at all (columns present: "
+                                                 f"{[c for c in proj.columns if c.startswith('xpts_gw')]}) — "
+                                                 f"GW{gw} may be outside the projected horizon this run.")
         return None
-    return opt.solve_xi_first_squad(proj, cfg, budget=total_value, gw_col=col)
+    return opt.solve_xi_first_squad(proj, cfg, budget=total_value, gw_col=col, label="free_hit_optimal")
