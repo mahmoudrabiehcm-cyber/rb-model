@@ -1850,6 +1850,110 @@ meta:
                           # included (see the Patch 58 addendum above) -- keep using your own live copy. This
                           # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
                           # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 74 (2026-09-27, manager report: "why you are playing around!! still the same
+                          # issue!!!! test it before creating any new patches!!!!!!" -- sent a plain, non-
+                          # hovering screenshot of the Chip Plan tab after applying Patch 73, showing the
+                          # Wildcard card with the exact same visible text as every prior screenshot). Confirmed
+                          # the header text read "Patch 73 ..." (so the deploy DID happen, ruling out a
+                          # deployment-lag explanation) and, on rereading _signal_card()'s own docstring
+                          # (app.py) directly, found the actual issue: Patch 72/73's diagnostics were placed
+                          # ONLY into `wc_card_tooltip` / `fh_auto_tooltip` / `_compliant_tooltip`, and
+                          # _signal_card()'s own documented design (its docstring literally says "Rule/step
+                          # citations ... move into the card's `title` tooltip (hover-hidden)") means every one
+                          # of those three variables only ever reaches the page as an HTML `title` attribute --
+                          # visible on hover, invisible in a screenshot. The manager has consistently
+                          # communicated by sending screenshots of the app, never a hover state or a browser
+                          # "Inspect" element copy -- so Patch 73's fix, though genuinely correct (proven
+                          # against the manager's exact scenario with golden-slice tests), could never have
+                          # been visible to the manager no matter how many more times it was re-verified. This
+                          # was never a second logic bug in the diagnosis itself -- the text Patch 73 computed
+                          # was right; it simply had no visible place to appear.
+                          #
+                          # Fixed by changing WHERE the already-correct diagnostic text is displayed, not the
+                          # diagnosis logic itself (wc_diag_reason / opt.get_diagnostic() calls are untouched
+                          # from Patch 72/73):
+                          #   1. The Wildcard card's "insufficient data this run" now uses `_wc_sub`, which
+                          #      appends the real diagnostic directly into the card's `sub` argument -- the
+                          #      SAME always-visible one-line caption every other Chip Signals card already
+                          #      shows permanently (e.g. Bench Boost's "best candidate, statistical tie ..."),
+                          #      never hidden behind a hover. The tooltip is left in place too (extra detail on
+                          #      hover for anyone who does hover), but the visible text is what actually matters
+                          #      now.
+                          #   2. "GW{n} Rating" and "Team Rating % (GWx-y)" now each print an ordinary,
+                          #      always-visible st.caption() line directly under the stat-row when their solve
+                          #      fails -- the exact same widget already used one line above for the existing
+                          #      "still provisional" note, so this fits the page's established pattern rather
+                          #      than inventing a new one.
+                          # Verified: full `ast.parse` syntax check on app.py; every core module still imports
+                          # cleanly. New test_patch74_visible_diagnostics.py (4 checks) uses the same golden-
+                          # slice method as Patch 73 (exec()ing the REAL, unmodified app.py source against
+                          # fabricated failure scenarios) but this time asserts on the actual rendered HTML the
+                          # page would show plainly -- the Wildcard card's `<div class="sub">` text, and the
+                          # exact strings passed to st.caption() for the other two -- not the tooltip, which is
+                          # exactly the gap that let Patch 73 go unnoticed as "not working" despite being
+                          # correct. Confirmed: (a) all three cards now show the manager's exact real cause with
+                          # zero interaction required, in plain HTML/caption text a screenshot WILL capture,
+                          # and (b) a genuinely successful run shows no caption/diagnostic at all (nothing
+                          # spurious). Re-ran all 6 of Patch 70-73's test files alongside it -- all pass, no
+                          # regression. Booted the real app.py locally via `streamlit run` and confirmed via
+                          # HTTP 200 + Playwright/Chromium screenshot that it still comes up clean to the gate
+                          # screen with no traceback.
+                          # NOTE (2026-09-27): rb_model_app_patch74.zip is CUMULATIVE: Patch 29 through 74
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
+                          # Patch 75 (2026-09-27, manager request: "test it from your end before i deploy,
+                          # confirm it's covers all the issues" -- BEFORE delivering, built a real Streamlit +
+                          # Playwright end-to-end harness (test_patch74_live_e2e_harness.py /
+                          # test_patch74_streamlit_driver.py / test_patch74_playwright_drive.py): monkeypatches
+                          # fpl_data.py's network calls with a fabricated-but-realistically-shaped FPL dataset
+                          # (this sandbox has no route to the official API), forces every non-squad player to
+                          # status="i" to reproduce a genuine mass-unavailability failure, then actually boots
+                          # the real app.py, actually clicks through the gate screen with team ID 26073, and
+                          # takes real browser screenshots -- the same kind of evidence a manager screenshot is.
+                          # This surfaced a genuine, real gap Patch 74 missed: the Pitch tab's own "GW{n} Rating"
+                          # tile (`st.metric(f"GW{nav_gw} Rating", ...)`, fed by `_nav_optimal_squad()` ->
+                          # `data_pipeline.solve_free_hit_optimal_squad()`) is a THIRD, separate render of
+                          # effectively the same underlying solve as the Latest News tab's "GW{n} Rating" card --
+                          # and shares the exact same "free_hit_optimal" diagnostic key already wired up by
+                          # Patch 72 -- but Patch 74 only added a visible caption at the Latest News tab's call
+                          # site, never at this Pitch-tab tile. Confirmed via the live Playwright screenshot: with
+                          # Patch 74 alone, this tile still showed a bare "—" with zero visible explanation --
+                          # literally the exact card+annotation ("Pitch tab, GW6 Rating: —, Where is the rate%")
+                          # from the manager's original report. Not a new logic bug -- same diagnostic, same
+                          # already-correct text, a second render site that was missed.
+                          # Fix: added the same 2-line pattern already used at the Latest News tab's call site --
+                          # read opt.get_diagnostic("free_hit_optimal") and print it via a visible st.caption()
+                          # directly under this tile, only when nav_rating["rating_pct"] is None.
+                          # Verified BEFORE delivery, per the manager's explicit instruction, in three layers:
+                          #   1. New test_patch75_nav_rating_diagnostic_golden_slice.py (exec()s the real,
+                          #      unmodified app.py slice) -- both a forced-failure case (shows the real
+                          #      diagnostic) and a forced-success case (shows nothing) pass.
+                          #   2. Re-ran all 7 prior test files (Patch 70-74) -- all still pass, no regression.
+                          #   3. Full live E2E: relaunched the real app.py under Streamlit against the same
+                          #      synthetic mass-unavailability dataset, drove it with Playwright end-to-end
+                          #      (gate screen -> team ID 26073 -> Unlock -> every tab), and confirmed via actual
+                          #      rendered screenshots that all three of the manager's originally reported cards
+                          #      now show their real cause in plain, always-visible text: the Pitch tab's "GW6
+                          #      Rating" tile, the Latest News tab's "GW6 Rating" / "Team Rating % (GW6-9)"
+                          #      tiles, and the Chip Plan tab's Wildcard card. No traceback, no server error in
+                          #      the Streamlit log across the whole run.
+                          # Also checked (not yet fixed -- flagged, not guessed at): the Chip Plan tab's Bench
+                          # Boost / Triple Captain / Free Hit cards still show a plain "no data this run" with no
+                          # diagnostic. Read _advisor_card() and its three call sites directly (app.py) -- this
+                          # is a genuinely different code path (chip_protocol.evaluate_bench_boost/
+                          # evaluate_triple_captain/evaluate_free_hit, gated by `available_chip_names` /
+                          # `_clip_to_available_windows`) that Patch 71-75 never touched, and in this run it's
+                          # because those chips are outside their available window this early in the season --
+                          # not confirmed to be the same "silent solver failure" bug class. Not treated as
+                          # actionable without separately verifying against a real reported instance, per the
+                          # project's verification-first standing rule.
+                          # NOTE (2026-09-27): rb_model_app_patch75.zip is CUMULATIVE: Patch 29 through 75
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy. This
+                          # session had no push access to the manager's GitHub repo (mahmoudrabiehcm-cyber/
+                          # rb-model) -- delivered as a zip for the manager to apply, same as every prior patch.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

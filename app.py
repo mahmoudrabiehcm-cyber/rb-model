@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 73 (fixes Patch 72's dead diagnostic code on the Wildcard card)"
+PATCH_VERSION = "Patch 75 (Pitch-tab GW Rating tile now shows the same diagnostic Patch 74 added elsewhere)"
 
 st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
@@ -1759,6 +1759,35 @@ with tab_news:
                             f"haven't been finalized yet, so both can still shift (this matches the official app/site "
                             f"during this same window, it isn't a bug in this tool). Use **Refresh live data** in the "
                             f"sidebar to re-pull the latest provisional figures.")
+        # Patch 74 (manager, 2026-09-27: after Patch 73, still "same issue" —
+        # the manager works from screenshots, which can never show a hover
+        # tooltip. Patch 72/73's diagnostics were only ever placed in
+        # fh_auto_tooltip/_compliant_tooltip, which only ever reach the page
+        # as a `title` attribute on the "—" info-dot spans above — invisible
+        # in any screenshot no matter how correct the text was. This was
+        # never a second logic bug in the diagnostic itself; the diagnostic
+        # text was always right, it just never had a visible home. Fixed by
+        # printing it as an ordinary, always-visible st.caption() line right
+        # here — the exact same widget already used one line up for the
+        # "still provisional" note — instead of only inside a hover title.
+        _fh_visible_caption = None
+        if _rp is None:
+            _fh_diag = opt.get_diagnostic("free_hit_optimal")
+            _fh_visible_caption = (f"⚠ {fh_auto_label}: no result this run — "
+                                   + (_fh_diag if _fh_diag else "no specific reason was recorded — please report "
+                                                                 "this exact combination so it can be added."))
+        if _fh_visible_caption:
+            st.caption(_fh_visible_caption)
+
+        _ceiling_visible_caption = None
+        if _crp is None:
+            _ceiling_diag_visible = opt.get_diagnostic("theoretical_ceiling")
+            _ceiling_visible_caption = (
+                f"⚠ Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}): no result this run — "
+                + (_ceiling_diag_visible if _ceiling_diag_visible else
+                   "no specific reason was recorded — please report this exact combination so it can be added."))
+        if _ceiling_visible_caption:
+            st.caption(_ceiling_visible_caption)
 
     gw_status = "confirmed final" if getattr(snap, "current_gw_data_checked", False) else "provisional, not yet finalized"
 
@@ -2178,7 +2207,21 @@ with tab_chips:
         wc_card = _signal_card("Wildcard", "HOLD", "hold", f'{wc_trigger["avg_rating_pct"]}%',
                                 "inside noise band — no trigger", wc_card_tooltip)
     else:
-        wc_card = _signal_card("Wildcard", "N/A", "used", "—", "insufficient data this run", wc_card_tooltip)
+        # Patch 74 (manager, 2026-09-27: after Patch 73, still "same issue"
+        # — because the Patch 72/73 diagnostic was only ever added to
+        # `wc_card_tooltip`, the hover-only `title` attribute _signal_card()
+        # puts on the whole card (see its docstring: "Rule/step citations
+        # ... move into the card's `title` tooltip (hover-hidden)"). The
+        # manager works from screenshots, which cannot show a hover state at
+        # all — so the diagnostic was invisible no matter how correct it
+        # was. This was never a second logic bug: it's the exact same
+        # sentence any screenshot ever showed, because the VISIBLE part of
+        # this card (the `sub` argument below) was never changed. Fixed by
+        # putting the diagnostic directly in `sub` — the always-visible
+        # one-line caption every other Chip Signals card already uses for
+        # its own explanatory text — instead of only in the tooltip.
+        _wc_sub = f"insufficient data this run — {wc_diag_reason}" if wc_diag_reason else "insufficient data this run"
+        wc_card = _signal_card("Wildcard", "N/A", "used", "—", _wc_sub, wc_card_tooltip)
 
     signal_html = '<div class="signal-grid">' + wc_card + \
         _advisor_card("Bench Boost", bb_advisor, bb_used_state) + \
@@ -2836,6 +2879,25 @@ def _render_pitch_navigator():
                        f"discounted) over a fully unconstrained optimal squad for that GW alone. NOT the "
                        f"doc's §1a Team Rating % (that one needs a fixed 3-4 GW horizon) -- see the header's "
                        f"'Team Rating % (GW{compliant_gw_start}-{compliant_gw_end})' badge for that metric.")
+    # Patch 75 (2026-09-27, found during the manager's own "test it from your
+    # end before i deploy" request -- verified via a real Playwright render of
+    # this exact tile, not inferred): this tile's "GW{n} Rating" is a THIRD,
+    # separate render site sharing the exact same underlying solve as the
+    # Latest News tab's "GW{n} Rating" card that Patch 74 already fixed --
+    # nav_optimal_result above is data_pipeline.solve_free_hit_optimal_squad()
+    # (see _nav_optimal_squad, same function fh_auto_result calls), which
+    # already calls opt.set_diagnostic("free_hit_optimal", ...) on failure.
+    # Patch 74 only added a visible caption at the Latest News tab's call
+    # site (~line 1773 _fh_visible_caption) -- it never touched this Pitch-tab
+    # navigator tile, so a manager screenshotting THIS tile (as originally
+    # reported: "Pitch tab, GW6 Rating: —, 'Where is the rate%'") still saw a
+    # bare "—" with no visible reason, even after Patch 74 shipped. Same fix,
+    # same diagnostic key, second location -- not a new logic bug.
+    if nav_rating["rating_pct"] is None:
+        _nav_rating_diag = opt.get_diagnostic("free_hit_optimal")
+        st.caption(f"⚠ GW{nav_gw} Rating: no result this run — "
+                   + (_nav_rating_diag if _nav_rating_diag else
+                      "no specific reason was recorded — please report this exact combination so it can be added."))
     if not at_planning_gw:
         st.caption("Projected for this GW only",
                    help="Overall rank and Season points elsewhere on this page are your live actuals and "
