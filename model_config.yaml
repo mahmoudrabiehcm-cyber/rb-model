@@ -2338,6 +2338,102 @@ meta:
                           # NOTE (2026-09-27): rb_model_app_patch79.zip is CUMULATIVE: Patch 29 through 79
                           # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
                           # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 80 (2026-09-27, manager: 8 annotated screenshots from the REAL deployed/tested
+                          # app -- "pitch is too big and doesn't look good at all!!" (x2), "remove this" (the
+                          # standing SP-tag caption), "what is this" (the paired rating-gauge stats), "no
+                          # borders" (sidebar style-profile description), "looking very bad, adjust and modify
+                          # with a good standards" (Season Rank chart), plus "why it's not the same as [the
+                          # visual-first mockup], this one is the best so far"). Five fixes plus one deeper root-
+                          # cause finding made only while investigating the gauges:
+                          #   1. THE REAL BUG BEHIND "what is this": the injected <style> block's Release-3
+                          #      comment describing which CSS custom-property "families" change contained the
+                          #      literal two-character sequence "*/" hidden inside ordinary prose twice --
+                          #      "--ink*/--rule" and "--fdr-*/--violet" (a variable-name list written with
+                          #      slashes, where a trailing "*" from one name landed directly against the "/"
+                          #      starting the next). CSS comments end at the FIRST "*/", full stop -- so both
+                          #      of the actual, giant `:root{...}` blocks' surrounding comments closed mid-
+                          #      sentence, and everything from there up to the real intended closing "*/" (the
+                          #      whole rest of the comment, PLUS the literal text ":root") got parsed as one
+                          #      long invalid CSS selector in front of the `{...}` block that followed --
+                          #      which made the ENTIRE :root rule invalid and silently DROPPED by every
+                          #      browser. Confirmed by extracting the exact live <style> text and parsing it in
+                          #      a real Chromium instance (not inferred from reading the CSS): document.
+                          #      styleSheets[...].cssRules contained zero rules with selectorText===':root',
+                          #      and getComputedStyle(document.documentElement).getPropertyValue('--coral') came
+                          #      back empty. This has been silently broken since Patch 79 shipped (and was
+                          #      already present, unnoticed, in that patch's own "verified live" screenshot --
+                          #      the gauge rings were rendering as plain text with no colored arc there too;
+                          #      this was missed at the time because the crest/sidebar/button colors, which DO
+                          #      read from :root correctly relative to each OTHER once the browser's fallback/
+                          #      inherited defaults kick in for the handful of properties actually still
+                          #      declared elsewhere, looked fine at a glance). Fixed by rewording both comments
+                          #      to use commas instead of slashes between variable names, eliminating the
+                          #      accidental "*/" sequences; added a regression test
+                          #      (test_no_stray_comment_closers_anywhere_in_injected_css) that walks every
+                          #      /* */ span in the injected stylesheet the same way a CSS tokenizer does, so
+                          #      this exact class of bug can never silently ship again, plus a live-Chromium
+                          #      test that :root actually parses and --coral actually resolves on the document
+                          #      root going forward.
+                          #   2. Pitch sizing ("too big"): .pitch now has max-width:760px + centered margin and
+                          #      tighter padding, instead of stretching to fill Streamlit's full wide-layout
+                          #      content column.
+                          #   3. SP-tag caption ("remove this"): the standing <p class="side-note"> sentence
+                          #      below the pitch is gone; the same explanation now lives only as a hover title=
+                          #      tooltip on the SP badge itself -- nothing deleted, just not force-shown.
+                          #   4. Sidebar "no borders" (ambiguous annotation, flagged as an interpretation, not
+                          #      a certainty): the style-profile description now renders inside a new bordered/
+                          #      tinted .side-info-box instead of a bare st.caption with no visual container.
+                          #      If this isn't what the annotation meant, it needs correcting.
+                          #   5. Rating-gauge clarity: beyond the CSS bug above (the main cause), the gauge
+                          #      rings were enlarged (44px->54px) with a thicker band, and the second stat's
+                          #      visible label shortened from a near-duplicate-looking "Team Rating %
+                          #      (GW6-9)" to a visually distinct "{n}-GW Rating" (computed from real data, not
+                          #      hardcoded) -- the full descriptive text is unchanged in the tooltip/expander.
+                          #   6. Season Rank chart ("looking very bad"): root cause confirmed in code --
+                          #      build_season_rank_chart()'s domain_max was hardcoded to
+                          #      max(10_000_000, worst*1.05), meaning even this manager's actual ~2.6M-3.2M GW1-
+                          #      5 rank history got a y-axis stretched all the way to a flat 10,000,000 ceiling,
+                          #      squeezing the real trend line into a thin sliver with dead space beyond it.
+                          #      domain_max is now the smallest named tier strictly above the worst rank
+                          #      actually seen (added a 5,000,000 tier for finer granularity between 1M and
+                          #      10M), so the reference lines bracket the real data instead of a one-size-fits-
+                          #      all ceiling. IMPORTANT CAVEAT, disclosed rather than silently "fixed": most of
+                          #      the remaining "crushed near the bottom" visual impression is NOT a bug -- it's
+                          #      inherent to Patch 78's own explicit design (the manager's own ask: "All FPL
+                          #      Players >> 1 million ... 500000 ... 100000 ... 50000 ... 10000 ... 1000"),
+                          #      which always anchors the chart's TOP at rank 1 and shows the full named ladder
+                          #      down to 1,000 regardless of where the manager actually sits. For a mid-table
+                          #      manager (millions, not thousands), roughly half the chart height is
+                          #      necessarily dedicated to top-1,000-ish tiers nobody outside the top 0.01% will
+                          #      ever occupy -- shrinking that further (e.g. starting the domain near the
+                          #      manager's own current band instead of rank 1) would mean DROPPING some of the
+                          #      manager's own previously-requested reference tiers, which is a design reversal,
+                          #      not a bug fix, and hasn't been done here without asking first.
+                          #   Not yet addressed / needs the manager's own call: whether to build the icon-only-
+                          #   nav / progress-ring / sparkline "visual-first" redesign shown in the
+                          #   theme_poc_v2b.png mockup the manager called "the best so far" -- that mockup was a
+                          #   design-approval concept for the Turf Green COLOR retint specifically (which Patch
+                          #   79 implemented in full), not a scoped, tested UI-restructuring deliverable in its
+                          #   own right; building icon-only tabs and real sparklines backed by genuine
+                          #   historical data (not fabricated placeholder curves, per this project's standing
+                          #   rule) is a separate, larger piece of work.
+                          # Verified: test_patch80_fixes.py (9 tests: no stray CSS-comment closers anywhere in
+                          # the injected stylesheet; :root genuinely parses in a real Chromium engine and
+                          # --coral resolves; SP caption is gone from standing text and lives only in a
+                          # tooltip; .pitch has a max-width; the sidebar description has a bordered container;
+                          # the two rating-gauge labels are visually distinct; domain_max brackets the
+                          # manager's real ~3.2M rank instead of a flat 10M; a rank worse than every named tier
+                          # still gets a sane domain; named bands are unchanged for a top-tier manager) -- all 9
+                          # PASSED against the real current app.py source, not a reimplementation. Then
+                          # confirmed live: launched the actual app under Streamlit, drove it with Playwright,
+                          # and inspected the REAL rendered DOM (not just re-reading the CSS) -- getComputedStyle
+                          # on both .gauge-ring elements now returns a real conic-gradient with resolved colors
+                          # (previously "none"), and the screenshotted gauges show genuine partial-arc rings
+                          # (51%/52% coral arcs), not plain text. Full regression suite (Patch 70-80, 15 files
+                          # including this one) re-run after -- zero regressions.
+                          # NOTE (2026-09-27): rb_model_app_patch80.zip is CUMULATIVE: Patch 29 through 80
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073

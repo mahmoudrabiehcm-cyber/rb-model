@@ -37,7 +37,10 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 79 (Turf Green retint: :root palette, crest, avatar gradients, Season Rank chart colors, and .streamlit/config.toml native-widget theme all resynced to one accent)"
+PATCH_VERSION = ("Patch 80 (fixed a genuine CSS-comment bug that silently dropped the whole :root palette block "
+                  "in every browser -- root cause of the dead/textual rating gauges; also: pitch max-width, "
+                  "SP-tag caption moved to tooltip, sidebar style-description bordered box, rating-gauge label "
+                  "clarity, and Season Rank chart domain_max no longer force-pinned to 10,000,000)")
 
 # Patch 78 (manager feedback: "why under the logo we are seeing this" —
 # screenshot showed the full PATCH_VERSION technical changelog sentence
@@ -111,11 +114,12 @@ st.markdown("""
    fallback gradient, pitch markings color) this still required.
    --------------------------------------------------------------------- */
 /* Release 3 "Turf Green" (2026-09-27, manager: sent 3 full proof-of-concept
-   themes — Kit Navy / Turf Green / Under Lights, plus a "less text, more
-   visual" pass — and picked Turf Green: "let's go"). Only the brand-accent
-   family (--bg/--surface/--surface-2/--ink*/--rule/--accent*) actually
-   changes here; --gold/--blue/--coral/--warn/--fdr-*/--violet stay
-   identical to Release 2 (kept the same in every POC theme sent — they're
+   themes -- Kit Navy / Turf Green / Under Lights, plus a "less text, more
+   visual" pass -- and picked Turf Green: "let's go"). Only the brand-accent
+   family (--bg, --surface, --surface-2, --ink family, --rule, --accent
+   family) actually changes here; --gold, --blue, --coral, --warn, the
+   --fdr- family, and --violet stay
+   identical to Release 2 (kept the same in every POC theme sent -- they're
    functional/semantic colors, not brand identity, and re-deriving them per
    theme risks breaking the position-tag/FDR-dot color language the manager
    never asked to change). Because almost every component reads these as
@@ -177,7 +181,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .verdict-card .h{ font-family:"Space Grotesk"; font-weight:700; font-size:1.35rem; margin:0 0 6px; color:var(--accent-strong); }
 .verdict-card .b{ margin:0; color:var(--ink-muted); font-size:.94rem; font-style:italic; }
 
-.stat-row{ display:flex; gap:28px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:nowrap; align-items:flex-start; overflow-x:auto; }
+/* Patch 80 (manager, live screenshot, annotated "what is this" over the two
+   rating gauges): nowrap+overflow-x:auto meant a narrower viewport could
+   cram or scroll-clip these before a reader ever saw their labels --
+   switched to wrap so they always keep their full label visible, plus a
+   slightly larger gap so the two "rating" gauges (see .gauge-ring below)
+   read as two distinct things at a glance, not one ambiguous cluster. */
+.stat-row{ display:flex; gap:26px; font-family:"IBM Plex Mono"; margin:14px 0 26px; flex-wrap:wrap; row-gap:16px; align-items:flex-start; }
 .stat .n{ font-size:1.5rem; font-weight:600; color:var(--ink); }
 .stat .l{ font-size:10.5px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.06em; }
 .stat.rating .n{ display:flex; align-items:center; gap:6px; }
@@ -207,9 +217,19 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
    boxes) drawn entirely in CSS via layered gradients/borders on ::before,
    plus a subtle grass-stripe backdrop, replacing the old flat single-tint
    rectangle. No image asset, still zero-cost. */
-.pitch{ position:relative; z-index:0; overflow:hidden;
+/* Patch 80 (manager, live screenshot, twice: "pitch is too big and doesn't
+   look good at all!!") -- confirmed in code: .pitch had no max-width, so on
+   Streamlit's wide layout it stretched to the full main-column width (well
+   over 1000px) while a typical 11-15 card squad only fills a fraction of
+   that horizontally, and .prow's 18px margin-bottom compounded across 4
+   formation rows + a bench strip read as a lot of near-empty green. Capped
+   width + tighter row spacing below, centered in the column instead of
+   stretched across it -- the CSS pitch-marking overlay (.pitch::before)
+   uses percentages/insets relative to .pitch's own box, so it stays
+   correctly proportioned at the smaller width without any change there. */
+.pitch{ position:relative; z-index:0; overflow:hidden; max-width:760px; margin:0 auto;
   background:repeating-linear-gradient(180deg, #E4F0DE 0px, #E4F0DE 44px, #D8E8D1 44px, #D8E8D1 88px);
-  border:1px solid var(--rule); border-radius:10px; padding:26px 14px 10px; }
+  border:1px solid var(--rule); border-radius:10px; padding:20px 14px 6px; }
 .pitch::before{ content:""; position:absolute; inset:14px; pointer-events:none; z-index:-1;
   border:1.5px solid rgba(255,255,255,.85); border-radius:4px;
   background:
@@ -222,7 +242,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
     linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 left 27% / 1.5px 15% no-repeat,
     linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 right 27% / 1.5px 15% no-repeat;
 }
-.prow{ display:flex; justify-content:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
+.prow{ display:flex; justify-content:center; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
 
 /* Patch 4 — card redesign: tighter top-cropped photo in a team-color ring,
    name-first info hierarchy (name -> compact pos+opponent meta line -> xPts
@@ -267,6 +287,13 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
   border-top:1px dashed var(--rule); border-radius:0 0 10px 10px; }
 .bench-strip .card{ opacity:.68; width:clamp(56px, 13vw, 96px); }
 .side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
+/* Patch 80 -- small bordered/tinted box for sidebar caption text (see the
+   Style-profile description call site) so it reads as a distinct piece of
+   info like every other card/pill/chip in the app, not orphaned floating
+   text. */
+.side-info-box{ font-size:11.5px; color:var(--ink-muted); line-height:1.5; background:var(--surface-2);
+  border:1px solid var(--rule); border-left:3px solid var(--accent); border-radius:6px;
+  padding:8px 10px; margin:6px 0 16px; }
 
 /* Patch 31 — Chip Signals grid: replaces the old paragraph-per-rule Chip
    Advisor/Chip Strategy text with compact scannable cards. Rule/step
@@ -349,10 +376,16 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
    library needed. Percentage is still the same number the tooltip/expander
    already computed; this only changes how it's presented. */
 .gauge-wrap{ display:flex; align-items:center; gap:10px; }
-.gauge-ring{ width:44px; height:44px; border-radius:50%; flex:none;
+/* Patch 80 -- enlarged 44px->54px and a thicker band (inset 5px->7px): at
+   the old size, two same-color rings sitting close together (both a shade
+   of green for a healthy percentage) read as near-identical and prompted
+   the manager's "what is this" -- bigger + a visibly thicker colored arc
+   makes each one legible as an actual gauge, not just a number in a
+   circle. */
+.gauge-ring{ width:54px; height:54px; border-radius:50%; flex:none;
   display:flex; align-items:center; justify-content:center; position:relative; }
-.gauge-ring::before{ content:""; position:absolute; inset:5px; border-radius:50%; background:var(--bg); }
-.gauge-ring .gauge-val{ position:relative; z-index:1; font-family:"IBM Plex Mono"; font-size:10.5px; font-weight:700; }
+.gauge-ring::before{ content:""; position:absolute; inset:7px; border-radius:50%; background:var(--bg); }
+.gauge-ring .gauge-val{ position:relative; z-index:1; font-family:"IBM Plex Mono"; font-size:12px; font-weight:700; }
 
 /* Patch 33 — Chip Signal cards become <details>/<summary> so the "why this
    GW" per-GW breakdown (manager report: "why GW9 ... this isn't clear")
@@ -578,9 +611,27 @@ def build_season_rank_chart(rank_df: pd.DataFrame) -> alt.Chart:
     (int, >=1 — a log scale cannot include 0, and FPL overall rank is never
     0 anyway). Returns a layered alt.Chart (area wash + line + points) with
     a reversed log y-axis pinned to the manager's own named tiers."""
-    band_ticks = [1, 1000, 10000, 50000, 100000, 500000, 1000000, 10000000]
+    # Patch 80 (manager screenshot: "looking very bad, adjust and modify with
+    # a good standards" on this exact chart) -- root cause confirmed in code:
+    # domain_max used to be hardcoded to max(10_000_000, worst*1.05), i.e.
+    # ALWAYS pinned out to the 10M tier no matter how good the manager's rank
+    # actually is. For a manager sitting around 2.6M-3.2M (this account's
+    # real GW1-5 history), that meant ~90% of the chart's vertical space (the
+    # 1 -> 1,000,000 span) was dead space nobody's line ever visits, while
+    # the real trend line was squeezed into a thin sliver at the very bottom
+    # between the 1,000,000 and 10,000,000 gridlines -- which reads as "a
+    # nearly-empty chart with a flat line stuck to the floor," exactly what
+    # the screenshot showed. Fix: domain_max is now the SMALLEST named tier
+    # that's still above the worst rank actually seen (falling back to
+    # worst*1.05 only if the manager's rank is worse than every named tier),
+    # so the reference lines always bracket the real data tightly instead of
+    # a one-size-fits-all 10M ceiling. Added a 5,000,000 tier so a manager in
+    # the 1M-5M range (not yet top-1M, but nowhere near the full 10M+ player
+    # pool either) gets a sensibly-scaled chart too, not a 10x jump straight
+    # to 10M.
+    band_ticks = [1, 1000, 10000, 50000, 100000, 500000, 1000000, 5000000, 10000000]
     worst = max(int(v) for v in rank_df["Overall rank"] if v is not None) if not rank_df.empty else 1
-    domain_max = max(10_000_000, int(worst * 1.05))
+    domain_max = next((t for t in band_ticks if t > worst), int(worst * 1.05))
     tick_values = [t for t in band_ticks if t <= domain_max]
     if tick_values[-1] != domain_max:
         tick_values.append(domain_max)
@@ -692,7 +743,14 @@ def _player_card(row: pd.Series, is_captain: bool = False, is_live_captain: bool
     cap_html = '<div class="cap">C</div>' if is_captain else ""
     cap_actual_html = ('<div class="cap-actual" title="Your live captain — the model recommends someone else this run">C</div>'
                         if is_live_captain else "")
-    sp_html = '<div class="sp">SP</div>' if row.get("setpiece_flag") else ""
+    # Patch 80 (manager: "remove this", pointing at the permanent "SP tag = ..."
+    # caption line that used to run under every pitch render regardless of
+    # whether any player on it even had the SP tag) -- the explanation moves
+    # onto the badge itself as a hover tooltip instead of a standing caption,
+    # per the same "less text, more visual" direction as the earlier theme
+    # proof-of-concept the manager approved.
+    sp_html = ('<div class="sp" title="Newly confirmed set-piece role, decaying out as current-season minutes '
+               'accrue.">SP</div>') if row.get("setpiece_flag") else ""
     pos = str(row.get("position", "")).lower()
     pos_label = row.get("position", "")
     price = row.get("price")
@@ -831,7 +889,16 @@ with st.sidebar:
         st.rerun()
 
     style_name = st.selectbox("Style", list(style_profiles.PROFILES.keys()), index=0)
-    st.caption(style_profiles.get_profile(style_name)["description"])
+    # Patch 80 (manager, live screenshot, annotated "no borders" pointing at
+    # this exact caption): a plain st.caption() renders as bare floating
+    # grey text with no visual container, unlike almost every other piece of
+    # information in this sidebar/app (chips, stats, cards all sit in a
+    # bordered/tinted box) -- interpreted as "this reads as an orphaned
+    # scrap of text, give it the same card treatment as everything else."
+    # If this reading is wrong, easy to revert -- flagged in the delivery
+    # message alongside this patch.
+    st.markdown(f'<div class="side-info-box">{style_profiles.get_profile(style_name)["description"]}</div>',
+                unsafe_allow_html=True)
 
     hit_stance = st.radio("Hit stance", ["No hits", "Hit if worth it", "Force"], index=1)
     forced_count = None
@@ -1866,7 +1933,7 @@ with tab_news:
           </div>
           <div class="stat rating">
             <div class="n">{_compliant_gauge_html}</div>
-            <div class="l">Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}) <span class="info-dot" title="{_compliant_tooltip}">ⓘ</span></div>
+            <div class="l">{compliant_gw_end - compliant_gw_start + 1}-GW Rating <span class="info-dot" title="{_compliant_tooltip}">ⓘ</span></div>
           </div>
           <div class="stat new"><div class="n">{gw_xpts_total:.1f}</div><div class="l">GW{planning_gw} xPts</div></div>
           <div class="stat"><div class="n">{points_total if points_total is not None else '—'}{prov_badge}</div><div class="l">Season points</div></div>
@@ -3081,8 +3148,6 @@ def _render_pitch_navigator():
         st.markdown('<p class="side-note">Fixture ticker: one dot per GW in your horizon — '
                     'easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the '
                     'table below.</p>', unsafe_allow_html=True)
-    st.markdown('<p class="side-note">SP tag = newly confirmed set-piece role, decaying out as current-season '
-                'minutes accrue.</p>', unsafe_allow_html=True)
 with tab_pitch:
     # Patch 68 — moved here (was inside tab_transfers, Patch 66) so the Pitch
     # Navigator is the app's default-open view (see the Patch 68 note above
