@@ -2248,7 +2248,94 @@ meta:
                           # Re-ran the full regression suite (Patch 70-78, 11 files) after this change -- zero
                           # regressions, including test_patch77_real_pulp4_verification.py re-run fresh under
                           # the real 4.0.0 venv.
+                          #
+                          # ADDENDUM 2 (same day) -- item 5 from the original 6-item message, previously
+                          # DEFERRED as "confirmed gap, not yet built," is now BUILT: the Season Rank chart.
+                          # Manager: "the season rank graph needs to be changed to be (All FPL Players >> 1
+                          # million up till it reaches 500000 then 100000 then 50000 then 10000 then 1000 ..
+                          # also the GW needs to be more visible and the whole chart to be better visuals."
+                          # Loaded the project's dataviz skill before writing any chart code (per its own
+                          # trigger rule: "whenever about to create ANY chart"). The skill's own form guidance
+                          # is direct here: order-of-magnitude data belongs on a log scale, never linear -- a
+                          # LOG scale is what actually delivers what was asked, and does it honestly, instead
+                          # of a hand-rolled fake "banded" axis (which the first Patch 78 addendum above had
+                          # flagged as a real risk: an invented band scale can misstate how close two ranks
+                          # actually are). Implemented as a new, independently-testable module-level function,
+                          # app.build_season_rank_chart(rank_df) (previously inline in render_dashboard()):
+                          # log y-scale, reversed (kept Patch 69's "0/best at top" convention), with
+                          # `tickValues` pinned to EXACTLY the manager's own named bands (1,000 / 10,000 /
+                          # 50,000 / 100,000 / 500,000 / 1,000,000, plus a 10,000,000 "rest of the pool"
+                          # ceiling) so those are the only gridlines shown -- not an auto-generated d3 tick
+                          # set. GW-axis fix ("the GW needs to be more visible"): labelAngle=0 (the manager's
+                          # screenshot showed small, angled labels) with a larger, bold font. Visual-polish fix
+                          # ("the whole chart to be better visuals"): a subtle area wash under the line, a 2px
+                          # line, and >=8px point markers with a surface-color ring, all per the dataviz
+                          # skill's own mark specs -- built from the app's EXISTING CSS custom-property color
+                          # tokens (--ink/--ink-muted/--rule/--accent-strong/--accent-tint), not new colors, so
+                          # it stays visually consistent with the rest of the app rather than introducing an
+                          # off-palette chart. Verified BEFORE integrating into the live render path:
+                          # standalone-rendered the exact same function to a real PNG via vl-convert
+                          # (test_patch78_season_rank_chart.py, 5 tests: builds+renders for an early-season
+                          # single-tier history AND a multi-tier 2M->400K->60K->8K history; y-axis tickValues
+                          # literally contain every one of the manager's named bands; scale is genuinely
+                          # type="log" and reverse=True; GW-axis labelAngle==0 and labelFontSize>=13) -- all 5
+                          # PASSED, extracted and exec'd from the real current app.py source, not a
+                          # reimplementation. Then confirmed live: launched the actual app under Streamlit,
+                          # navigated to the Manager Style Fit tab with Playwright, and screenshotted the real
+                          # rendered chart -- bold unrotated "1 2 3 4 5" GW labels and the 10,000/100,000/
+                          # 1,000,000 reference gridlines all visible exactly as designed. Full regression
+                          # suite (Patch 70-78, 12 files including this one) re-run after -- zero regressions.
                           # NOTE (2026-09-27): rb_model_app_patch78.zip is CUMULATIVE: Patch 29 through 78
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 79 (2026-09-27, manager: "i need more as a proof of concept before deciding
+                          # and the changes shouldn't only theme and colours but also the buttons and pitch and
+                          # everything to be aligned!" -- sent 3 full-page HTML/Playwright proof-of-concept
+                          # renders (sidebar, tabs, buttons, chip pills, pitch cards, all in one palette) for
+                          # 3 candidate themes: Kit Navy, Turf Green, Under Lights. Manager picked Turf Green:
+                          # "let's go"). While building the POCs, found a genuine, already-live misalignment
+                          # bug (not hypothetical): .streamlit/config.toml's `primaryColor = "#1F6D45"` was a
+                          # leftover from an EARLIER theme era and never matched app.py's actual CSS accent
+                          # (teal, #2FBFC7/#0E7A82) -- meaning every native Streamlit widget (the "Run Model"
+                          # button, sliders, radio buttons, the active-tab underline) had been rendering in a
+                          # different color than every CSS-drawn card/pill/pitch-card the whole time. This is
+                          # exactly the "buttons ... to be aligned" gap the manager was pointing at.
+                          # Implemented as a genuine retint, not just a :root swap-and-hope: read every place
+                          # in app.py that defines a color, and split them into two groups --
+                          #   1. CSS custom properties (:root's --bg/--surface/--surface-2/--ink*/--rule/
+                          #      --accent*) -- the overwhelming majority of components read these, so
+                          #      retinting this one block re-skins almost everything automatically (same
+                          #      leverage point Release 2.1's own changelog already relied on).
+                          #   2. The handful of genuinely HARDCODED hex values that bypass :root entirely,
+                          #      because they live somewhere a CSS custom property can't reach: the crest SVG
+                          #      (`fill="#18181B"`/`"#2FD1D9"`, raw SVG attributes -- retinted to a dark
+                          #      green-black badge + bright grass-green "R"), the crest's coral dot (was a
+                          #      DIFFERENT hardcoded coral, #FF5A5F, than the app's real --coral #E14E54 the
+                          #      whole time -- now uses the exact same hex), the photo-ring avatar-fallback
+                          #      gradient's dark end (`#0B2C2E`, used twice -- a CSS gradient stop can't read a
+                          #      var() conditionally per team color here -- retinted to #0F2417 to match the
+                          #      new --ink family), and build_season_rank_chart()'s (Patch 78) own Python-side
+                          #      color constants (Altair can't see page CSS, so these are separately-maintained
+                          #      literal hex, now updated to match). --gold/--blue/--coral/--warn/--fdr-*/
+                          #      --violet are UNCHANGED -- these are functional/semantic colors (captaincy,
+                          #      alerts, position tags, fixture difficulty), not brand identity, and every POC
+                          #      theme sent kept them identical, matching what the manager actually approved.
+                          # .streamlit/config.toml's primaryColor/backgroundColor/secondaryBackgroundColor/
+                          # textColor are now set to the EXACT SAME hex as app.py's --accent-strong/--bg/
+                          # --surface-2/--ink, closing the native-widget-vs-CSS gap directly rather than just
+                          # moving it to a new mismatched pair of colors.
+                          # Verified: test_patch79_turf_green_retint.py (5 tests, all against the real current
+                          # app.py/config.toml source, not a reimplementation) -- :root is genuinely Turf Green
+                          # with functional colors untouched; no leftover old-theme hex in any live color
+                          # assignment (comments mentioning the old theme for historical context are fine and
+                          # expected); config.toml is byte-identical to app.py's CSS on all 4 theme keys; the
+                          # Season Rank chart's color constants match; the crest SVG is genuinely retinted. All
+                          # 5 PASSED. Then confirmed live: launched the actual app under Streamlit and
+                          # screenshotted it with Playwright -- crest, sidebar radio/slider, the native "Run
+                          # Model" button, the active-tab underline, and the pitch/player cards all render in
+                          # the same Turf Green, not a mix of two colors. Full regression suite (Patch 70-79,
+                          # 13 files) re-run after -- zero regressions.
+                          # NOTE (2026-09-27): rb_model_app_patch79.zip is CUMULATIVE: Patch 29 through 79
                           # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
                           # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"

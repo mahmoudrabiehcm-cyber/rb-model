@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = "Patch 78 (GapLimit-status fix verified against a genuine PuLP 4.0.0 install; header/Wildcard-pill text shortened)"
+PATCH_VERSION = "Patch 79 (Turf Green retint: :root palette, crest, avatar gradients, Season Rank chart colors, and .streamlit/config.toml native-widget theme all resynced to one accent)"
 
 # Patch 78 (manager feedback: "why under the logo we are seeing this" —
 # screenshot showed the full PATCH_VERSION technical changelog sentence
@@ -56,14 +56,25 @@ st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 
 # Crest mark — "Monogram + Dot" (Release 2, replacing the Patch 2 chess-
 # pawn-style crest as part of the manager-directed theme/logo overhaul): a
-# rounded dark badge, a bold cyan "R" (the primary everyday signal color),
-# and a small coral dot standing in for the differential/captaincy signal —
-# the two-color language the rest of the redesigned app now uses throughout.
+# rounded dark badge, a bold "R" in the primary everyday signal color, and a
+# small coral dot standing in for the differential/captaincy signal — the
+# two-color language the rest of the redesigned app now uses throughout.
+# Raw SVG fill/stroke attributes can't read a CSS custom property, so this
+# is one of the handful of genuinely hardcoded spots a :root-only retint
+# always misses (Release 2.1's own changelog flagged the same class of gap)
+# -- retinted by hand for Release 3 "Turf Green": badge bg/stroke now a
+# dark green-black (matching --ink's hue family instead of the old
+# near-neutral black), "R" now a bright grass green readable on that dark
+# bg (the old cyan #2FD1D9 would clash with the new green accent), and the
+# dot now uses the exact --coral hex (#E14E54) instead of a slightly
+# different hardcoded coral (#FF5A5F) that was never actually the same
+# color as the rest of the app's coral -- a genuine, if minor, "everything
+# aligned" fix the manager asked for.
 _CREST_SVG = ('<svg viewBox="0 0 100 100" width="28" height="28" style="flex:none;">'
-              '<rect x="4" y="4" width="92" height="92" rx="24" fill="#18181B" stroke="#2A2A2E" stroke-width="3"/>'
+              '<rect x="4" y="4" width="92" height="92" rx="24" fill="#152016" stroke="#233524" stroke-width="3"/>'
               '<text x="42" y="70" font-family="\'Space Grotesk\',sans-serif" font-weight="700" '
-              'font-size="58" fill="#2FD1D9" text-anchor="middle">R</text>'
-              '<circle cx="76" cy="76" r="10" fill="#FF5A5F"/></svg>')
+              'font-size="58" fill="#3FCB7C" text-anchor="middle">R</text>'
+              '<circle cx="76" cy="76" r="10" fill="#E14E54"/></svg>')
 
 # ---------------------------------------------------------------------------
 # Style — a considered, precise identity (terse micro-copy, restraint, one
@@ -99,16 +110,31 @@ st.markdown("""
    component-level touch-ups (hardcoded dark-tint text colors, avatar-
    fallback gradient, pitch markings color) this still required.
    --------------------------------------------------------------------- */
+/* Release 3 "Turf Green" (2026-09-27, manager: sent 3 full proof-of-concept
+   themes — Kit Navy / Turf Green / Under Lights, plus a "less text, more
+   visual" pass — and picked Turf Green: "let's go"). Only the brand-accent
+   family (--bg/--surface/--surface-2/--ink*/--rule/--accent*) actually
+   changes here; --gold/--blue/--coral/--warn/--fdr-*/--violet stay
+   identical to Release 2 (kept the same in every POC theme sent — they're
+   functional/semantic colors, not brand identity, and re-deriving them per
+   theme risks breaking the position-tag/FDR-dot color language the manager
+   never asked to change). Because almost every component reads these as
+   CSS custom properties rather than hardcoded hex, this block is most of
+   the retint — the handful of genuinely hardcoded spots (crest SVG,
+   avatar-fallback gradient end, the Season Rank chart's Python-side color
+   constants) are called out and fixed at their own call sites below, the
+   same short list Release 2.1's own changelog entry already flagged as the
+   thing a :root-only retint always misses. */
 :root{
-  --bg:#F6F8F5; --surface:#FFFFFF; --surface-2:#EEF2EC;
-  --ink:#1C2620; --ink-muted:#54615A; --ink-faint:#8A978F;
-  --rule:#DEE5DA; --accent:#2FBFC7; --accent-strong:#0E7A82; --accent-tint:#E4F6F6;
+  --bg:#F6F9F1; --surface:#FFFFFF; --surface-2:#EDF3E6;
+  --ink:#17241A; --ink-muted:#4B5C43; --ink-faint:#86937D;
+  --rule:#DEE8D2; --accent:#2E9E5B; --accent-strong:#157A3E; --accent-tint:#E1F5E7;
   --gold:#C98A26; --gold-tint:#FBEFDC;
   --blue:#2E6E93; --blue-tint:#E1EDF3;
   --coral:#E14E54; --coral-tint:#FBE6E6;
   --warn:#E14E54; --bench:#F1F3ED;
   --fdr-easy:#2E8B57; --fdr-mid:#C98A26; --fdr-hard:#E14E54;
-  --shadow:0 1px 2px rgba(20,30,22,.06), 0 8px 22px -12px rgba(20,30,22,.16);
+  --shadow:0 1px 2px rgba(23,36,26,.06), 0 8px 22px -12px rgba(23,36,26,.16);
   /* Release 2 — position-tag-only neutral accent (FWD label), kept
      separate from --coral now that coral is reserved for captaincy +
      alerts and shouldn't double as a fourth position color. */
@@ -217,7 +243,12 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .photo-ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
   display:block; border:2px solid var(--surface); }
 .photo-ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%;
-  background:linear-gradient(160deg, var(--team,var(--accent)), #0B2C2E); color:#fff; font-family:"Space Grotesk";
+  /* #0F2417 (was #0B2C2E, a teal-black) -- Release 3 "Turf Green": the
+     gradient's dark end is hardcoded (a CSS gradient stop can't read
+     var(--ink) here without a second custom property per team color), so
+     retinted by hand to a dark green-black matching the new --ink hue
+     family instead of the old theme's teal-black. */
+  background:linear-gradient(160deg, var(--team,var(--accent)), #0F2417); color:#fff; font-family:"Space Grotesk";
   font-weight:700; font-size:13px; align-items:center; justify-content:center; border:2px solid var(--surface); }
 .card .name{ font-weight:700; font-size:12.5px; margin-bottom:2px; }
 .card .meta{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-muted); margin-bottom:6px; }
@@ -438,7 +469,7 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   align-items:center; justify-content:center; color:#fff; font-family:"Space Grotesk"; font-weight:700;
   font-size:12px; border:2px solid var(--surface); }
 .tx-player.out .ring .avatar-fallback{ background:linear-gradient(160deg, var(--ink-faint), #3A3A40); }
-.tx-player.in .ring .avatar-fallback{ background:linear-gradient(160deg, var(--accent), #0B2C2E); }
+.tx-player.in .ring .avatar-fallback{ background:linear-gradient(160deg, var(--accent), #0F2417); }
 .tx-player .pname{ font-family:"Space Grotesk"; font-weight:600; font-size:.78rem; color:var(--ink); white-space:nowrap;
   overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 .tx-player .pmeta{ font-family:"IBM Plex Mono"; font-size:8px; color:var(--ink-faint); }
@@ -531,6 +562,79 @@ def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str
         return (f'<details class="signal-card {card_cls}"><summary title="{tooltip}">{body}</summary>'
                 f'<div class="gw-bars">{bars}</div></details>')
     return f'<div class="signal-card {card_cls}" title="{tooltip}">{body}</div>'
+
+
+def build_season_rank_chart(rank_df: pd.DataFrame) -> alt.Chart:
+    """Patch 78 — Season Rank chart, rebuilt per manager request + the
+    dataviz skill's method (log scale for order-of-magnitude data, mark
+    specs, app-consistent color tokens). See the call site's comment block
+    (render_dashboard(), "Season Rank" section) for the full root-cause/
+    design story. Pulled out as its own module-level, independently
+    testable function (rather than built inline) specifically so
+    test_patch78_season_rank_chart.py can call it directly against
+    synthetic data without needing to exec a slice of render_dashboard().
+
+    `rank_df` must have exactly two columns, "GW" (int) and "Overall rank"
+    (int, >=1 — a log scale cannot include 0, and FPL overall rank is never
+    0 anyway). Returns a layered alt.Chart (area wash + line + points) with
+    a reversed log y-axis pinned to the manager's own named tiers."""
+    band_ticks = [1, 1000, 10000, 50000, 100000, 500000, 1000000, 10000000]
+    worst = max(int(v) for v in rank_df["Overall rank"] if v is not None) if not rank_df.empty else 1
+    domain_max = max(10_000_000, int(worst * 1.05))
+    tick_values = [t for t in band_ticks if t <= domain_max]
+    if tick_values[-1] != domain_max:
+        tick_values.append(domain_max)
+
+    # Exact app CSS custom-property values (see the `:root{...}` block near
+    # the top of this file) -- not new colors, so the chart stays visually
+    # consistent with the rest of the app.
+    # Release 3 "Turf Green" retint (was the Release 2 teal values) -- kept
+    # as literal hex rather than reading st.markdown's injected CSS (Altair
+    # can't see page CSS custom properties; this function's own docstring
+    # already flagged these as "not new colors" pulled from :root, so they
+    # must be updated by hand here whenever :root's theme changes).
+    ink, ink_muted, rule = "#17241A", "#4B5C43", "#DEE8D2"
+    accent_strong, accent_tint, surface = "#157A3E", "#E1F5E7", "#FFFFFF"
+
+    log_scale = alt.Scale(type="log", domain=[1, domain_max], reverse=True, nice=False)
+
+    area = (
+        alt.Chart(rank_df)
+        .mark_area(
+            line=False, interpolate="monotone",
+            color=alt.Gradient(gradient="linear",
+                                stops=[alt.GradientStop(color=accent_tint, offset=0),
+                                       alt.GradientStop(color=surface, offset=1)],
+                                x1=1, x2=1, y1=1, y2=0),
+            opacity=0.55,
+        )
+        .encode(x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=log_scale))
+    )
+    line = (
+        alt.Chart(rank_df)
+        .mark_line(interpolate="monotone", strokeWidth=2, color=accent_strong)
+        .encode(
+            x=alt.X("GW:O", title="Gameweek",
+                     axis=alt.Axis(labelAngle=0, labelFontSize=13, titleFontSize=13, labelFontWeight=600,
+                                    labelColor=ink, titleColor=ink, domainColor=rule, tickColor=rule,
+                                    grid=False)),
+            y=alt.Y("Overall rank:Q", title="Overall rank", scale=log_scale,
+                     axis=alt.Axis(values=tick_values, format=",.0f", labelFontSize=12, titleFontSize=13,
+                                    labelColor=ink_muted, titleColor=ink, domainColor=rule, tickColor=rule,
+                                    grid=True, gridColor=rule, gridOpacity=0.9, gridDash=[1, 0])),
+        )
+    )
+    points = (
+        alt.Chart(rank_df)
+        .mark_point(filled=True, size=90, color=accent_strong, stroke=surface, strokeWidth=2)
+        .encode(
+            x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=log_scale),
+            tooltip=[alt.Tooltip("GW:O", title="GW"),
+                     alt.Tooltip("Overall rank:Q", title="Overall rank", format=",.0f")],
+        )
+    )
+    return ((area + line + points).properties(height=320, background=surface)
+             .configure_view(strokeWidth=0))
 
 
 def _flag_pill(text: str, tooltip: str = "") -> str:
@@ -3316,19 +3420,43 @@ with tab_style:
                      "floor on merit.")
 
     # -----------------------------------------------------------------------
-    # Season rank chart (Patch 66; y-axis reversal Patch 69 — manager
-    # screenshot, annotated "0 here" pointing at the y-axis origin: wanted
-    # rank=0 at the TOP and the axis climbing downward, so an improving
-    # (falling) rank line visually reads as climbing the chart, the same
-    # sense as "climbing the leaderboard"). Bundled into Patch 66 per manager
-    # confirmation via AskUserQuestion ("Season rank chart/dashboard").
+    # Season rank chart (Patch 66; y-axis reversal Patch 69; Patch 78 —
+    # manager: "the season rank graph needs to be changed to be (All FPL
+    # Players >> 1 million up till it reaches 500000 then 100000 then 50000
+    # then 10000 then 1000 .. also the GW needs to be more visible and the
+    # whole chart to be better visuals". This is a genuine milestone-tier
+    # ruler request (Top 1M / 500K / 100K / 50K / 10K / 1K are the tiers FPL
+    # managers actually talk about), not just "zoom to my own data" — a
+    # PLAIN LINEAR scale (the old 0-3,000,000-by-500K axis, per the
+    # manager's screenshot) can't show that: it gives equal pixel-space to
+    # every rank number, so almost the entire chart is wasted on the part of
+    # the range nobody's actual rank ever sits at evenly. Fixed with a LOG
+    # scale instead of a hand-rolled fake "banded" axis (which the Patch 78
+    # changelog's original addendum flagged as a real risk — a fabricated
+    # band scale can visually misstate how close two ranks actually are). A
+    # log scale is the standard, honest way to do exactly what was asked:
+    # it naturally compresses the top of the range and expands the bottom,
+    # so the manager's own named tiers (dataviz-skill "choosing a form" —
+    # order-of-magnitude data belongs on a log axis, never a linear one)
+    # land as genuine reference gridlines, not an invented visual trick.
+    # Y-axis ticks are pinned to exactly the manager's own named bands
+    # (1/1,000/10,000/50,000/100,000/500,000/1,000,000 plus a 10,000,000
+    # "rest of the pool" ceiling) via `tickValues`, so those are the ONLY
+    # labels shown — reversed (Patch 69's "0 at the top" convention kept).
+    # GW-axis fix: labelAngle=0 (was auto-rotated/tiny per the manager's
+    # screenshot) + larger, bold, unrotated labels. Visual-polish fix: a
+    # subtle accent-tint area wash under the line (dataviz-skill mark spec:
+    # area fill at ~10% opacity, never a saturated block), a 2px line, and
+    # >=8px point markers with a surface-color ring — all pulled from the
+    # app's own existing CSS custom-property palette (--ink/--ink-muted/
+    # --rule/--accent-strong/--accent-tint), not new colors, so this stays
+    # visually consistent with the rest of the app. Verified by rendering
+    # standalone via vl-convert (real PNG output inspected, not just
+    # "should work") before this was wired into the live app — see
+    # test_patch78_season_rank_chart.py.
     # Reuses `cur_hist` (history["current"], already fetched/computed above
     # for the Season Ledger table right above this — not a new API call) so
     # the chart and the ledger table can never disagree.
-    # st.line_chart itself has no axis-reverse option (disclosed in the
-    # Patch 66 changelog entry) -- switched to st.altair_chart, with an
-    # explicit reversed alt.Scale on the y-axis, to actually fix this rather
-    # than just re-disclosing the same limitation again.
     # -----------------------------------------------------------------------
     st.markdown('<div class="section-h">Season Rank</div>', unsafe_allow_html=True)
     if cur_hist:
@@ -3339,24 +3467,12 @@ with tab_style:
                       (r["event"] == squad_gw and live_overall_rank is not None)]
         if _rank_rows:
             _rank_df = pd.DataFrame(_rank_rows)
-            _rank_chart = (
-                alt.Chart(_rank_df)
-                .mark_line(point=True, color="#2FBFC7")
-                .encode(
-                    x=alt.X("GW:O", title="Gameweek"),
-                    y=alt.Y("Overall rank:Q", title="Overall rank",
-                            scale=alt.Scale(reverse=True, zero=True, nice=True),
-                            axis=alt.Axis(format=",.0f")),
-                    tooltip=[alt.Tooltip("GW:O", title="GW"),
-                             alt.Tooltip("Overall rank:Q", title="Overall rank", format=",.0f")],
-                )
-                .properties(height=280)
-            )
+            _rank_chart = build_season_rank_chart(_rank_df)
             st.altair_chart(_rank_chart, use_container_width=True)
-            st.caption("Overall rank by gameweek — axis is reversed (0 at the top) so an improving rank reads "
-                       "as the line climbing, same sense as climbing the leaderboard. Uses the same live-"
-                       "corrected GW figure as the Season Ledger table above, so the two never disagree on the "
-                       "current, not-yet-finalized gameweek.")
+            st.caption("Overall rank by gameweek — log scale, reversed (best rank at the top), with reference "
+                       "lines at the Top 1K/10K/50K/100K/500K/1M tiers so you can read your position against "
+                       "them at a glance. Uses the same live-corrected GW figure as the Season Ledger table "
+                       "above, so the two never disagree on the current, not-yet-finalized gameweek.")
         else:
             st.caption("No overall-rank data yet this season — chart will populate once a gameweek finishes.")
     else:
