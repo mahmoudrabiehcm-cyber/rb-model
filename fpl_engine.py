@@ -749,15 +749,33 @@ def free_lineup_fix_check(squad_df: pd.DataFrame, disrupted_codes: set, this_gw_
     upgrade — the model's own projection still says keeping him is the
     better expectation, which is exactly why it isn't zeroed automatically.
 
-    Returns {"flagged_starting": bool, "player": name|None, "player_code":
-    code|None, "worst_case_replacement": name|None, "worst_case_total":
-    float|None, "current_total": float|None}. "flagged_starting": False
+    Patch 81 (2026-09-27, manager report: 3 simultaneously-flagged squad
+    players this run -- Palmer, Pedro, Isak -- but the Transfer
+    Recommendations tab only ever showed ONE worst-case box (Isak's).
+    Palmer's flag was separately covered by that run's actual recommended
+    transfer (Palmer -> Saka), but Pedro's was invisible anywhere in this
+    tab -- not because his risk wasn't priced in (his own GW xPts number,
+    used in every solve, already carries his live chance-of-playing
+    discount, same as before), but because this function used to hard-stop
+    at "the single highest-projected disrupted starter... not a
+    combinatorial list" (this docstring's own prior wording). That was a
+    reasonable simplification when at most one flagged starter at a time
+    was the common case; it silently drops coverage once two or more are
+    flagged simultaneously, which is exactly what triggered the manager's
+    "this isn't being taken seriously" read -- the model WAS accounting for
+    Pedro's risk mathematically, but nothing on screen said so. Now
+    evaluates EVERY currently-starting disrupted player independently (each
+    one zeroed on its own, not all at once -- zeroing several together would
+    conflate their individual downside into one number and hide which
+    player drives how much of it), not just the most consequential one.
+
+    Returns {"entries": [{"player", "player_code", "worst_case_replacement",
+    "worst_case_total", "current_total"}, ...]}. An empty "entries" list
     means no currently-disrupted player is actually in today's best XI, so
-    there's no worst-case scenario to show. Only the single highest-
-    projected disrupted starter is evaluated if more than one qualifies —
-    the most consequential one, not a combinatorial list."""
-    empty = {"flagged_starting": False, "player": None, "player_code": None,
-             "worst_case_replacement": None, "worst_case_total": None, "current_total": None}
+    there's no worst-case scenario to show. Entries are ordered by current
+    projection descending (most consequential first), matching the prior
+    single-entry behavior's own ordering."""
+    empty = {"entries": []}
     if squad_df is None or squad_df.empty or not disrupted_codes or this_gw_col not in squad_df.columns:
         return empty
 
@@ -770,90 +788,129 @@ def free_lineup_fix_check(squad_df: pd.DataFrame, disrupted_codes: set, this_gw_
     if not starting_disrupted:
         return empty
 
-    flagged_row = squad_df[squad_df["code"].isin(starting_disrupted)] \
-        .sort_values(this_gw_col, ascending=False).iloc[0]
-    code = flagged_row["code"]
+    flagged_rows = squad_df[squad_df["code"].isin(starting_disrupted)] \
+        .sort_values(this_gw_col, ascending=False)
 
-    worst_case_squad = squad_df.copy()
-    worst_case_squad.loc[worst_case_squad["code"] == code, this_gw_col] = 0.0
-    worst_case_xi = opt.best_starting_xi(worst_case_squad, this_gw_col)
-    if worst_case_xi is None:
-        return empty
-    worst_case_codes = set(worst_case_xi["xi"]["code"])
-    entering = worst_case_codes - (current_codes - {code})
-    entering_names = squad_df[squad_df["code"].isin(entering)]["web_name"].tolist()
-
-    return {"flagged_starting": True, "player": flagged_row["web_name"], "player_code": code,
+    entries = []
+    for _, flagged_row in flagged_rows.iterrows():
+        code = flagged_row["code"]
+        worst_case_squad = squad_df.copy()
+        worst_case_squad.loc[worst_case_squad["code"] == code, this_gw_col] = 0.0
+        worst_case_xi = opt.best_starting_xi(worst_case_squad, this_gw_col)
+        if worst_case_xi is None:
+            continue
+        worst_case_codes = set(worst_case_xi["xi"]["code"])
+        # Patch 81 fix -- pre-existing formula bug found while live-testing this
+        # same patch's multi-entry change (surfaced on a squad with only 3 FWDs,
+        # all 3 needed by every shape that stays optimal even at 0 xPts): the
+        # old `worst_case_codes - (current_codes - {code})` explicitly excluded
+        # `code` from the SUBTRAHEND, so if the zeroed player has no positional
+        # bench depth and is forced to stay in the worst-case XI (nothing else
+        # to fill his slot), he'd wrongly show up as "entering" -- i.e. as his
+        # OWN replacement ("Worst case if Player8 scores 0 ... best XI with
+        # Player8 instead"). `code` is never a genuine new entrant relative to
+        # himself; plain `worst_case_codes - current_codes` already handles
+        # both the normal case (a different bench player swaps in) and this
+        # edge case (he's still a current-XI member, so he's correctly excluded
+        # from the difference either way) without needing the `- {code}`
+        # adjustment at all.
+        entering = worst_case_codes - current_codes
+        entering_names = squad_df[squad_df["code"].isin(entering)]["web_name"].tolist()
+        entries.append({
+            "player": flagged_row["web_name"], "player_code": code,
             "worst_case_replacement": ", ".join(entering_names) if entering_names else None,
-            "worst_case_total": round(worst_case_xi["total"], 2), "current_total": round(current_total, 2)}
+            "worst_case_total": round(worst_case_xi["total"], 2), "current_total": round(current_total, 2),
+        })
+
+    return {"entries": entries}
 
 
-def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squad_df: pd.DataFrame,
+def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squads_by_gw: dict,
                             detect_gw_list: list, cfg: dict) -> dict:
-    """Patch 30 (2026-09-14, manager-flagged correction) — v6.4's ACTUAL
-    documented Wildcard trigger, replacing the app's old ad hoc rank-decline
-    +flagged-player-count heuristic entirely (that heuristic pre-dated v6.4
-    and had never been updated once the doc gave Wildcard real numbers).
+    """Patch 30 (2026-09-14) built v6.4's dual-leg trigger. Patch 82
+    (2026-09-28, manager: uploaded the v6.9 model doc and asked what should
+    change in the app) REPLACES it with v6.9's amended §8c trigger
+    definition — verified against the doc's actual "Wildcard trigger
+    definition (amended v6.9)" paragraph and changelog entry, not inferred:
 
-    Corrects a real mislabeling found in this same review: the old code
-    cited "Standing Rule #24" as the reason Wildcard stays non-mechanical.
-    Rule #24 is the Transfer Timing Discipline Rule (ordinary transfers,
-    hold-until-deadline default) — it says nothing about Wildcard. The rule
-    that actually governs Wildcard timing is Standing Rule #32 (Dynamic
-    Chip Timing Rule): "a planned chip date is a working hypothesis, not a
-    fixed commitment... re-test at every Step 0 review." That rule blocks
-    treating a DATE as locked in — it does not block the model from
-    computing whether the trigger CONDITION itself currently holds.
+    "The trigger is scale-free: gap = (reachable ceiling - squad total) /
+    reachable ceiling over the 3-4 GW detection window, where the reachable
+    ceiling is the best squad reachable with the free transfers available
+    and accruing one per gameweek... It fires at a gap of about 6% or more
+    (a Team Rating of about 94% or less). The former 78-80% leg is retired:
+    at typical window totals a 6% gap is reached long before a 21% gap, so
+    that leg never bound and the trigger was in practice the absolute 15
+    xPts figure... An absolute xPts gap may be displayed for context but is
+    never the threshold, because tools differ in scale."
 
-    v6.4's literal trigger text: "average Team Rating % across [the 3-4 GW
-    detection] horizon below ~78-80%, or a cumulative xPts gap of ~15+
-    points versus the bounded-ceiling optimal over the same window."
-    "Bounded-ceiling optimal" = the squad actually reachable using the free
-    transfers on hand (data_pipeline.solve_reachable_ceiling()) — the same
-    ceiling the app's own Team Rating % header stat already compares
-    against — never the fully unconstrained pool ceiling (that one measures
-    something else: how far even a Wildcard's own rebuild sits from a
-    fantasy-ideal squad, not whether ordinary transfers can already close
-    the gap without one).
+    Both of the doc's stated defects in the OLD dual-leg trigger were
+    verified present in the pre-Patch-82 code, not just structurally
+    similar: (1) `team_rating_pct_ceiling`/`cumulative_gap_threshold` fired
+    as two independent OR'd legs (79% ceiling, 15 xPts absolute) exactly as
+    the doc describes the retired version; (2) `reachable_squad_df` was a
+    SINGLE squad solved once with the CURRENT free-transfer count and
+    reused for every GW in the detection window (confirmed by reading the
+    old app.py call site: one `solve_reachable_ceiling()` call feeding every
+    GW of this function's old by_gw loop) — never accruing a transfer per
+    week as the amended definition now requires.
 
-    `squad_df`/`reachable_squad_df` must both already carry `xpts_gw{n}`
-    columns for every GW in `detect_gw_list` (i.e. both projected onto the
-    SAME window) — same Rule #22 Systematic Application discipline as the
-    Team Rating % header stat: identical calculation
-    (`optimizer.rating_gw_value`) on both sides, every GW.
+    `reachable_squads_by_gw` fixes defect (2): it's a
+    {gw: data_pipeline.solve_reachable_ceiling()-style dict-or-None} map,
+    one independently-solved reachable squad per GW in detect_gw_list, each
+    with that GW's own accrued free-transfer count baked into its own
+    min_retain constraint — see data_pipeline.solve_reachable_ceiling_by_gw().
+    A single shared DataFrame (the old signature) is no longer accepted;
+    every caller must build the per-GW map.
 
-    Config: `wildcard_trigger.team_rating_pct_ceiling` (default 79.0, the
-    doc's own "~78-80%" band's midpoint) and
-    `wildcard_trigger.cumulative_gap_threshold` (default 15.0, the doc's own
-    "~15+" figure) — both ARE the doc's stated numbers, not a manager-
-    directed extension like chip_advisor_thresholds; the "~" in the doc's
-    own text is why a single midpoint/floor value stands in for a range.
+    `squad_df` must carry `xpts_gw{n}` columns for every GW in
+    `detect_gw_list`; each entry in `reachable_squads_by_gw` must carry its
+    OWN gw's `xpts_gw{n}` column on its own `["squad"]` DataFrame — same
+    Rule #22 Systematic Application discipline as before, just applied per
+    GW instead of once across the whole window.
 
-    Returns {"active": bool, "avg_rating_pct": float|None, "cumulative_gap":
-    float|None, "by_gw": {gw: {"squad": v, "reachable": v, "rating_pct": v}},
-    "reason": str}. "active" is a genuinely mechanical yes/no on the trigger
-    CONDITION — it is still never a single-GW "play" verdict (v6.4's 8-GW
-    decay-weighted build horizon means Wildcard timing stays a rolling
-    re-test per Rule #32, not a one-week pick the way Free Hit gets)."""
+    Config: `wildcard_trigger.gap_pct_threshold` (default 6.0, the doc's
+    own "~6%" figure) replaces the retired
+    `team_rating_pct_ceiling`/`cumulative_gap_threshold` pair. The doc
+    states this 6% figure is itself "unvalidated" and exists to be tested
+    by a calibration log — open to revision, same as the retired figures
+    were.
+
+    Returns {"active": bool, "avg_rating_pct": float|None, "avg_gap_pct":
+    float|None, "cumulative_gap": float|None, "by_gw": {gw: {"squad": v,
+    "reachable": v, "rating_pct": v}}, "reason": str}. `avg_rating_pct` is
+    kept (unchanged meaning — 100 - avg_gap_pct when computed over the same
+    per-GW values) so every existing display call site (the Chip Plan tab,
+    the Wildcard pill, the Chip Advisor summary line) keeps working
+    unmodified; the compliance-critical CHANGE is which threshold decides
+    `active`, and that the reachable side is no longer a single reused
+    squad. `cumulative_gap` (absolute xPts) is still computed and returned
+    for the reason string's context per the doc's own "may be displayed for
+    context" allowance — it is never compared against a threshold. "active"
+    is a genuinely mechanical yes/no on the trigger CONDITION — it is still
+    never a single-GW "play" verdict (v6.4's 8-GW decay-weighted build
+    horizon means Wildcard timing stays a rolling re-test per Rule #32, not
+    a one-week pick the way Free Hit gets)."""
     import optimizer as opt
 
-    empty = {"active": False, "avg_rating_pct": None, "cumulative_gap": None, "by_gw": {},
-             "reason": "insufficient data to evaluate this run"}
-    if squad_df is None or squad_df.empty or reachable_squad_df is None or reachable_squad_df.empty \
-            or not detect_gw_list:
+    empty = {"active": False, "avg_rating_pct": None, "avg_gap_pct": None, "cumulative_gap": None,
+             "by_gw": {}, "reason": "insufficient data to evaluate this run"}
+    if squad_df is None or squad_df.empty or not reachable_squads_by_gw or not detect_gw_list:
         return empty
 
     wt_cfg = cfg.get("wildcard_trigger", {})
-    rating_ceiling = wt_cfg.get("team_rating_pct_ceiling", 79.0)
-    gap_threshold = wt_cfg.get("cumulative_gap_threshold", 15.0)
+    gap_pct_threshold = wt_cfg.get("gap_pct_threshold", 6.0)
 
     by_gw = {}
     for gw in detect_gw_list:
         col = f"xpts_gw{gw}"
-        if col not in squad_df.columns or col not in reachable_squad_df.columns:
+        reachable_entry = reachable_squads_by_gw.get(gw)
+        if reachable_entry is None or reachable_entry.get("squad") is None:
+            continue
+        reachable_squad_gw = reachable_entry["squad"]
+        if col not in squad_df.columns or col not in reachable_squad_gw.columns:
             continue
         squad_val = opt.rating_gw_value(squad_df, col, cfg)["total_realized"]
-        reachable_val = opt.rating_gw_value(reachable_squad_df, col, cfg)["total_realized"]
+        reachable_val = opt.rating_gw_value(reachable_squad_gw, col, cfg)["total_realized"]
         rating = team_rating_pct(squad_val, reachable_val, "")["rating_pct"]
         by_gw[gw] = {"squad": round(squad_val, 2), "reachable": round(reachable_val, 2), "rating_pct": rating}
 
@@ -862,19 +919,18 @@ def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squad_df: pd.DataFr
 
     valid_ratings = [v["rating_pct"] for v in by_gw.values() if v["rating_pct"] is not None]
     avg_rating = round(sum(valid_ratings) / len(valid_ratings), 1) if valid_ratings else None
+    avg_gap_pct = round(100.0 - avg_rating, 1) if avg_rating is not None else None
     cumulative_gap = round(sum(v["reachable"] - v["squad"] for v in by_gw.values()), 2)
 
-    triggers = []
-    if avg_rating is not None and avg_rating < rating_ceiling:
-        triggers.append(f"average Team Rating % across GW{min(by_gw)}-GW{max(by_gw)} is {avg_rating}%, "
-                          f"below the {rating_ceiling:.0f}% ceiling")
-    if cumulative_gap >= gap_threshold:
-        triggers.append(f"cumulative gap to your bounded-ceiling optimal over that window is {cumulative_gap:.1f} "
-                          f"xPts, at/above the {gap_threshold:.0f}-point threshold")
-
-    active = bool(triggers)
-    reason = ("; ".join(triggers) if triggers else
-              f"average Team Rating % ({avg_rating}%) and cumulative gap ({cumulative_gap:.1f} xPts) over "
-              f"GW{min(by_gw)}-GW{max(by_gw)} both stay inside the doc's noise band — no trigger this run")
-    return {"active": active, "avg_rating_pct": avg_rating, "cumulative_gap": cumulative_gap,
-            "by_gw": by_gw, "reason": reason}
+    active = avg_gap_pct is not None and avg_gap_pct >= gap_pct_threshold
+    if active:
+        reason = (f"average gap to your bounded-ceiling optimal (accruing free transfers) across "
+                  f"GW{min(by_gw)}-GW{max(by_gw)} is {avg_gap_pct}%, at/above the {gap_pct_threshold:.0f}% "
+                  f"threshold (Team Rating {avg_rating}%; for context, cumulative absolute gap is "
+                  f"{cumulative_gap:.1f} xPts — displayed only, not itself a threshold)")
+    else:
+        reason = (f"average gap ({avg_gap_pct}%, Team Rating {avg_rating}%) over GW{min(by_gw)}-GW{max(by_gw)} "
+                  f"stays below the {gap_pct_threshold:.0f}% threshold — no trigger this run (cumulative absolute "
+                  f"gap {cumulative_gap:.1f} xPts, for context only)")
+    return {"active": active, "avg_rating_pct": avg_rating, "avg_gap_pct": avg_gap_pct,
+            "cumulative_gap": cumulative_gap, "by_gw": by_gw, "reason": reason}

@@ -111,7 +111,11 @@ def _pulp_forensics() -> str:
         return "[pulp version/location unavailable]"
 
 
-def _cbc_solver(msg: int = 0):
+_DEFAULT_SOLVE_TIME_LIMIT_SECONDS = 12  # kept in sync with model_config.yaml's solver.time_limit_seconds;
+                                          # used only if a caller can't reach cfg for some reason.
+
+
+def _cbc_solver(msg: int = 0, time_limit: float | None = _DEFAULT_SOLVE_TIME_LIMIT_SECONDS):
     """Patch 76 -- version-tolerant replacement for the bare
     `pulp.PULP_CBC_CMD(msg=0)` call this file used to make directly at every
     `prob.solve(...)` site. `PULP_CBC_CMD` doesn't exist in pulp 4.0's public
@@ -136,10 +140,45 @@ def _cbc_solver(msg: int = 0):
     close to optimal, not the genuine best XI/squad the manager is relying
     on this app for), this forces the same exact-optimal behavior pre-4.0's
     bundled CBC always gave by default. Left off the PULP_CBC_CMD path
-    since that one was never observed to need it."""
+    since that one was never observed to need it.
+
+    `time_limit` (2026-09-28 investigation, manager report: Horizon=3 with
+    "Hit if worth it" hung on "Fetching live data..." indefinitely, then
+    Streamlit Cloud killed the whole session -- see model_config.yaml's
+    `solver.time_limit_seconds` comment for the full root-cause writeup).
+    Every solve in this file previously had NO wall-clock cap at all, so a
+    single genuinely hard MILP instance (this app's own retain-pool-
+    constrained solves are already confirmed, via the Patch 78 GapLimit
+    story, capable of being non-trivial) could run indefinitely, and
+    `plan_transfer_schedule()`'s per-week `k in range(...)` loop multiplies
+    that exposure by the Horizon slider's GW count. Passing a `timeLimit` to
+    the underlying solver bounds any ONE solve's worst-case wall-clock time.
+    Confirmed empirically (not assumed) on both pulp builds this app's
+    requirements.txt allows that a solve cut short by the time limit before
+    proving optimality reports a status that is neither "Optimal" nor the
+    disclosed-safe "GapLimit" exact-optimum case -- pulp 3.3.2's
+    PULP_CBC_CMD path returns "Not Solved", pulp 4.0.0's COIN_CMD path
+    returns "TimeLimit" -- so it flows straight through the existing
+    `if _status != "Optimal": ... return None` handling every other
+    non-Optimal status already uses. A time-limited, unproven-optimal
+    solution is therefore NEVER silently served as if it were the genuine
+    best squad; worst case, that one candidate is skipped, exactly like an
+    infeasible one already is. `time_limit=None` restores the old
+    unbounded behavior (kept as an explicit opt-out for tests that need to
+    force a specific status)."""
     if hasattr(pulp, "PULP_CBC_CMD"):
-        return pulp.PULP_CBC_CMD(msg=msg)
-    return pulp.COIN_CMD(msg=msg, gapRel=0, gapAbs=0)
+        return pulp.PULP_CBC_CMD(msg=msg, timeLimit=time_limit)
+    return pulp.COIN_CMD(msg=msg, gapRel=0, gapAbs=0, timeLimit=time_limit)
+
+
+def _solve_time_limit(cfg: dict) -> float | None:
+    """Reads `solver.time_limit_seconds` from model_config.yaml (see that
+    file's comment for the full 2026-09-28 investigation this backs), falling
+    back to `_DEFAULT_SOLVE_TIME_LIMIT_SECONDS` if the key is absent (e.g. an
+    older config file) so this never hard-fails on a missing key."""
+    if not isinstance(cfg, dict):
+        return _DEFAULT_SOLVE_TIME_LIMIT_SECONDS
+    return cfg.get("solver", {}).get("time_limit_seconds", _DEFAULT_SOLVE_TIME_LIMIT_SECONDS)
 
 
 def _solve_and_get_status(prob, solver) -> str:
@@ -442,7 +481,7 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
             if len(idxs) > 0:
                 prob += pulp.lpSum(x[i] for i in idxs) >= min(min_retain, len(idxs))
 
-        _status = _solve_and_get_status(prob, _cbc_solver(msg=0))
+        _status = _solve_and_get_status(prob, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
 
         if _status != "Optimal":
             _diag(label, f"CBC solver returned status={_status} (not Optimal) — "
@@ -471,9 +510,33 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         return None
 
 
+@_cache_decorator
 def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str,
                           label: str | None = None) -> dict | None:
-    """Free Hit "optimal team for this GW" feature (2026-09-07 discussion,
+    """Patch 82 (2026-09-28, manager:
+    "the performance generally is too slow"). Found in code, not assumed:
+    this function does 8 shape solves (Stage 1) + up to 8 bench solves
+    (Stage 2) = up to 16 real MILP solves per call, and unlike its sibling
+    solve_squad() (cached since Patch 42, for the exact same "too slow"
+    complaint), this had NO `@_cache_decorator` at all -- confirmed
+    empirically: two back-to-back calls with byte-identical inputs both
+    took ~3.8s each before this fix, since every call re-solved from
+    scratch. app.py calls this (via data_pipeline.solve_free_hit_optimal_
+    squad()) from multiple places every run -- at minimum once for the
+    always-on "GW{n} Rating" header card, and again, with FREQUENTLY
+    IDENTICAL arguments, whenever the Chip Advisor's Free Hit verdict is
+    "PLAY GW{n}" for that same GW -- so this was often being solved twice
+    over for literally the same answer, and re-solved again on every
+    unrelated widget interaction that triggers a Streamlit rerun (moving
+    the Horizon slider, changing Style, anything), since nothing was
+    caching it. Adding the same, already-proven `@_cache_decorator`
+    solve_squad() already uses closes this gap identically: a cache hit
+    requires byte-identical inputs (players' content, cfg, budget, gw_col),
+    so a genuine data refresh or a genuinely different GW/budget always
+    still gets a fresh solve -- zero change to what gets recommended, pure
+    caching, same guarantee Patch 42 already established for solve_squad().
+
+    Free Hit "optimal team for this GW" feature (2026-09-07 discussion,
     Patch 19) — Option A (two-stage, manager-confirmed): unlike solve_squad()
     (which maximizes the raw sum of all 15 players' projections and has no
     concept of starter vs. bench at solve time, so it has no actual incentive
@@ -581,7 +644,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
             for team in df["team"].unique():
                 prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
-            _status = _solve_and_get_status(prob, _cbc_solver(msg=0))
+            _status = _solve_and_get_status(prob, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
             if _status != "Optimal":
                 _shape_failures.append(f"shape {(d, m, f)}: CBC status={_status} "
                                         f"(xi_budget_cap={xi_budget_cap:.1f}, {len(df)} candidates)")
@@ -627,7 +690,7 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
                 already = xi_club_counts.get(team, 0)
                 prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
                     <= max(0, max_per_club - already)
-            _status = _solve_and_get_status(prob2, _cbc_solver(msg=0))
+            _status = _solve_and_get_status(prob2, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
             if _status != "Optimal":
                 _bench_failures.append(f"shape {xi_result.get('shape')}: CBC status={_status} "
                                         f"(remaining_budget={remaining_budget:.1f}, need={need}, "

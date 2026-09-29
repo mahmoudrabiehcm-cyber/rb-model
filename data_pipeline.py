@@ -527,6 +527,39 @@ def solve_reachable_ceiling(cfg: dict, proj: pd.DataFrame, current_squad_codes: 
                             label="reachable_ceiling")
 
 
+def solve_reachable_ceiling_by_gw(cfg: dict, proj: pd.DataFrame, current_squad_codes: list,
+                                   free_transfers: int, detect_gw_list: list) -> dict:
+    """v6.9 amended Wildcard trigger (Standing Rule #45's §8c amendment,
+    verified against the doc, not inferred): "the reachable ceiling is the
+    best squad reachable with the free transfers available and accruing one
+    per gameweek." The pre-v6.9 app code (solve_reachable_ceiling(), still
+    used elsewhere for the Team Rating % headline, which the doc's §1a
+    formula does NOT ask to accrue) solved ONE reachable squad with a
+    single static free_transfers count and reused it for every GW in the
+    detection window — confirmed by reading app.py's caller (the single
+    `reachable_detect = data_pipeline.solve_reachable_ceiling(...)` call
+    feeding every GW of wildcard_trigger_check's by_gw loop). That
+    understates the reachable ceiling for the later weeks of a 3-4 GW
+    window, since by week 3 a manager holding transfers would genuinely
+    have more of them banked than at week 1.
+
+    This solves one reachable squad PER GW in detect_gw_list, with
+    min_retain tightened week-by-week to reflect free_transfers + (that
+    week's 0-based offset into the sorted window), capped at the Standing
+    Rule #35/#37 bank cap of 5 (a manager can never actually have more than
+    5 free transfers banked at once, accrual or not). detect_gw_list is
+    assumed already sorted ascending (app.py builds it via
+    `range(planning_gw, planning_gw + window_size)`).
+
+    Returns {gw: solve_squad()'s dict-or-None}, one entry per GW in
+    detect_gw_list — never a single shared squad."""
+    result = {}
+    for offset, gw in enumerate(sorted(detect_gw_list)):
+        accrued_ft = min(5, max(0, free_transfers) + offset)
+        result[gw] = solve_reachable_ceiling(cfg, proj, current_squad_codes, accrued_ft)
+    return result
+
+
 def solve_free_hit_rebuild(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
     """Step 8b Free Hit Evaluation (Standing Rule #25): a full 15-man
     rebuild against the manager's TOTAL team value (bank + current squad's

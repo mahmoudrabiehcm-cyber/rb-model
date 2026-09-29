@@ -2434,6 +2434,77 @@ meta:
                           # NOTE (2026-09-27): rb_model_app_patch80.zip is CUMULATIVE: Patch 29 through 80
                           # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
                           # included (see the Patch 58 addendum above) -- keep using your own live copy.
+                          # Patch 81 (2026-09-27, manager: a live run flagged 3 squad players simultaneously
+                          # (Palmer, Pedro, Isak -- all 3 in the starting XI, all 3 under the Chip Plan's
+                          # "Price-drop-flow override: 3 player(s) flagged" pill) and the manager's read was
+                          # "the transfer recommendations or the chip trigger should be more serious with such
+                          # things, not just recommending softly." Investigated per this project's standing
+                          # rule (verify against the actual codebase, don't act on the framing alone) before
+                          # changing anything:
+                          #   - CONFIRMED, not a gap: every flagged player's own GW xPts number already carries
+                          #     a live chance-of-playing discount (data_pipeline.py) in EVERY calculation that
+                          #     uses it -- best XI picks, transfer net-gain solves, captaincy choice -- so the
+                          #     risk was never being ignored mathematically. This is unchanged, pre-existing
+                          #     behavior, re-confirmed here, not new.
+                          #   - CONFIRMED, not a gap: a disruption flag (Rule #41) is otherwise purely
+                          #     EXPLANATORY in the transfer decision --
+                          #     recommend.starting_xi_impact_check()'s `disrupted_codes` parameter only rescues
+                          #     an ALREADY net-positive candidate transfer from being vetoed as "no real
+                          #     impact" (recommend.py's `any_impact = disrupted_out` line); it never lowers the
+                          #     hit-cost/materiality bar or raises a disrupted player's priority for being
+                          #     transferred out. Left unchanged here deliberately -- inventing a numeric
+                          #     "urgency multiplier" the model doc doesn't specify would be exactly the kind of
+                          #     undisclosed rule addition this project's standing rules don't allow; that run's
+                          #     ACTUAL transfer (Palmer -> Saka) and Isak's worst-case disclosure (correctly
+                          #     concluding no transfer needed, since his own live-discounted projection already
+                          #     beats the zero-him alternative) show the model WAS already reacting to 2 of the
+                          #     3 flagged players through its normal, doc-grounded mechanisms.
+                          #   - THE ACTUAL, VERIFIED GAP: fpl_engine.free_lineup_fix_check() -- the function
+                          #     behind the "Worst case if X scores 0" box on the Transfer Recommendations tab --
+                          #     was hardcoded, by its own prior explicit docstring, to evaluate only "the single
+                          #     highest-projected disrupted starter... not a combinatorial list." With exactly
+                          #     one flagged starter (its original common case) that's invisible; with 3
+                          #     simultaneously flagged starters, it silently dropped 2 of them. Isak was the one
+                          #     shown; Pedro's downside was priced into the model everywhere but never
+                          #     disclosed anywhere in this tab. THIS is the real, code-confirmed root cause of
+                          #     "not being taken seriously" -- a missing disclosure for the 2nd/3rd
+                          #     simultaneously-flagged player, not a missing safety mechanism.
+                          #   Fix: free_lineup_fix_check() now returns one worst-case entry PER currently-
+                          #   starting disrupted player (each zeroed independently, not all at once -- zeroing
+                          #   several together would conflate their individual downside into one number and
+                          #   hide which player drives how much of it), and app.py's Transfer Recommendations
+                          #   tab loops over all of them instead of showing only the first.
+                          #   SECOND BUG found while live-testing this exact fix (Playwright screenshot against
+                          #   the synthetic navigator harness showed several boxes reading "Worst case if
+                          #   PlayerN scores 0 ... best XI with PlayerN instead" -- a flagged player listed as
+                          #   his own replacement): a pre-existing formula bug in the same function, present
+                          #   since Patch 34 and just never triggered before (needs a flagged player with no
+                          #   positional bench depth -- e.g. the squad's only forward -- so every valid shape
+                          #   is forced to keep him even at 0 xPts). The old
+                          #   `worst_case_codes - (current_codes - {code})` explicitly excluded the flagged
+                          #   player's own code from the subtrahend, so when he stayed in the worst-case XI
+                          #   unavoidably, the set difference wrongly counted him as a NEW entrant relative to
+                          #   himself. Fixed to the simpler, correct `worst_case_codes - current_codes`, which
+                          #   handles both the normal case (a genuine bench alternative swaps in) and this edge
+                          #   case (he's excluded from the difference either way, since he was already a
+                          #   current-XI member) without any special-casing.
+                          #   Verified: test_patch81_multi_disruption_worstcase.py (7 tests: all 3
+                          #   simultaneously-flagged starters -- Palmer, Pedro, Isak -- each get their own
+                          #   entry; entries ordered by current projection descending; each entry's worst case
+                          #   is computed independently, not contaminated by the other flagged players; a
+                          #   disrupted bench player who isn't starting produces no entry; no disrupted_codes
+                          #   returns empty; a flagged player with zero positional bench depth is no longer
+                          #   shown as his own replacement; the original single-flagged-starter case still
+                          #   produces exactly one entry) -- all 7 PASSED against the real current fpl_engine.py
+                          #   source. Then confirmed live: launched the actual app under Streamlit against the
+                          #   synthetic navigator harness (which randomly flagged 6 simultaneously-disrupted
+                          #   starters this run) and drove it with Playwright -- all 6 worst-case boxes now
+                          #   render (previously only 1 would have), and the ones with no real bench
+                          #   alternative correctly show "—" instead of naming themselves. Full regression suite
+                          #   (Patch 70-81, 16 files including this one) re-run after -- zero regressions.
+                          # NOTE (2026-09-27): rb_model_app_patch81.zip is CUMULATIVE: Patch 29 through 81
+                          # together, on top of the manager's Patch 28 baseline. manual_overrides.csv is NOT
+                          # included (see the Patch 58 addendum above) -- keep using your own live copy.
   season: "2026-27"
   previous_season: "2025-26"
   fpl_id_current_season: 26073
@@ -2761,20 +2832,38 @@ chip_timing:
   wildcard_flag_min_flagged_players: 3          # squad players with a status/data flag
 
 # -----------------------------------------------------------------------------
-# Wildcard trigger (Patch 30 / v6.4) — see fpl_engine.wildcard_trigger_check().
-# DISCLOSURE: unlike chip_advisor_thresholds/chip_shape_test above, these two
-# numbers ARE the doc's own stated figures (v6.4: "average Team Rating %
-# across that horizon below ~78-80%, or a cumulative xPts gap of ~15+
-# points"), not a manager-directed extension — the "~" in the doc's own text
-# is why a single value stands in for each stated range/floor.
-#   - team_rating_pct_ceiling: midpoint of the doc's "~78-80%" band.
-#   - cumulative_gap_threshold: the doc's own "~15+" floor.
+# Wildcard trigger (Patch 30 / v6.4; RETIRED dual-leg form replaced Patch 82 /
+# v6.9) — see fpl_engine.wildcard_trigger_check().
+# DISCLOSURE: unlike chip_advisor_thresholds/chip_shape_test above, this
+# number IS the doc's own stated figure, not a manager-directed extension.
+#
+# Patch 82 (2026-09-28, manager uploaded the v6.9 model doc and asked what
+# should change in the app before confirming a patch): v6.9's amended §8c
+# "Wildcard trigger definition" explicitly retires the old two-leg check this
+# key pair used to drive (team_rating_pct_ceiling: 79.0 OR
+# cumulative_gap_threshold: 15.0 xPts) — the doc's own words: "at typical
+# window totals a 6% gap is reached long before a 21% gap, so that [78-80%]
+# leg never bound and the trigger was in practice the absolute 15 xPts
+# figure." Verified in the pre-Patch-82 code: wildcard_trigger_check() did
+# exactly that OR, and app.py's cross-check note (line ~1721) quoted the 79%
+# figure directly — both now replaced.
+#
+# gap_pct_threshold (v6.9's own "~6%" figure, replacing both retired keys):
+# fires when avg_gap_pct = 100 - avg_rating_pct >= this value, where
+# avg_rating_pct is computed against a reachable ceiling that now accrues
+# one free transfer per GW across the detection window (see
+# data_pipeline.solve_reachable_ceiling_by_gw()), not a single static
+# snapshot of today's free-transfer count reused for every GW. The doc
+# states this 6% figure is itself unvalidated and exists to be tested by a
+# future calibration log (v6.9 Step 0 addition, not yet built into the app —
+# tracked as a separate follow-up, not part of this patch) — open to
+# revision, same as the retired 79%/15pt figures were.
 # detection_window_gws is shared with chip_shape_test above (both come from
-# the same "Wildcard — detection and build horizons (v6.4)" 3-4 GW figure).
+# the same "Wildcard — detection and build horizons (v6.4)" 3-4 GW figure,
+# unchanged by v6.9).
 # -----------------------------------------------------------------------------
 wildcard_trigger:
-  team_rating_pct_ceiling: 79.0
-  cumulative_gap_threshold: 15.0
+  gap_pct_threshold: 6.0
 
 # -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
@@ -2821,6 +2910,71 @@ chip_advisor_thresholds:
   bench_boost: {floor_points: 3.0, pct_of_total: 0.05}
   triple_captain: {floor_points: 5.0, pct_of_total: 0.08}
   free_hit: {floor_points: 6.0, pct_of_total: 0.06}
+
+# -----------------------------------------------------------------------------
+# Patch 82 (2026-09-28, manager
+# screenshot: choosing Horizon=3 GWs with "Hit if worth it" left the app
+# stuck on "Fetching live data and computing xPts..." indefinitely, then the
+# whole Streamlit Cloud session crashed with a generic infra error ("Received
+# no response from server", not an app-level exception). Manager's explicit
+# instruction at the time: identify + recommend + TEST a fix, but don't
+# package a new patch until reviewed and confirmed -- confirmed and combined
+# into this patch alongside the v6.9 model-doc changes below.
+#
+# Root cause, confirmed by reading the actual code (not inferred from the
+# symptom):
+#   1. optimizer._cbc_solver() has NO wall-clock time limit anywhere -- every
+#      CBC solve runs with gapRel=0/gapAbs=0 (exact-optimality-or-bust,
+#      Patch 76's own deliberate choice) and no `timeLimit`, so a single
+#      genuinely hard MILP instance can, in principle, run for a very long
+#      time with nothing capping it.
+#   2. recommend.suggest_transfers() with hit_stance in ("No hits", "Hit if
+#      worth it") and horizon_n > 1 routes entirely to
+#      plan_transfer_schedule(), which loops `for gw in gw_list` (one
+#      iteration per Horizon-slider GW) and, INSIDE each iteration, calls
+#      optimizer.solve_squad() once per k in range(1, k_upper+1) -- a full,
+#      independent MILP solve per transfer count tried that week.
+#      k_upper = max(free_transfers_banked, 5) under "Hit if worth it" (the
+#      stance shown in the manager's screenshot), i.e. up to 5 solves/week.
+#      Horizon=1 -> up to 5 solves total. Horizon=3 (the reported case) ->
+#      up to 5 x 3 = 15 sequential, independent, exact-optimality MILP
+#      solves in one run -- a 3x multiplication of exposure to case #1,
+#      confirmed directly from the loop structure, not assumed.
+#   3. This isn't hypothetical: Patch 78's own story (a real manager-reported
+#      case) already showed a realistic 343-candidate, 14-of-15-retain solve
+#      terminating via CBC's harder-to-reach gap-check exit path rather than
+#      trivially -- i.e. constrained retain-pool solves of the exact shape
+#      this loop performs repeatedly are already confirmed capable of being
+#      non-trivial, not the easy/instant case.
+#
+# Recommended fix (implemented here for testing, NOT yet shipped): add a
+# disclosed, config-driven wall-clock cap per individual CBC solve, so no
+# single solve can run indefinitely -- converting a possible unbounded hang
+# into, worst case, a bounded slow run that still returns. Verified
+# empirically (not assumed) against BOTH pulp versions this app's
+# requirements.txt allows (`pulp[cbc]>=2.7`, no upper bound, so Streamlit
+# Cloud may install either):
+#   - pulp 3.3.2 (PULP_CBC_CMD path): a solve cut off by `timeLimit` before
+#     proving optimality returns status "Not Solved" (prob.status == 0),
+#     NOT "Optimal" and NOT the disclosed "GapLimit" exact-optimum case.
+#   - pulp 4.0.0 (COIN_CMD path): a solve cut off by `timeLimit` returns an
+#     `LpSolveStats` object with `status.name == "TimeLimit"`.
+#   Neither string is "Optimal", so both flow straight through the SAME,
+#   already-shipped, already-tested `if _status != "Optimal": ... return
+#   None` graceful-degradation path every other non-Optimal status (an
+#   infeasible solve, a missing-pulp environment, etc.) already uses
+#   throughout optimizer.py -- no new fallback logic needed, and a timed-out
+#   solve can NEVER be silently served as if it were the genuine, exact best
+#   squad (that would repeat the exact mistake Patch 76/78 already fixed for
+#   GapLimit, just in the other direction). `time_limit_seconds` below is a
+#   disclosed EST extension (no doc-given number), same pattern as
+#   chip_advisor_thresholds above -- picked generously (most real solves in
+#   this app finish in well under a second per direct local benchmarking) so
+#   it essentially never fires on an ordinary solve, and only acts as a
+#   backstop against a genuinely pathological instance.
+# -----------------------------------------------------------------------------
+solver:
+  time_limit_seconds: 12
 
 # -----------------------------------------------------------------------------
 # Step 8c shape-test (Patch 28 / v6.4) — see chip_protocol.wildcard_freehit_

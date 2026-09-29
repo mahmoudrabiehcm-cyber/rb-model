@@ -37,10 +37,13 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 80 (fixed a genuine CSS-comment bug that silently dropped the whole :root palette block "
-                  "in every browser -- root cause of the dead/textual rating gauges; also: pitch max-width, "
-                  "SP-tag caption moved to tooltip, sidebar style-description bordered box, rating-gauge label "
-                  "clarity, and Season Rank chart domain_max no longer force-pinned to 10,000,000)")
+PATCH_VERSION = ("Patch 82 (performance: capped every MILP solve at a configurable 12s time limit — fixes the "
+                  "Horizon=3 \"takes forever\"/Streamlit-Cloud-crash hang — and cached solve_xi_first_squad() "
+                  "(the Free Hit optimal-squad solver), same fix Patch 42 already gave solve_squad(), ~580x "
+                  "faster on repeat calls; model: adopted v6.9's amended Wildcard trigger — retires the old "
+                  "79%-ceiling/15xPts dual-leg check for a single scale-free 6%-gap threshold, and the "
+                  "reachable ceiling now accrues one free transfer per GW across the detection window instead "
+                  "of reusing one static snapshot for every week)")
 
 # Patch 78 (manager feedback: "why under the logo we are seeing this" —
 # screenshot showed the full PATCH_VERSION technical changelog sentence
@@ -1473,26 +1476,30 @@ with st.spinner("Fetching live data and computing xPts..."):
                            "trigger has no gameweek window or squad to evaluate against.")
     else:
         squad_detect = shape_proj[shape_proj["code"].isin(squad_codes)]
-        reachable_detect = data_pipeline.solve_reachable_ceiling(cfg, shape_proj, squad_codes, ft["free_transfers"])
-        wc_trigger = eng.wildcard_trigger_check(
-            squad_detect, reachable_detect["squad"] if reachable_detect else None, detect_gw_list, cfg)
+        # Patch 82 (v6.9 amended §8c trigger) — one reachable squad PER GW in
+        # detect_gw_list, each with that GW's own accrued free-transfer count
+        # (data_pipeline.solve_reachable_ceiling_by_gw()), replacing the old
+        # single shared solve reused across the whole window.
+        reachable_by_gw = data_pipeline.solve_reachable_ceiling_by_gw(
+            cfg, shape_proj, squad_codes, ft["free_transfers"], detect_gw_list)
+        wc_trigger = eng.wildcard_trigger_check(squad_detect, reachable_by_gw, detect_gw_list, cfg)
         if wc_trigger.get("avg_rating_pct") is None:
+            _any_reachable = any(v is not None and v.get("squad") is not None and not v["squad"].empty
+                                  for v in reachable_by_gw.values())
             if squad_detect.empty:
                 wc_diag_reason = (f"squad_detect is empty — none of the {len(squad_codes)} current squad codes "
                                    f"matched this run's projected pool.")
-            elif reachable_detect is None:
+            elif not _any_reachable:
                 _rc_diag = opt.get_diagnostic("reachable_ceiling")
-                wc_diag_reason = (f"the reachable-squad solve (data_pipeline.solve_reachable_ceiling) returned no "
-                                   f"result — {_rc_diag}" if _rc_diag else
-                                   "the reachable-squad solve returned no result, but no specific reason was "
-                                   "recorded — please report this exact combination so it can be added.")
-            elif reachable_detect["squad"].empty:
-                wc_diag_reason = "the reachable-squad solve returned an empty squad."
+                wc_diag_reason = (f"every per-GW reachable-squad solve (data_pipeline."
+                                   f"solve_reachable_ceiling_by_gw) returned no result — {_rc_diag}" if _rc_diag else
+                                   "every per-GW reachable-squad solve returned no result, but no specific reason "
+                                   "was recorded — please report this exact combination so it can be added.")
             elif not detect_gw_list:
                 wc_diag_reason = "detect_gw_list is empty."
             else:
                 wc_diag_reason = ("no GW in detect_gw_list had a valid xpts_gw{n} column present in both the "
-                                   "current squad's and the reachable squad's projections this run.")
+                                   "current squad's and that GW's own reachable-squad projections this run.")
 
     wc_flag = chip_protocol.wildcard_trigger_flag(wc_trigger, rank_history_display) if wc_trigger else None
 
@@ -1675,7 +1682,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     # fpl_engine.free_lineup_fix_check()'s docstring for why this is a
     # downside-risk comparison, not a claimed free upgrade).
     free_fix = eng.free_lineup_fix_check(squad_df, _disrupted_codes, opt_col) if _disrupted_codes else \
-        {"flagged_starting": False}
+        {"entries": []}
 
     transfer_error = None
     try:
@@ -1713,8 +1720,18 @@ with st.spinner("Fetching live data and computing xPts..."):
 # ceiling squad, proj's already-merged wide columns) -- zero new MILP solves,
 # zero new compute_all() calls, so this adds no measurable cost on top of
 # Patch 42-45's performance work.
+# Patch 82 (v6.9 amended §8c trigger, manager uploaded the v6.9 doc and asked
+# what should change) — this cross-check used to compare against a single
+# shared `reachable_detect["squad"]` and the retired 79% ceiling. Both are
+# gone: `reachable_by_gw` (one accrued-FT reachable squad per GW, see
+# data_pipeline.solve_reachable_ceiling_by_gw()) replaces the single squad,
+# and the 6% scale-free gap threshold (wildcard_trigger.gap_pct_threshold)
+# replaces the retired 79%/15pt dual-leg ceiling this note used to quote
+# directly. Same zero-new-solves intent as before: reachable_by_gw was
+# already computed for the trigger itself this run, just reused here per GW
+# instead of once.
 _wc_check_note = None
-if wc_flag and reachable_detect is not None and not squad_df.empty:
+if wc_flag and reachable_by_gw and not squad_df.empty:
     _moves_all = rec.get("moves") or []
     if _moves_all:
         _out_codes = {m["out_code"] for m in _moves_all}
@@ -1725,31 +1742,34 @@ if wc_flag and reachable_detect is not None and not squad_df.empty:
     else:
         _after_plan_squad = squad_df
     _check_gws = [g for g in transfer_gw_list
-                  if f"xpts_gw{g}" in _after_plan_squad.columns and f"xpts_gw{g}" in reachable_detect["squad"].columns]
+                  if f"xpts_gw{g}" in _after_plan_squad.columns and reachable_by_gw.get(g) is not None
+                  and reachable_by_gw[g].get("squad") is not None
+                  and f"xpts_gw{g}" in reachable_by_gw[g]["squad"].columns]
     if _check_gws:
         _ratings = []
         for _g in _check_gws:
             _col = f"xpts_gw{_g}"
             _sv = opt.rating_gw_value(_after_plan_squad, _col, cfg)["total_realized"]
-            _rv = opt.rating_gw_value(reachable_detect["squad"], _col, cfg)["total_realized"]
+            _rv = opt.rating_gw_value(reachable_by_gw[_g]["squad"], _col, cfg)["total_realized"]
             _rp = eng.team_rating_pct(_sv, _rv, "")["rating_pct"]
             if _rp is not None:
                 _ratings.append(_rp)
         if _ratings:
             _avg_after = round(sum(_ratings) / len(_ratings), 1)
-            _wc_ceiling = cfg.get("wildcard_trigger", {}).get("team_rating_pct_ceiling", 79.0)
-            _closes = _avg_after >= _wc_ceiling
+            _wc_gap_threshold = cfg.get("wildcard_trigger", {}).get("gap_pct_threshold", 6.0)
+            _avg_after_gap = round(100.0 - _avg_after, 1)
+            _closes = _avg_after_gap < _wc_gap_threshold
             _plan_desc = (f"the {len(_moves_all)}-move plan" if _moves_all else "no transfer (this run rolls)")
             _wc_check_note = (
                 f"Cross-check against your own recommended transfer plan ({hit_stance}, {_plan_desc}, "
                 f"GW{_check_gws[0]}-GW{_check_gws[-1]}): if followed in full, your squad's average Team "
-                f"Rating % over that span is projected to rise to {_avg_after}% (currently "
+                f"Rating % over that span is projected to rise to {_avg_after}% ({_avg_after_gap}% gap; currently "
                 f"{wc_trigger['avg_rating_pct']}%) — "
-                + (f"already at/above the {_wc_ceiling:.0f}% trigger ceiling, so ordinary transfers may close "
+                + (f"already below the {_wc_gap_threshold:.0f}% trigger gap, so ordinary transfers may close "
                    f"this gap on their own, without needing the Wildcard — worth checking before committing it."
                    if _closes else
-                   f"still below the {_wc_ceiling:.0f}% trigger ceiling even after the plan, so this looks like "
-                   f"a structural gap ordinary transfers alone won't close, not just a few weeks away.")
+                   f"still at/above the {_wc_gap_threshold:.0f}% trigger gap even after the plan, so this looks "
+                   f"like a structural gap ordinary transfers alone won't close, not just a few weeks away.")
                 # Patch 49 (2026-09-15, manager report: "where the points we
                 # discussed" after seeing 100.0% here but 89.5% in the pitch
                 # navigator's own Team Rating % for the same GW/after-plan
@@ -3201,13 +3221,19 @@ with tab_transfers:
     # not "free upgrade" — the model's own projection for him already reflects
     # a probability-weighted expectation (see the function's docstring); this is
     # for when the manager's own read is harsher than that.
-    if free_fix.get("flagged_starting"):
-        st.markdown(f'<div class="tx-preview">⚠️ Worst case if <b>{free_fix["player"]}</b> scores 0 this GW '
+    # Patch 81 (manager report: 3 simultaneously-flagged players this run --
+    # Palmer, Pedro, Isak -- only Isak's worst case showed here; Pedro's was
+    # invisible in this tab even though his own xPts already carried his live
+    # discount). free_lineup_fix_check() now returns one entry PER currently-
+    # starting disrupted player instead of only the single highest-projected
+    # one -- loop and show all of them, not just the first.
+    for _entry in free_fix.get("entries", []):
+        st.markdown(f'<div class="tx-preview">⚠️ Worst case if <b>{_entry["player"]}</b> scores 0 this GW '
                     f'(currently started; his own projection already reflects a live chance-of-playing discount, '
-                    f'this is the harsher case): best XI with <b>{free_fix["worst_case_replacement"] or "—"}</b> '
-                    f'instead — <b>{free_fix["worst_case_total"]:.1f}</b> xPts (vs {free_fix["current_total"]:.1f} '
-                    f'if he plays at his current projection). No transfer needed for this — compare against any '
-                    f'transfer recommended below.</div>', unsafe_allow_html=True)
+                    f'this is the harsher case): best XI with <b>{_entry["worst_case_replacement"] or "—"}</b> '
+                    f'instead — <b>{_entry["worst_case_total"]:.1f}</b> xPts (vs {_entry["current_total"]:.1f} '
+                    f'if he plays at his current projection). No transfer needed for this alone — compare against '
+                    f'any transfer recommended below.</div>', unsafe_allow_html=True)
 
     if transfer_error:
         st.error(f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
