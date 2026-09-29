@@ -37,7 +37,23 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 86 (performance: manager asked whether Patch 85's new Rule #48/#49 chip computation would "
+PATCH_VERSION = ("Patch 87 (manager report against a live Chip Plan screenshot, 2026-09-29): two problems, both "
+                  "confirmed in code before fixing. (1) The Rules #48/49 \"Chip Sequence\" section (Patch 85) was "
+                  "paragraph-and-arrow-chain prose sitting as permanent visible text below the card grid — breaks "
+                  "the Patch 31 \"more visuals, more than words\" rule every other part of this tab follows (rule "
+                  "citations/reasoning in hover tooltips, visible surface kept to a label + one caption line). (2) "
+                  "The four Chip Signals cards (Wildcard/Bench Boost/Triple Captain/Free Hit) and the Chip Sequence "
+                  "section showed genuinely DIFFERENT verdicts for the same chip (e.g. Free Hit card: \"PLAY GW7\"; "
+                  "sequence: \"GW9\") because the cards come from each chip's own ISOLATED scan (evaluate_bench_"
+                  "boost/evaluate_triple_captain/evaluate_free_hit/wildcard_trigger_check) while the sequence comes "
+                  "from the JOINT Rule #49 assignment that accounts for the chips competing for the same weeks — "
+                  "two engines, no reconciliation. Manager chose \"joint sequence drives the cards\": each card's "
+                  "headline GW/verdict now IS the sequenced one whenever >=2 chip types are available and the joint "
+                  "scan ran, with its own isolated-scan number folded into the tooltip as context (see _seq_for()/ "
+                  "_advisor_card() in app.py) instead of standing as a second, contradicting number. The standalone "
+                  "prose section is replaced by a one-line caption pointing back to the cards plus the existing "
+                  "Scope Note expander — same information, no longer duplicated or in conflict. Previously, "
+                  "Patch 86 (performance: manager asked whether Patch 85's new Rule #48/#49 chip computation would "
                   "hurt runtime. Confirmed via code read (grep for @st.cache_data/@st.fragment against the Patch "
                   "85 insertion point) that it was bare top-level script code with NO caching, unlike every other "
                   "comparably expensive computation in this file (_fixture_baselines, _project, _picks) — meaning "
@@ -2480,12 +2496,52 @@ with tab_chips:
     if pill_items:
         st.markdown(f'<div class="flag-row">{"".join(pill_items)}</div>', unsafe_allow_html=True)
 
+    # Patch 87 (manager report against a live screenshot, 2026-09-29): the
+    # Rules #48/49 "Chip Sequence" section (Patch 85) placed a second,
+    # independently-computed verdict for the same four chips right below
+    # this card grid — and the two genuinely disagreed (e.g. Free Hit card
+    # said "PLAY GW7", the sequence said "GW9"), because the cards below
+    # come from each chip's own isolated scan (evaluate_bench_boost() /
+    # evaluate_triple_captain() / evaluate_free_hit() / wildcard_trigger_
+    # check()) while the sequence comes from the JOINT assignment
+    # (chip_portfolio_schedule()) that accounts for how the chips compete
+    # for weeks — confirmed in code, not a display coincidence. Manager
+    # chose "joint sequence drives the cards" as the fix: once >=2 chip
+    # types are available and the joint scan actually ran, each card's
+    # headline GW/verdict below is now the SEQUENCED one, with its own
+    # isolated-scan number folded into the tooltip as context instead of
+    # standing as a second, contradicting number. Also restores the Patch
+    # 31 "more visuals, more than words" rule the standalone prose section
+    # broke — see the compact one-line summary that replaces it below the
+    # card grid.
+    _seq_detail = (chip_portfolio or {}).get("detail", {})
+    _seq_order = {t: i + 1 for i, (t, _) in
+                  enumerate(sorted(_seq_detail.items(), key=lambda kv: kv[1]["gw"]))}
+    _seq_n = len(_seq_detail)
+    _seq_is_active = chip_portfolio is not None
+
+    def _ordinal(n: int) -> str:
+        if 10 <= n % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}"
+
+    def _seq_for(chip_key: str) -> dict | None:
+        if not _seq_is_active:
+            return None
+        info = _seq_detail.get(chip_key)
+        return {"scheduled": info is not None, "gw": info["gw"] if info else None,
+                "value": info["value"] if info else None, "order": _seq_order.get(chip_key),
+                "n_scheduled": _seq_n}
+
     # Chip Signals — Patch 31 visual redesign. Replaces the old paragraph-per-
     # rule Chip Advisor + Chip Strategy expanders with one scannable card grid;
     # every card's rule/step citation and full quantified reasoning lives in its
     # hover tooltip (same hover-hidden pattern as the header's .info-dot),
     # instead of sitting as permanent visible body text.
-    def _advisor_card(label: str, adv: dict | None, used_state: dict | None = None) -> str:
+    def _advisor_card(label: str, adv: dict | None, used_state: dict | None = None,
+                       seq: dict | None = None) -> str:
         _win = (f"GW{chip_adv_window['gw_list'][0]}-GW{chip_adv_window['gw_list'][-1]}" if chip_adv_window
                 else "the scanned window")
         # Patch 54 — this chip has already been played this half, and the near-
@@ -2503,7 +2559,21 @@ with tab_chips:
                         if used_state.get("next_open_gw") is not None else
                         "No further window is available for this chip this season."))
             return _signal_card(label, f"USED GW{used_state['last_used_gw']}", "used", "—", sub, tooltip)
+        # Patch 87 — once >=2 chip types are available, the joint Rule #48/49
+        # sequence (below) is the authoritative "which week" answer for this
+        # chip, not this card's own isolated scan — the two can genuinely
+        # disagree (confirmed live) because the sequence accounts for the
+        # other available chips competing for the same weeks. When the
+        # sequence ran (`seq` is not None), it drives the headline; the
+        # isolated scan's own number is kept, but only as tooltip context.
         if adv is None or adv.get("best_gw") is None:
+            if seq is not None and seq["scheduled"]:
+                return _signal_card(
+                    label, f"PLAY GW{seq['gw']}", "play", f"GW{seq['gw']}",
+                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts",
+                    f"No isolated single-chip scan data for this chip this run, but the joint Rule #48/49 sequence "
+                    f"(which accounts for your other available chips) schedules it GW{seq['gw']} "
+                    f"({seq['value']:+.1f} xPts vs. the best no-chip transfer path).", "is-play")
             return _signal_card(label, "N/A", "used", "—", "no data this run",
                                  f"No candidate gameweek available for this chip across {_win}.")
         # Free Hit's by_gw is {gw: {"current":.., "rebuild":.., "gap":..}} (a
@@ -2516,6 +2586,24 @@ with tab_chips:
             by_gw = {gw: v.get("gap", 0.0) for gw, v in raw_by_gw.items()}
         else:
             by_gw = raw_by_gw
+        if seq is not None:
+            _isolated_gw = adv.get("best_gw")
+            _isolated_note = (
+                f"Scanned on its own, this chip's best candidate is GW{_isolated_gw} — sequencing it against your "
+                f"other available chips (Rule #49) " +
+                (f"confirms GW{_isolated_gw}." if seq["scheduled"] and seq["gw"] == _isolated_gw else
+                 f"moves it to GW{seq['gw']}." if seq["scheduled"] else
+                 "finds no positive slot for it within the current window instead."))
+            if seq["scheduled"]:
+                return _signal_card(
+                    label, f"PLAY GW{seq['gw']}", "play", f"GW{seq['gw']}",
+                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts",
+                    f"{_isolated_note} Value against the best no-chip transfer path: {seq['value']:+.1f} xPts "
+                    f"(Rule #48/#50).", "is-play", by_gw=by_gw, best_gw=seq["gw"])
+            return _signal_card(
+                label, "HOLD", "hold", f"GW{_isolated_gw}", "no slot in the current joint sequence — held",
+                f"{_isolated_note} Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32).",
+                by_gw=by_gw, best_gw=adv.get("best_gw"))
         if adv["verdict"].startswith("play_gw"):
             gw = int(adv["verdict"].split("gw")[1])
             margin = adv.get("margin", adv.get("threshold", 0))
@@ -2533,10 +2621,34 @@ with tab_chips:
             f"threshold {adv['threshold']:.1f} xPts) — Standing Rule #34. A statistical tie, not a reason to rule "
             f"it out later.", by_gw=by_gw, best_gw=adv.get("best_gw"))
 
+    # Patch 87 — Rule #48's window-value scan runs regardless of whether the
+    # need-based trigger above fired (the doc: window value is decided
+    # "beside the need trigger", not instead of it), so the joint sequence
+    # can recommend a Wildcard week even when this card reads HOLD/N/A. That
+    # is surfaced here as an addendum to whichever badge state already
+    # applies — it never overrides the trigger badge itself, since ACTIVE
+    # vs. HOLD is genuinely different information (a mechanical need signal,
+    # Rule #24/#41) from a value-only sequencing recommendation (Rule #48).
+    _wc_seq = _seq_for("wildcard")
+    _wc_seq_sub_suffix, _wc_seq_tooltip_suffix = "", ""
+    if _wc_seq is not None:
+        if _wc_seq["scheduled"]:
+            _wc_seq_sub_suffix = (f" · sequenced GW{_wc_seq['gw']} ({_ordinal(_wc_seq['order'])} of "
+                                   f"{_wc_seq['n_scheduled']}, {_wc_seq['value']:+.1f} xPts)")
+            _wc_seq_tooltip_suffix = (f" Rule #48/#49's joint sequence recommends playing it GW{_wc_seq['gw']} "
+                                       f"({_wc_seq['value']:+.1f} xPts vs. the best no-chip transfer path) as part "
+                                       f"of a {_wc_seq['n_scheduled']}-chip sequence — the exact date remains your "
+                                       f"own call (Rule #32).")
+        else:
+            _wc_seq_sub_suffix = " · no positive slot in the current joint sequence"
+            _wc_seq_tooltip_suffix = (" Rule #48/#49's joint sequence finds no positive slot for the Wildcard "
+                                       "within the current scan window given your other available chips.")
+
     wc_card_tooltip = (wc_flag or (f"Wildcard trigger: not active — {much_more}." if much_more else
                                     "Insufficient data to evaluate the trigger this run."))
     wc_card_tooltip += " Wildcard's trigger condition is mechanical (Standing Rule #24/#41), but the specific play " \
                         "date is never a mechanical verdict — it's a rolling re-test per Standing Rule #32."
+    wc_card_tooltip += _wc_seq_tooltip_suffix
     # Patch 73 (fixes a confirmed-broken Patch 72 check — see the
     # wc_diag_reason note above where it's computed. wc_trigger is NEVER
     # actually None on a "insufficient data" run; it's always a placeholder
@@ -2562,8 +2674,8 @@ with tab_chips:
                               "Recommended transfers alone don't close this — Wildcard still looks warranted")
             _wc_note_cls = "good" if _closes else "warn"
         wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
-                                "structural gap detected — date is your call", wc_card_tooltip, "is-active",
-                                note=_wc_note_html, note_cls=_wc_note_cls)
+                                f"structural gap detected — date is your call{_wc_seq_sub_suffix}", wc_card_tooltip,
+                                "is-active", note=_wc_note_html, note_cls=_wc_note_cls)
     elif not _wc_available_now and _wc_last_used is not None:
         # Patch 55 (manager report, team 1301651: Wildcard played GW4, closing
         # window 1 — window 2 (a real, separate calendar window) isn't reachable
@@ -2582,7 +2694,7 @@ with tab_chips:
         wc_card = _signal_card("Wildcard", f"USED GW{_wc_last_used}", "used", "—", _wc_used_sub, _wc_used_tooltip)
     elif much_more:
         wc_card = _signal_card("Wildcard", "HOLD", "hold", f'{wc_trigger["avg_rating_pct"]}%',
-                                "inside noise band — no trigger", wc_card_tooltip)
+                                f"inside noise band — no trigger{_wc_seq_sub_suffix}", wc_card_tooltip)
     else:
         # Patch 74 (manager, 2026-09-27: after Patch 73, still "same issue"
         # — because the Patch 72/73 diagnostic was only ever added to
@@ -2598,13 +2710,40 @@ with tab_chips:
         # one-line caption every other Chip Signals card already uses for
         # its own explanatory text — instead of only in the tooltip.
         _wc_sub = f"insufficient data this run — {wc_diag_reason}" if wc_diag_reason else "insufficient data this run"
-        wc_card = _signal_card("Wildcard", "N/A", "used", "—", _wc_sub, wc_card_tooltip)
+        wc_card = _signal_card("Wildcard", "N/A", "used", "—", f"{_wc_sub}{_wc_seq_sub_suffix}", wc_card_tooltip)
 
     signal_html = '<div class="signal-grid">' + wc_card + \
-        _advisor_card("Bench Boost", bb_advisor, bb_used_state) + \
-        _advisor_card("Triple Captain", tc_advisor, tc_used_state) + \
-        _advisor_card("Free Hit", fh_advisor, fh_used_state) + '</div>'
+        _advisor_card("Bench Boost", bb_advisor, bb_used_state, _seq_for("bboost")) + \
+        _advisor_card("Triple Captain", tc_advisor, tc_used_state, _seq_for("3xc")) + \
+        _advisor_card("Free Hit", fh_advisor, fh_used_state, _seq_for("freehit")) + '</div>'
     st.markdown(signal_html, unsafe_allow_html=True)
+
+    # Patch 87 (v6.9 Rules #48-49, replacing Patch 85's standalone "Chip
+    # Sequence" section): each card above now already shows its own
+    # sequenced week/order/value when the joint scan ran (see _seq_for()
+    # and _advisor_card()'s seq handling), so the per-chip detail doesn't
+    # need repeating here. This is a one-line pointer back to the cards plus
+    # the combined total, restoring Patch 31's "more visuals, more than
+    # words" rule — the prior version repeated the same four numbers as a
+    # second, separately-worded block of prose.
+    if chip_portfolio is not None and chip_portfolio["assignment"]:
+        st.caption(f"🗓️ {_seq_n}-chip sequence, cards above — combined **{chip_portfolio['total_gain']:+.1f} xPts** "
+                   f"vs. the best transfer path (tie band ±{chip_portfolio['tie_band']:.1f} xPts, "
+                   f"{chip_portfolio['near_tie_count']} sequence(s) inside it) — Rules #48/#49, re-run every "
+                   f"gameweek (Rule #32).")
+        with st.expander("Scope note — what this sequence does and doesn't account for yet"):
+            st.markdown(
+                "- Bench Boost/Triple Captain values switch to the Wildcard's own rebuild squad for any week at or "
+                "after a scheduled Wildcard (Rule #49b) — verified in code, not assumed.\n"
+                "- Free Hit's value is a full rebuild vs. your own best XI that week, and doesn't depend on squad "
+                "path (Rule #49c).\n"
+                "- **Not yet modeled**: preparation transfers drawing on accrued free transfers ahead of a chip "
+                "week (Rule #49d), and a Wildcard build's explicit bench term when a Bench Boost is planned soon "
+                "after (Rule #49f). Tracked as open follow-ups, same disclosure standard as this project's other "
+                "fast-follows.")
+    elif chip_portfolio is not None:
+        st.caption("🗓️ Sequencing your available chips together finds no positive combined assignment this run — "
+                   "holding all for now (Rule #32).")
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now
@@ -2625,38 +2764,6 @@ with tab_chips:
         st.caption("A synthesis of the Wildcard trigger, shape-test, Chip Advisor verdicts and any disruption notes "
                    "above — computes nothing new itself. Wildcard's trigger is mechanical (Patch 30) but never names "
                    "a single play GW — the date stays a rolling re-test (Standing Rule #32).")
-
-    # Patch 85 (v6.9 Rules #48-49) — the joint chip sequence, shown as its
-    # own section per the doc's own output-format addition ("where several
-    # chips are planned, the sequence with its tie band"). Only rendered
-    # when the scan above actually ran (>=2 chip types available this half).
-    st.markdown('<div class="section-h">🗓️ Chip Sequence (Rules #48-49)</div>', unsafe_allow_html=True)
-    if chip_portfolio is None:
-        st.caption("Fewer than 2 chip types are available this half — nothing to sequence yet (Rule #49 is about "
-                   "ordering MULTIPLE chips against each other).")
-    elif not chip_portfolio["assignment"]:
-        st.caption("No positive-value assignment found in this run's scan window — holding every available chip "
-                   "for now (re-run every gameweek per Rule #32).")
-    else:
-        _seq_rows = sorted(chip_portfolio["detail"].items(), key=lambda kv: kv[1]["gw"])
-        _seq_bits = [f"**{chip_protocol.CHIP_LABELS.get(k, k)}** GW{v['gw']} ({v['value']:+.1f} xPts)"
-                     for k, v in _seq_rows]
-        st.markdown(" → ".join(_seq_bits))
-        st.caption(f"Combined gain over the best transfer path: **{chip_portfolio['total_gain']:+.1f} xPts** · "
-                    f"tie band ±{chip_portfolio['tie_band']:.1f} xPts "
-                    f"({chip_portfolio['near_tie_count']} sequence(s) inside it, later commitment preferred) · "
-                    f"Wildcard's own figure is against the best NO-CHIP transfer path (Rule #48/#50), not against "
-                    f"holding your squad — re-run every gameweek, this is a hypothesis (Rule #32).")
-        with st.expander("Scope note — what this sequence does and doesn't account for yet"):
-            st.markdown(
-                "- Bench Boost/Triple Captain values switch to the Wildcard's own rebuild squad for any week at or "
-                "after a scheduled Wildcard (Rule #49b) — verified in code, not assumed.\n"
-                "- Free Hit's value is a full rebuild vs. your own best XI that week, and doesn't depend on squad "
-                "path (Rule #49c).\n"
-                "- **Not yet modeled**: preparation transfers drawing on accrued free transfers ahead of a chip "
-                "week (Rule #49d), and a Wildcard build's explicit bench term when a Bench Boost is planned soon "
-                "after (Rule #49f). Tracked as open follow-ups, same disclosure standard as this project's other "
-                "fast-follows.")
 
 with tab_transfers:
     # ---------------------------------------------------------------------------
