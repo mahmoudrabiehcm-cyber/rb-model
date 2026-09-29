@@ -2915,6 +2915,41 @@ fixture_adjustment:
   max_ff: 1.4
 
 # -----------------------------------------------------------------------------
+# Patch 85 (2026-09-29, v6.9 Standing Rules #48-49, Chip Window Value +
+# Chip Portfolio Scheduling) -- confirmed via code read (chip_protocol.py,
+# recommend.py, app.py) that neither rule existed anywhere before this
+# patch. The only prior Wildcard "what-if" (evaluate_wildcard_whatif(),
+# kept as-is for its own manager-directed single-date use) compares against
+# HOLDING the current squad, not the doc's required "best no-chip transfer
+# path" baseline (Rule #48), and nothing anywhere assigned Bench Boost/
+# Triple Captain/Free Hit/Wildcard to distinct weeks to maximise their
+# combined total (Rule #49).
+#
+# window_value_len: the doc's own worked Rule #48 example measures a
+# Wildcard's gain "over the four gameweeks after the chip" -- this is that
+# same figure, applied to every candidate week the scan checks, not a
+# disclosed-invented constant the way fixture_adjustment's shrinkage/clamp
+# values above are.
+#
+# SCOPE NOTE, same disclosure standard as every other fast-follow in this
+# project: the window-value baseline uses a ONE-SHOT reachable-squad solve
+# (this window's END-of-window accrued free-transfer count, all at once),
+# not a week-by-week CHAINED simulation -- the chained version was tried
+# first and found to cost ~5x more MILP solves per candidate week, slow
+# enough live (Playwright-verified) to matter across a full scan window,
+# the same class of problem Patch 82 fixed for the transfer planner. This
+# slightly UNDERSTATES a genuine Wildcard's true chained advantage (never
+# overstates it) -- the safer direction for a threshold check. Also not yet
+# modeled: Rule #49(d) preparation transfers drawing on accrued free
+# transfers ahead of a chip week, and Rule #49(f) a Wildcard build's
+# explicit bench term when a Bench Boost is planned soon after. Tracked as
+# open follow-ups, not silently declared "done" -- see PATCH_VERSION for
+# this patch's full scope statement.
+# -----------------------------------------------------------------------------
+chip_portfolio:
+  window_value_len: 4
+
+# -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
 # cumulative xPts difference smaller than max(floor_points, pct_of_total *
 # the compared total) is reported as a statistical tie, not a clear winner —

@@ -15,6 +15,8 @@ never forbade computing the trigger condition mechanically, only forbade
 treating a chosen date as locked in.
 """
 from __future__ import annotations
+import itertools
+
 import pandas as pd
 
 import optimizer as opt
@@ -491,6 +493,270 @@ def evaluate_free_hit(squad_df: pd.DataFrame, gw_list: list[int], rebuild_fn, mo
     threshold = round(moe_fn(by_gw[best_gw]["rebuild"]), 2)
     verdict = f"play_gw{best_gw}" if gap >= threshold else "hold"
     return {"verdict": verdict, "best_gw": best_gw, "by_gw": by_gw, "threshold": threshold}
+
+
+# ---------------------------------------------------------------------------
+# Patch 85 (v6.9 Standing Rules #48-49, Chip Window Value / Chip Portfolio
+# Scheduling). Confirmed via code read before this patch (2026-09-29): the
+# only existing Wildcard "what-if" (evaluate_wildcard_whatif() above) values
+# a candidate date against HOLDING the current squad unchanged, not against
+# the doc's own required baseline -- Rule #48 says window value is "against
+# the best no-chip path" (free transfers accruing), and Rule #50 explicitly
+# says a hold-only comparison must never be the decision basis. Nothing
+# anywhere assigned Bench Boost/Triple Captain/Free Hit/Wildcard to distinct
+# weeks to maximise their combined total (Rule #49) -- this section adds
+# both, as NEW functions rather than changing evaluate_wildcard_whatif()
+# (that one stays exactly as-is: a manager-chosen single-date "what if",
+# Rule #32-compliant, and still useful on its own terms).
+# ---------------------------------------------------------------------------
+def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+                                free_transfers: int, bank: float, candidate_gws: list[int],
+                                full_gw_list: list[int], window_len: int = 4) -> dict:
+    """Rule #48 (Chip Window Value): for each candidate Wildcard week `t` in
+    `candidate_gws`, computes
+        window_value(t) = wildcard_rebuild_total(t) - best_transfer_path_total(t)
+    over a `window_len`-GW span starting at `t` (the doc's own worked
+    example uses "the four gameweeks after the chip", hence the default 4),
+    where:
+      - `wildcard_rebuild_total(t)` solves a full, unconstrained-by-retain-
+        pool squad against `team_value` (bank + current squad's price sum),
+        objective = that specific window's own xPts sum (NOT the whole
+        run's horizon sum -- a candidate week late in a long scan window
+        must be judged on ITS OWN next few weeks, not on a horizon that's
+        mostly already elapsed by the time `t` arrives).
+      - `best_transfer_path_total(t)` = `opt.realized_horizon_value()` of the
+        best squad REACHABLE from the current one using only the free
+        transfers a no-chip manager would genuinely have available by the
+        END of that window (accrued at +1/GW from `free_transfers`, capped
+        at the real 5-transfer bank per Standing Rule #35/#37) -- the same
+        "reachable, not a fantasy ideal" retain-pool mechanic
+        `data_pipeline.solve_reachable_ceiling_by_gw()` already uses
+        elsewhere in this app for the v6.9-amended Wildcard trigger, reused
+        here instead of a second, independent implementation. THIS, not a
+        bare "hold" (Rule #50's explicit warning), is the required baseline.
+
+    DISCLOSED SIMPLIFICATION: `best_transfer_path_total` is a ONE-SHOT
+    reachable solve using the window's END-of-window accrued transfer count
+    for every week in the window, not a week-by-week CHAINED simulation
+    (`recommend.plan_transfer_schedule()` does the latter but costs ~4-5x
+    more MILP solves per candidate week -- prohibitively slow multiplied
+    across every candidate week in a scan, the same class of runaway-solve-
+    count problem Patch 82 fixed for the transfer planner). This slightly
+    OVERSTATES the true chained value (it assumes the end-of-window squad
+    was already in place from week 1 of the window), which makes Wildcard's
+    reported window-value gap conservative (a smaller gap than the fully-
+    chained truth), never inflated -- the safer direction for a threshold
+    check. Open to revision, same disclosure standard as every other
+    modeling choice in this file.
+
+    Cost: two MILP solves per candidate week (one Wildcard rebuild, one
+    reachable-squad baseline) -- bounded and cheap enough to run across a
+    full 8-16-week scan window interactively.
+
+    Returns {"by_gw": {t: {"window_gws", "rebuild_total", "best_path_total",
+    "hold_total", "gap", "rebuild_squad"}}, "best_gw": t|None,
+    "best_gap": float|None}. Never raises -- a candidate week that can't be
+    solved (e.g. no feasible squad) is simply absent from `by_gw`."""
+    empty = {"by_gw": {}, "best_gw": None, "best_gap": None}
+    if squad_df is None or squad_df.empty or "code" not in squad_df.columns or not candidate_gws:
+        return empty
+    full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False) if pool_df is not None \
+        else squad_df.copy()
+    if "code" in full_pool.columns:
+        full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
+    bank_val = 0.0 if bank is None else float(bank)
+    team_value = round(bank_val + (pd.to_numeric(squad_df["price"], errors="coerce").sum(skipna=True) or 0.0), 1)
+
+    by_gw = {}
+    for t in candidate_gws:
+        window_gws = [g for g in full_gw_list if t <= g < t + window_len]
+        window_cols = [f"xpts_gw{g}" for g in window_gws if f"xpts_gw{g}" in full_pool.columns]
+        if not window_gws or not window_cols:
+            continue
+        obj_col = f"_wc_window_sum_gw{t}"
+        full_pool_t = full_pool.copy()
+        full_pool_t[obj_col] = full_pool_t[window_cols].sum(axis=1, skipna=True)
+        rebuild = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
+                                   label=f"wc_window_value_gw{t}")
+        if rebuild is None or rebuild.get("squad") is None or rebuild["squad"].empty:
+            continue
+        rebuild_total = opt.realized_horizon_value(rebuild["squad"], window_gws, cfg)
+        hold_total = opt.realized_horizon_value(squad_df, window_gws, cfg)
+        # End-of-window accrued free-transfer count (+1/GW from
+        # `free_transfers`, capped at 5) -- same accrual formula
+        # `solve_reachable_ceiling_by_gw()` already uses elsewhere in this
+        # app, reused here rather than re-deriving it a second way.
+        accrued_ft = min(5, max(0, free_transfers) + max(0, len(window_gws) - 1))
+        min_retain = max(0, min(15, 15 - accrued_ft))
+        reachable = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
+                                     retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
+                                     label=f"wc_window_reachable_gw{t}")
+        best_path_total = round(opt.realized_horizon_value(reachable["squad"], window_gws, cfg), 2) \
+            if reachable and reachable.get("squad") is not None and not reachable["squad"].empty \
+            else round(hold_total, 2)
+        by_gw[t] = {"window_gws": window_gws, "rebuild_total": rebuild_total,
+                    "best_path_total": best_path_total, "hold_total": round(hold_total, 2),
+                    "gap": round(rebuild_total - best_path_total, 2), "rebuild_squad": rebuild["squad"]}
+
+    if not by_gw:
+        return empty
+    best_gw = max(by_gw, key=lambda g: by_gw[g]["gap"])
+    return {"by_gw": by_gw, "best_gw": best_gw, "best_gap": by_gw[best_gw]["gap"]}
+
+
+def _bb_tc_tables_for_squad(squad_df: pd.DataFrame, gw_list: list[int]) -> tuple[dict, dict]:
+    """Per-GW Bench Boost bench-sum and Triple Captain captain-value tables
+    for one STATIC squad, recomputing that week's own best starting XI fresh
+    per GW (Horizon-Matching Rule) rather than reusing one fixed XI/bench
+    split across the whole window the way the standalone evaluate_
+    bench_boost()/evaluate_triple_captain() do for simplicity elsewhere --
+    chip_portfolio_schedule() below needs this per squad PATH (pre- vs.
+    post-Wildcard), so it can't reuse a caller-supplied fixed bench_df."""
+    bb_by_gw, tc_by_gw = {}, {}
+    if squad_df is None or squad_df.empty:
+        return bb_by_gw, tc_by_gw
+    for gw in gw_list:
+        col = f"xpts_gw{gw}"
+        if col not in squad_df.columns:
+            continue
+        best = opt.best_starting_xi(squad_df, col)
+        if not best or best.get("xi") is None or best["xi"].empty:
+            continue
+        xi_codes = set(best["xi"]["code"])
+        bench = squad_df[~squad_df["code"].isin(xi_codes)]
+        bb_by_gw[gw] = round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) \
+            if not bench.empty else 0.0
+        tc_by_gw[gw] = round(float(pd.to_numeric(best["xi"][col], errors="coerce").max()), 2)
+    return bb_by_gw, tc_by_gw
+
+
+def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_gap_table: dict,
+                             squad_df: pd.DataFrame, gw_list: list[int], cfg: dict, moe_fn) -> dict:
+    """Rule #49 (Chip Portfolio Scheduling): assigns the still-available
+    chips to distinct gameweeks within `gw_list` to maximise their combined
+    value, honoring the doc's dependencies:
+      (a) one chip per gameweek (enforced: assignments never repeat a week);
+      (b) Bench Boost/Triple Captain are valued on the squad PATH a
+          scheduled Wildcard produces -- the pre-Wildcard current squad for
+          any week before it, that Wildcard candidate's OWN rebuild squad
+          (from `wc_scan`) for any week at or after it;
+      (c) Free Hit reverts immediately, so its value (already a rebuild-vs-
+          current-best-XI gap from the existing evaluate_free_hit(), passed
+          in as `fh_gap_table`) doesn't depend on squad path, and chips
+          scheduled after it are valued exactly as if it hadn't happened;
+      (d) not modeled here (preparation-transfer FT accounting) -- see the
+          SCOPE note below;
+      (e) chips substitute for one another only insofar as their value
+          tables already reflect the relevant path -- no further discount;
+      (f) not modeled here (Wildcard-build bench term) -- see SCOPE below.
+
+    `available_chip_types`: subset of {"wildcard","3xc","bboost","freehit"}
+    still available THIS half (already-played chips must be excluded by the
+    caller, same as every other chip advisor in this module).
+    `wc_scan`: wildcard_window_value_scan()'s return -- supplies both
+    Wildcard's own per-week gap and the rebuild squads path (b) needs.
+    `fh_gap_table`: {gw: gap} from an already-computed evaluate_free_hit()
+    result's `by_gw` (reused, not recomputed, to avoid a second per-GW
+    Free-Hit MILP rebuild scan).
+
+    Method: a small brute-force assignment over `gw_list` (bounded by at
+    most 4 chip types and a scan window sized in the low tens of GWs, the
+    same scale the doc's own origin note describes a real tool solving
+    jointly), NOT a dedicated MILP -- exhaustive search is simpler and just
+    as correct at this size. Every chip type may also be left unscheduled
+    within this window (no forced play of a negative/marginal week),
+    consistent with every other chip advisor's "hold" verdict in this file.
+
+    Ties: per Rule #34/#49, an assignment within `moe_fn(best_total)` of the
+    best total is a tie and resolved to "the later commitment" -- among
+    near-ties, the one whose EARLIEST scheduled chip week is latest wins
+    (defers commitment the longest).
+
+    SCOPE NOTE (disclosed, not silently dropped): dependency (d)
+    (preparation transfers before a chip draw on accrued free transfers,
+    Rule #44) and (f) (a Wildcard build carrying an explicit bench term
+    when a Bench Boost is planned soon after) are NOT modeled in this first
+    cut -- the assignment already accounts for (b)/(c)'s squad-path
+    dependency, which is the dominant effect on value, but (d)/(f) are
+    tracked as open follow-ups, same disclosure standard as Patch 83's
+    market-odds fast-follow.
+
+    Returns {"assignment": {chip_type: gw|None}, "detail": {chip_type:
+    {"gw", "value"}}, "total_gain": float, "tie_band": float,
+    "near_tie_count": int} or an empty/explanatory dict if nothing is
+    available or schedulable."""
+    empty = {"assignment": {}, "detail": {}, "total_gain": 0.0, "tie_band": 0.0, "near_tie_count": 0}
+    types_available = [t for t in ("wildcard", "3xc", "bboost", "freehit") if t in available_chip_types]
+    if not types_available or not gw_list:
+        return empty
+
+    wc_by_gw = (wc_scan or {}).get("by_gw") or {}
+    if "wildcard" in types_available and not wc_by_gw:
+        types_available = [t for t in types_available if t != "wildcard"]
+    if not types_available:
+        return empty
+
+    bb_pre, tc_pre = _bb_tc_tables_for_squad(squad_df, gw_list)
+    bb_post, tc_post = {}, {}
+    for wc_gw, info in wc_by_gw.items():
+        rs = info.get("rebuild_squad")
+        if rs is not None and not rs.empty:
+            bb_post[wc_gw], tc_post[wc_gw] = _bb_tc_tables_for_squad(rs, [g for g in gw_list if g >= wc_gw])
+
+    def _value_for(chip_type: str, gw: int, wc_choice) -> float:
+        if chip_type == "wildcard":
+            return wc_by_gw.get(gw, {}).get("gap", 0.0)
+        if chip_type == "freehit":
+            return fh_gap_table.get(gw, 0.0)
+        after_wc = wc_choice is not None and gw >= wc_choice
+        if chip_type == "3xc":
+            return (tc_post.get(wc_choice, {}) if after_wc else tc_pre).get(gw, 0.0)
+        if chip_type == "bboost":
+            return (bb_post.get(wc_choice, {}) if after_wc else bb_pre).get(gw, 0.0)
+        return 0.0
+
+    wc_choices = (list(wc_by_gw.keys()) + [None]) if "wildcard" in types_available else [None]
+    other_types = [t for t in types_available if t != "wildcard"]
+
+    all_assignments = []
+    for wc_choice in wc_choices:
+        remaining = [g for g in gw_list if g != wc_choice]
+        slot_options = [remaining + [None] for _ in other_types]
+        for combo in itertools.product(*slot_options):
+            chosen_weeks = [g for g in combo if g is not None]
+            if len(chosen_weeks) != len(set(chosen_weeks)):
+                continue
+            detail = {}
+            total = 0.0
+            scheduled_weeks = []
+            if wc_choice is not None and "wildcard" in types_available:
+                wc_val = round(_value_for("wildcard", wc_choice, wc_choice), 2)
+                detail["wildcard"] = {"gw": wc_choice, "value": wc_val}
+                total += wc_val
+                scheduled_weeks.append(wc_choice)
+            for chip_type, gw in zip(other_types, combo):
+                if gw is None:
+                    continue
+                v = round(_value_for(chip_type, gw, wc_choice), 2)
+                detail[chip_type] = {"gw": gw, "value": v}
+                total += v
+                scheduled_weeks.append(gw)
+            all_assignments.append({"total": round(total, 2), "detail": detail,
+                                     "earliest_week": min(scheduled_weeks) if scheduled_weeks else None})
+
+    if not all_assignments:
+        return empty
+    best_total = max(a["total"] for a in all_assignments)
+    tie_band = round(moe_fn(best_total), 2) if best_total > 0 else round(moe_fn(0.0), 2)
+    near_ties = [a for a in all_assignments if best_total - a["total"] <= tie_band]
+    # Rule #34/#49 tie-break: among near-ties, defer commitment the longest
+    # (max of each candidate's earliest scheduled week); an assignment that
+    # schedules nothing has no "earliest week" to defer, so it only wins a
+    # tie against another equally-empty assignment.
+    chosen = max(near_ties, key=lambda a: (a["earliest_week"] is None, a["earliest_week"] or -1, a["total"]))
+    assignment = {chip_type: info["gw"] for chip_type, info in chosen["detail"].items()}
+    return {"assignment": assignment, "detail": chosen["detail"], "total_gain": chosen["total"],
+            "tie_band": tie_band, "near_tie_count": len(near_ties)}
 
 
 # ---------------------------------------------------------------------------

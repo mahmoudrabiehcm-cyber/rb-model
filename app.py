@@ -37,7 +37,31 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 84 (manager screenshot: paged the pitch navigator to GW7 with \"After recommended "
+PATCH_VERSION = ("Patch 86 (performance: manager asked whether Patch 85's new Rule #48/#49 chip computation would "
+                  "hurt runtime. Confirmed via code read (grep for @st.cache_data/@st.fragment against the Patch "
+                  "85 insertion point) that it was bare top-level script code with NO caching, unlike every other "
+                  "comparably expensive computation in this file (_fixture_baselines, _project, _picks) — meaning "
+                  "its ~16 MILP solves (Rule #48's 2-per-candidate-week scan) plus Rule #49's brute-force search "
+                  "re-ran in full on EVERY Streamlit rerun, including ones triggered by unrelated widgets (Style "
+                  "toggle, materiality slider) that never change the squad/transfers/bank/chip-availability it "
+                  "depends on. Fixed by extracting the computation into a new _chip_portfolio_calc(), wrapped in "
+                  "the same @st.cache_data(ttl=900, show_spinner=False) pattern already used elsewhere in this "
+                  "file — a rerun with unchanged inputs is now a cache hit instead of a re-solve; zero change to "
+                  "computed values, confirmed by the existing Patch 85 unit tests passing unmodified. Previously, "
+                  "Patch 85 (model: v6.9 Standing Rules #48-49, Chip Window Value + Chip Portfolio Scheduling — "
+                  "confirmed via code read that neither existed: the only prior Wildcard what-if compared against "
+                  "holding the squad, not the required best-no-chip-transfer-path baseline, and nothing sequenced "
+                  "BB/TC/FH/Wildcard onto distinct weeks to maximise their combined total. Adds chip_protocol."
+                  "wildcard_window_value_scan() (Rule #48: per-candidate-week Wildcard rebuild vs. a free-transfer-"
+                  "accruing reachable baseline, two MILP solves per week, not the ~5x-more-expensive fully-chained "
+                  "simulation first tried and found too slow live) and chip_portfolio_schedule() (Rule #49: a small "
+                  "brute-force assignment placing available chips on distinct weeks, switching Bench Boost/Triple "
+                  "Captain valuation onto the Wildcard's own rebuild squad for any week at or after it, tie-band "
+                  "ties resolved to the later commitment); both are new, disclosed-scope functions — Rule #49(d) "
+                  "preparation-transfer FT accounting and #49(f) a Wildcard build's explicit bench term are NOT yet "
+                  "modeled, tracked as open follow-ups. Shown as a new \"Chip Sequence\" section on the Chip Plan "
+                  "tab whenever >=2 chip types remain available this half. Previously, Patch 84: manager "
+                  "screenshot: paged the pitch navigator to GW7 with \"After recommended "
                   "transfer (this week's move)\" selected — the pitch still showed a player (Gomez) the Transfer "
                   "Recommendations panel's own chained pacing plan said should already be gone by GW7 (Gomez -> "
                   "Groß). Root cause, confirmed by reading _render_pitch_navigator(): the toggle only ever "
@@ -882,6 +906,40 @@ def _picks(entry_id: int, gw: int):
     return fpl_data.fetch_entry_picks_official(entry_id, gw)
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, bank: float,
+                          portfolio_gw_list: tuple, window_len: int, available_chip_types: tuple,
+                          fh_gap_table: dict):
+    """Patch 86 (performance fix) -- Patch 85's Rule #48/#49 computation
+    (wildcard_window_value_scan: 2 opt.solve_squad() MILP solves per
+    candidate GW, times up to ~8 candidate GWs by default; plus
+    chip_portfolio_schedule's brute-force itertools.product search) was
+    confirmed via code read (2026-09-29, grep for `@st.cache_data` /
+    `@st.fragment` against the Patch 85 insertion point) to be bare
+    top-level script code with NO caching, unlike every other comparably
+    expensive computation in this file (_fixture_baselines, _project,
+    _picks above). That meant it re-ran in full on every single Streamlit
+    script rerun -- including reruns triggered by completely unrelated
+    widgets (Style toggle, materiality-bar slider, etc.) that never change
+    the squad, transfers, bank, or chip availability this computation
+    actually depends on. Wrapping it in the same @st.cache_data(ttl=900,
+    show_spinner=False) pattern already used above makes a rerun with
+    unchanged inputs a cache hit (near-instant) instead of a full re-solve,
+    with zero change to the computed values themselves -- confirmed by the
+    existing Patch 85 unit tests (test_patch85_chip_window_and_portfolio.py)
+    still passing unmodified, since this function is a pure pass-through to
+    the same chip_protocol calls with the same arguments."""
+    available_chip_types = set(available_chip_types)
+    wc_window_scan = (chip_protocol.wildcard_window_value_scan(
+        squad_df_adv, pool_df_adv, cfg, free_transfers, bank,
+        list(portfolio_gw_list), list(portfolio_gw_list), window_len=window_len)
+        if "wildcard" in available_chip_types else {"by_gw": {}, "best_gw": None, "best_gap": None})
+    chip_portfolio = chip_protocol.chip_portfolio_schedule(
+        available_chip_types, wc_window_scan, fh_gap_table, squad_df_adv,
+        list(portfolio_gw_list), cfg, lambda total: eng.margin_of_error_threshold(total, cfg))
+    return wc_window_scan, chip_portfolio
+
+
 # ---------------------------------------------------------------------------
 # Gate screen — team ID first, everything else unlocks after.
 # ---------------------------------------------------------------------------
@@ -1688,6 +1746,33 @@ with st.spinner("Fetching live data and computing xPts..."):
                 _chip_moe_fn("free_hit"))
         elif _fh_last_used is not None:
             fh_used_state = {"last_used_gw": _fh_last_used, "next_open_gw": _fh_next}
+
+    # Patch 85 (v6.9 Rules #48-49: Chip Window Value + Chip Portfolio
+    # Scheduling). Confirmed via code read before this patch (2026-09-29):
+    # neither rule existed anywhere — the only Wildcard "what-if"
+    # (evaluate_wildcard_whatif, used below for the manager-chosen-date
+    # scenario tool) compares against HOLDING the squad, not the doc's
+    # required "best transfer path" baseline, and nothing assigned BB/TC/FH/
+    # Wildcard to distinct weeks to maximise their combined total. Runs only
+    # when at least 2 chip types are still available this half — Rule #49 is
+    # specifically about SEQUENCING multiple chips against each other, so a
+    # single remaining chip has nothing to sequence.
+    pool_df_adv = chip_adv_proj[~chip_adv_proj["code"].isin(squad_codes)] if not squad_df.empty else pool_df
+    _available_chip_types = {k for k, label in chip_protocol.CHIP_LABELS.items()
+                              if any(name.startswith(label) for name in available_chip_names)}
+    wc_window_scan = None
+    chip_portfolio = None
+    if len(_available_chip_types) >= 2 and not squad_df.empty and chip_adv_window is not None:
+        _portfolio_gw_list = chip_adv_window["gw_list"]
+        _wc_window_len = cfg.get("chip_portfolio", {}).get("window_value_len", 4)
+        _fh_gap_table = {gw: v["gap"] for gw, v in (fh_advisor or {}).get("by_gw", {}).items()}
+        # Patch 86: cached (see _chip_portfolio_calc above) -- was bare
+        # top-level code, re-solving on every rerun regardless of whether
+        # any of these inputs actually changed.
+        wc_window_scan, chip_portfolio = _chip_portfolio_calc(
+            squad_df_adv, pool_df_adv, cfg, ft["free_transfers"], bank,
+            tuple(_portfolio_gw_list), _wc_window_len, tuple(sorted(_available_chip_types)),
+            _fh_gap_table)
 
     # Chip-aware transfer advisory: only from signals already computed
     # mechanically above — never a guess at the manager's intent. Wildcard:
@@ -2540,6 +2625,38 @@ with tab_chips:
         st.caption("A synthesis of the Wildcard trigger, shape-test, Chip Advisor verdicts and any disruption notes "
                    "above — computes nothing new itself. Wildcard's trigger is mechanical (Patch 30) but never names "
                    "a single play GW — the date stays a rolling re-test (Standing Rule #32).")
+
+    # Patch 85 (v6.9 Rules #48-49) — the joint chip sequence, shown as its
+    # own section per the doc's own output-format addition ("where several
+    # chips are planned, the sequence with its tie band"). Only rendered
+    # when the scan above actually ran (>=2 chip types available this half).
+    st.markdown('<div class="section-h">🗓️ Chip Sequence (Rules #48-49)</div>', unsafe_allow_html=True)
+    if chip_portfolio is None:
+        st.caption("Fewer than 2 chip types are available this half — nothing to sequence yet (Rule #49 is about "
+                   "ordering MULTIPLE chips against each other).")
+    elif not chip_portfolio["assignment"]:
+        st.caption("No positive-value assignment found in this run's scan window — holding every available chip "
+                   "for now (re-run every gameweek per Rule #32).")
+    else:
+        _seq_rows = sorted(chip_portfolio["detail"].items(), key=lambda kv: kv[1]["gw"])
+        _seq_bits = [f"**{chip_protocol.CHIP_LABELS.get(k, k)}** GW{v['gw']} ({v['value']:+.1f} xPts)"
+                     for k, v in _seq_rows]
+        st.markdown(" → ".join(_seq_bits))
+        st.caption(f"Combined gain over the best transfer path: **{chip_portfolio['total_gain']:+.1f} xPts** · "
+                    f"tie band ±{chip_portfolio['tie_band']:.1f} xPts "
+                    f"({chip_portfolio['near_tie_count']} sequence(s) inside it, later commitment preferred) · "
+                    f"Wildcard's own figure is against the best NO-CHIP transfer path (Rule #48/#50), not against "
+                    f"holding your squad — re-run every gameweek, this is a hypothesis (Rule #32).")
+        with st.expander("Scope note — what this sequence does and doesn't account for yet"):
+            st.markdown(
+                "- Bench Boost/Triple Captain values switch to the Wildcard's own rebuild squad for any week at or "
+                "after a scheduled Wildcard (Rule #49b) — verified in code, not assumed.\n"
+                "- Free Hit's value is a full rebuild vs. your own best XI that week, and doesn't depend on squad "
+                "path (Rule #49c).\n"
+                "- **Not yet modeled**: preparation transfers drawing on accrued free transfers ahead of a chip "
+                "week (Rule #49d), and a Wildcard build's explicit bench term when a Bench Boost is planned soon "
+                "after (Rule #49f). Tracked as open follow-ups, same disclosure standard as this project's other "
+                "fast-follows.")
 
 with tab_transfers:
     # ---------------------------------------------------------------------------
