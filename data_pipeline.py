@@ -14,6 +14,111 @@ import optimizer as opt
 import setpiece
 
 
+# ---------------------------------------------------------------------------
+# Patch 83 (v6.9 Standing Rule #46, Fixture-Adjusted Attack Rule) -- team-
+# strength-tier fixture factor. Manager-confirmed scope (2026-09-29): build
+# this on real match-level team xG (fpl_data.fetch_team_match_xg(), verified
+# live before writing this), not the static official strength_attack/
+# strength_defence ratings the CS% calc already uses -- those are fixed
+# preseason numbers that never update in-season, so they can't capture "this
+# opponent's defence has actually been shipping goals all year" the way real
+# current-season match xG can. Market odds (the doc's higher tier when
+# available) are an explicit fast-follow, not built here -- this session
+# verified oddschecker's odds pages are genuinely live, but could not verify
+# a plain-requests scrape (the same method every other source in this file
+# uses) actually works from a production deploy, and the doc itself flags
+# automated-fetch terms of use as unverified for that source. So every GW
+# here runs at the SAME team-strength tier (never "market" for GW+1) --
+# a disclosed scope decision, not the doc's literal GW+1-market/GW+2+-
+# team-strength split, since there is no market leg wired in yet.
+# ---------------------------------------------------------------------------
+def compute_team_fixture_baselines(cfg: dict, team_match_xg: pd.DataFrame,
+                                    teams_df: pd.DataFrame) -> dict:
+    """Builds, per team `id` (not `code` -- see fetch_team_match_xg's
+    docstring on why a code->id map is needed), a shrunk-to-league-average
+    "how many xG does this team really create / concede per match this
+    season" baseline pair, from real finished-match data.
+
+    Shrinkage: baseline = (n*team_mean + k*league_avg) / (n+k), k = cfg's
+    fixture_adjustment.xg_shrinkage_matches (default 6 -- a disclosed,
+    open-to-revision modeling choice, not a number the doc itself specifies;
+    it exists so 1-2 early-season matches don't produce a wild baseline,
+    matching the doc's own "early-season baselines shrink to the league
+    average" default). A team with zero finished matches this season (n=0)
+    collapses fully to the league average -- exactly league-average, no
+    adjustment, never a crash or a missing entry.
+
+    Returns {"by_id": {team_id: {"xg_for": v, "xg_against": v, "n": n}},
+    "league_avg_xg": v, "n_teams_with_data": k}. `league_avg_xg` is the
+    single pooled mean of every recorded xg_for value (== the pooled mean of
+    xg_against too, by construction, since every match's xg_for on one side
+    is some other team's xg_against) -- used both as the shrinkage prior and
+    as Rule #46's own-baseline-relative denominator for the opponent side."""
+    fa_cfg = cfg.get("fixture_adjustment", {})
+    k = fa_cfg.get("xg_shrinkage_matches", 6)
+    empty = {"by_id": {}, "league_avg_xg": None, "n_teams_with_data": 0}
+    if team_match_xg is None or team_match_xg.empty or teams_df is None or teams_df.empty:
+        return empty
+    if "code" not in teams_df.columns or "id" not in teams_df.columns:
+        return empty
+
+    league_avg = float(team_match_xg["xg_for"].mean())
+    if not np.isfinite(league_avg) or league_avg <= 0:
+        return empty
+
+    grouped = team_match_xg.groupby("team_code").agg(
+        xg_for_mean=("xg_for", "mean"), xg_against_mean=("xg_against", "mean"),
+        n=("xg_for", "count"))
+
+    code_to_id = teams_df.drop_duplicates(subset=["code"], keep="first").set_index("code")["id"]
+
+    by_id = {}
+    for code, row in grouped.iterrows():
+        if code not in code_to_id.index:
+            continue  # unmapped code (e.g. a club the current teams table doesn't carry) -- skip, not crash
+        team_id = code_to_id.loc[code]
+        n = float(row["n"])
+        shrunk_for = (n * row["xg_for_mean"] + k * league_avg) / (n + k)
+        shrunk_against = (n * row["xg_against_mean"] + k * league_avg) / (n + k)
+        by_id[team_id] = {"xg_for": round(float(shrunk_for), 4),
+                           "xg_against": round(float(shrunk_against), 4), "n": int(n)}
+    return {"by_id": by_id, "league_avg_xg": round(league_avg, 4), "n_teams_with_data": len(by_id)}
+
+
+def fixture_attack_factor_vec(opp_id: pd.Series, baselines: dict, cfg: dict) -> pd.Series:
+    """Rule #46's FF, vectorized: FF = (opponent's shrunk xG-against baseline
+    / league average xG) ^ strength, clamped to [min_ff, max_ff] (a disclosed
+    safety clamp of this implementation, not a number the doc itself states
+    -- guards against an extreme still-early-season baseline before
+    shrinkage has fully kicked in; mirrors the existing clamp pattern
+    fpl_engine.cs_pct_poisson_vec() already uses for the same reason).
+
+    Note: this ratio depends ONLY on the opponent's own defensive baseline
+    relative to the league average -- the player's own team's baseline
+    algebraically cancels out of Rule #46(a)'s "own baseline" ratio under
+    this multiplicative construction (fixture xG for team = team's own
+    baseline x opponent's relative weakness), which is expected: a fixture
+    adjustment is inherently about how this OPPONENT compares to an average
+    opponent, not about the player's own team's absolute output level.
+
+    Returns 1.0 (no adjustment) for any opponent with no baseline entry
+    (unmapped/blank fixture) -- never NaN, never a crash."""
+    fa_cfg = cfg.get("fixture_adjustment", {})
+    if not fa_cfg.get("enabled", True) or not baselines.get("by_id"):
+        return pd.Series(1.0, index=opp_id.index)
+    strength = fa_cfg.get("strength", 0.6)
+    min_ff = fa_cfg.get("min_ff", 0.7)
+    max_ff = fa_cfg.get("max_ff", 1.4)
+    league_avg = baselines["league_avg_xg"]
+    by_id = baselines["by_id"]
+
+    opp_against = opp_id.map(lambda i: by_id.get(i, {}).get("xg_against"))
+    opp_against = pd.to_numeric(opp_against, errors="coerce")
+    ratio = (opp_against / league_avg).where(opp_against.notna(), 1.0)
+    ff = ratio.clip(lower=1e-6) ** strength
+    return ff.clip(lower=min_ff, upper=max_ff).fillna(1.0)
+
+
 def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFrame,
                         overrides: pd.DataFrame) -> pd.DataFrame:
     df = snap.players.copy()
@@ -193,9 +298,18 @@ def _fdr_tier_from_strength_vec(opp_att: pd.Series) -> pd.Series:
 
 
 def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
-                 gw_list: list[int]) -> pd.DataFrame:
+                 gw_list: list[int], fixture_baselines: dict | None = None) -> pd.DataFrame:
     """Same Core Formula pipeline as the CLI tool, plus Step 3c's set-piece
     multiplier applied to npxG_blend right after Step 3's decay blend.
+
+    `fixture_baselines` (Patch 83, v6.9 Standing Rule #46): the dict
+    compute_team_fixture_baselines() returns, or None/empty to skip fixture
+    adjustment entirely (e.g. a caller with no olbauday data this run, or an
+    older test that predates this parameter -- default is None so every
+    existing call site keeps working unmodified). When present, goal/assist
+    terms (npxG/xA only, per Rule #46(d) -- clean sheets/bonus/DEFCON/cards
+    untouched) are scaled by fixture_attack_factor_vec() for MID/DEF/FWD
+    (Rule #46(d) explicitly lists these three, not GK).
 
     Patch 50 -- rewritten as a vectorized pandas/numpy pipeline (was a plain
     Python for-player / for-gw / for-fixture nested loop doing scalar
@@ -372,6 +486,19 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     npxg_adj, _ = setpiece.apply_to_npxg_vec(npxg_raw, exploded, exploded["event"], cfg)
     xa_blend = blended("xa90_hist", "xa90_cur", "xa")
     dc_blend = blended("dc90_hist", "dc90_cur", "dc")
+
+    # Patch 83 (v6.9 Standing Rule #46, team-strength tier) -- fixture-adjust
+    # goal/assist terms only (clean sheets/bonus/DEFCON/cards untouched, per
+    # Rule #46(d)), for MID/DEF/FWD (not GK, same rule). `opp` here is
+    # already the fixture opponent's FPL team `id` (fixtures_long above is
+    # built straight from team_h/team_a), matching what
+    # compute_team_fixture_baselines() keys its "by_id" dict on.
+    if fixture_baselines and fixture_baselines.get("by_id"):
+        ff = fixture_attack_factor_vec(exploded["opp"], fixture_baselines, cfg)
+        applies_ff = exploded["position"].isin(["MID", "DEF", "FWD"]) & ~is_blank
+        ff = ff.where(applies_ff, 1.0)
+        npxg_adj = npxg_adj * ff
+        xa_blend = xa_blend * ff
 
     p_defcon = eng.defcon_probability_vec(dc_blend, exploded["position"], cfg)
     defcon_add = np.where(exploded["_defcon_applies"], p_defcon * 2.0, 0.0)

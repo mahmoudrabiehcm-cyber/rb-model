@@ -37,13 +37,35 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 82 (performance: capped every MILP solve at a configurable 12s time limit — fixes the "
-                  "Horizon=3 \"takes forever\"/Streamlit-Cloud-crash hang — and cached solve_xi_first_squad() "
-                  "(the Free Hit optimal-squad solver), same fix Patch 42 already gave solve_squad(), ~580x "
-                  "faster on repeat calls; model: adopted v6.9's amended Wildcard trigger — retires the old "
-                  "79%-ceiling/15xPts dual-leg check for a single scale-free 6%-gap threshold, and the "
-                  "reachable ceiling now accrues one free transfer per GW across the detection window instead "
-                  "of reusing one static snapshot for every week)")
+PATCH_VERSION = ("Patch 84 (manager screenshot: paged the pitch navigator to GW7 with \"After recommended "
+                  "transfer (this week's move)\" selected — the pitch still showed a player (Gomez) the Transfer "
+                  "Recommendations panel's own chained pacing plan said should already be gone by GW7 (Gomez -> "
+                  "Groß). Root cause, confirmed by reading _render_pitch_navigator(): the toggle only ever "
+                  "reconstructed weekly_plan[0]'s move (this week's move at planning_gw) into one static squad, "
+                  "reused unchanged for every later GW the stepper paged to — only the xPts projection column "
+                  "changed, never the squad. Fixed: the toggle (relabeled \"After recommended transfers (chained "
+                  "plan)\") now reconstructs a per-GW CUMULATIVE squad, replaying weekly_plan's moves in order, so "
+                  "paging to GW7 stacks GW7's move on top of GW6's, and a no-move \"Roll\" week correctly carries "
+                  "the prior week's squad forward unchanged. Also fixed, found while Playwright-verifying the "
+                  "above (not manager-reported): the ▶ stepper button's index update ran AFTER the GW counter "
+                  "label rendered, so a ▶ click showed the right GW's xPts/Rating/squad below but the counter "
+                  "text lagged one click behind (◀ was unaffected — its handler already ran before the counter). "
+                  "Previously, Patch 83: model: v6.9 Standing Rule #46 Fixture-Adjusted Attack, team-strength tier — "
+                  "npxG/xA are now scaled by a fixed-strength (s=0.6) opponent-defence factor built from real "
+                  "per-GW team-match xG data (olbauday/FPL-Core-Insights), shrunk toward the league average for "
+                  "small samples and clamped to [0.7, 1.4]; clean sheets/bonus/DEFCON/cards untouched, GK "
+                  "excluded, per Rule #46(d); Rule #47 clean-sheet tier reconfirmed compliant via its existing "
+                  "team-strength fallback and now explicitly disclosed. SCOPE: team-strength tier only this "
+                  "patch — the doc's market-odds leg and GW-distance decay are an explicit, tracked fast-follow, "
+                  "not yet built; every run now shows a fixture-adjustment disclosure line on the Pitch tab "
+                  "naming the tier, strength, and real-data coverage. Previously, Patch 82: performance: capped "
+                  "every MILP solve at a configurable 12s time limit — fixes the Horizon=3 \"takes forever\"/"
+                  "Streamlit-Cloud-crash hang — and cached solve_xi_first_squad() (the Free Hit optimal-squad "
+                  "solver), same fix Patch 42 already gave solve_squad(), ~580x faster on repeat calls; model: "
+                  "adopted v6.9's amended Wildcard trigger — retires the old 79%-ceiling/15xPts dual-leg check "
+                  "for a single scale-free 6%-gap threshold, and the reachable ceiling now accrues one free "
+                  "transfer per GW across the detection window instead of reusing one static snapshot for "
+                  "every week)")
 
 # Patch 78 (manager feedback: "why under the logo we are seeing this" —
 # screenshot showed the full PATCH_VERSION technical changelog sentence
@@ -819,10 +841,39 @@ def _load_data(entry_id: int, season: str, prev_season: str, recency_window: int
     return snap, hist, entry, history
 
 
+def _olbauday_season_slug(season: str) -> str:
+    """Converts vaastav-style "2026-27" (cfg["meta"]["season"]) to
+    olbauday's own "2026-2027" folder-naming convention -- confirmed live
+    (data/2026-2027/By Gameweek/GW1/matches.csv fetched successfully;
+    data/2026-27/... 404s) before writing fpl_data.fetch_team_match_xg()."""
+    a, b = season.split("-")
+    return f"{a}-{a[:2]}{b}"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fixture_baselines(season: str, current_gw: int, teams_df, cfg):
+    """Patch 83 (v6.9 Rule #46) -- one fetch of olbauday's real match-level
+    team xG per finished GW this season, cached separately from `_project`
+    (own network cost, own cache lifetime -- match results only change once
+    a gameweek finishes, so a longer 30-minute TTL than the 15-minute live-
+    data cache is fine and cuts needless re-fetching on every rerun).
+    Returns (baselines_dict, warning_str_or_None) -- see
+    fpl_data.fetch_team_match_xg() and data_pipeline.
+    compute_team_fixture_baselines() for what each half means. Never raises:
+    an empty/failed fetch returns an empty baselines dict, and
+    fixture_attack_factor_vec() treats that as "no adjustment this run"
+    (FF=1.0 everywhere), not a crash."""
+    finished_gws = list(range(1, max(1, current_gw) + 1))
+    slug = _olbauday_season_slug(season)
+    match_xg, warn = fpl_data.fetch_team_match_xg(slug, finished_gws)
+    baselines = data_pipeline.compute_team_fixture_baselines(cfg, match_xg, teams_df)
+    return baselines, warn
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def _project(_snap, hist_df, overrides_df, cfg, gw_list):
+def _project(_snap, hist_df, overrides_df, cfg, gw_list, _fixture_baselines_dict=None):
     players = data_pipeline.build_player_table(cfg, _snap, hist_df, overrides_df)
-    proj = data_pipeline.compute_all(cfg, _snap, players, gw_list)
+    proj = data_pipeline.compute_all(cfg, _snap, players, gw_list, fixture_baselines=_fixture_baselines_dict)
     return proj
 
 
@@ -998,6 +1049,23 @@ with st.spinner("Fetching live data and computing xPts..."):
                   "most likely a transient outage or a network policy on wherever this app is currently running. Try again shortly.")
         st.stop()
 
+    # Patch 83 (v6.9 Standing Rule #46) -- one fixture-baselines fetch/compute
+    # per run, reused by every _project() call below (Rule #22 Systematic
+    # Application: the same correction must apply everywhere xPts gets
+    # computed this run, not just the first call). Never blocks the page: an
+    # empty/failed fetch degrades to fixture_baselines={"by_id": {}, ...}
+    # and every _project() call below just runs with FF=1.0 everywhere.
+    fixture_baselines, _fb_warn = _fixture_baselines(cfg["meta"]["season"], snap.current_gw, snap.teams, cfg)
+    if _fb_warn:
+        opt.set_diagnostic("fixture_adjustment", _fb_warn)
+    elif not fixture_baselines.get("by_id"):
+        opt.set_diagnostic("fixture_adjustment",
+                            "no fixture-adjustment baselines this run (no finished-match data yet, e.g. GW1 "
+                            "before any match has kicked off) -- goal/assist terms are unadjusted (FF=1.0) "
+                            "until real match data exists to build a baseline from.")
+    else:
+        opt.set_diagnostic("fixture_adjustment", None)
+
     overrides = eng.load_overrides()
     # squad_gw = last COMPLETED/locked gameweek -- the only one the official
     # API has an actual picks snapshot for (querying a not-yet-deadlined GW
@@ -1139,7 +1207,7 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
                         | set(compliant_gw_list) | {_tie_break_lookahead_gw})
-    proj = _project(snap, hist_df, overrides, cfg, _gw_union)
+    proj = _project(snap, hist_df, overrides, cfg, _gw_union, fixture_baselines)
     picks = _picks(entry_id, squad_gw)
 
     id_to_code = proj.set_index("id")["code"].to_dict() if "id" in proj.columns else {}
@@ -2529,7 +2597,7 @@ with tab_transfers:
         if _fh_play:
             _fh_gw = int(fh_advisor["verdict"].split("gw")[1])
             _fh_col = f"xpts_gw{_fh_gw}"
-            _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw])
+            _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw], fixture_baselines)
             fh_res_auto = data_pipeline.solve_free_hit_optimal_squad(cfg, _fh_proj_auto, team_value, _fh_gw)
             with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=False):
                 if fh_res_auto is None:
@@ -2677,7 +2745,7 @@ def _compute_scenario_evaluations():
     if wc_gw_choice is not None:
         wc_horizon = max(3, horizon)
         future_gw_list = list(range(wc_gw_choice, wc_gw_choice + wc_horizon))
-        future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list)
+        future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list, fixture_baselines)
         future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
         future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
         wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
@@ -2716,7 +2784,7 @@ def _compute_scenario_evaluations():
 
     if fh_gw_choice is not None:
         fh_col = f"xpts_gw{fh_gw_choice}"
-        fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice])
+        fh_proj = _project(snap, hist_df, overrides, cfg, [fh_gw_choice], fixture_baselines)
         if fh_col not in fh_proj.columns:
             st.session_state["scenario_fh_cache"] = {"fh_gw_choice": fh_gw_choice, "feasible": False,
                                                        "reason": "no_projection"}
@@ -2893,6 +2961,22 @@ def _render_scenario_results():
 @st.fragment
 def _render_pitch_navigator():
     st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
+    # Patch 83 (v6.9 §10 output-format addition: "Every run states the
+    # attack-adjustment strength and the tier that fed it") -- one compact,
+    # always-visible disclosure line per run. fixture_baselines/_fb_warn are
+    # computed once near the top of this run (see the _fixture_baselines()
+    # call right after snap loads) and reused everywhere xPts is computed
+    # this run (Rule #22), so this one line accurately describes every
+    # number on the page, not just this tile.
+    _fa_cfg = cfg.get("fixture_adjustment", {})
+    if _fa_cfg.get("enabled", True) and fixture_baselines.get("by_id"):
+        _fa_n = fixture_baselines.get("n_teams_with_data", 0)
+        st.caption(f"⚙️ Fixture-adjusted attack: **team-strength tier** (Rule #46), strength "
+                   f"{_fa_cfg.get('strength', 0.6):.1f} · {_fa_n}/20 teams have real match-xG data this season · "
+                   f"clean sheets: team-strength fallback tier (Rule #47, no market-odds source wired in yet).")
+    else:
+        st.caption("⚙️ Fixture-adjusted attack: **no adjustment this run** (Rule #46) — "
+                   f"{opt.get_diagnostic('fixture_adjustment') or 'no finished-match data yet.'}")
     if starters_df.empty:
         st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if "
                    "this is a brand-new team). Transfer targets and captaincy below still use the full player pool.")
@@ -2907,39 +2991,78 @@ def _render_pitch_navigator():
         st.session_state.nav_gw_list = _nav_gw_list
     st.session_state.nav_gw_idx = max(0, min(st.session_state.nav_gw_idx, len(_nav_gw_list) - 1))
 
-    # "After recommended transfer" needs an UNAMBIGUOUS single set of moves
-    # for the CURRENT planning GW specifically. For a single-decision
-    # recommendation that's just `rec["moves"]`. For the chained weekly
-    # pacing plan (Patch 39 routes "Hit if worth it" through this too, not
-    # just "No hits" — manager report 2026-09-15: this made the toggle
-    # disappear far more often than before, since that combination is now
-    # common, not rare), using the FULL flattened `rec["moves"]` would wrongly
-    # merge every week's swaps together as if they all happened at once — so
-    # this only ever previews THIS WEEK's move (`weekly_plan[0]`), which is
-    # itself a concrete, unambiguous move exactly like the single-decision
-    # case; later weeks' hypothetical chained moves stay out of scope for
-    # this preview, same as they always were. Fixed (Patch 34 follow-up):
-    # _move_row() previously dropped out_code/in_code entirely, which
-    # silently disabled this toggle every run regardless of whether a
-    # transfer was recommended.
+    def _apply_moves(base_squad: pd.DataFrame, moves: list) -> pd.DataFrame:
+        """Applies one week's out/in moves to a squad DataFrame, pulling the
+        incoming player's row from `chip_adv_proj` (the full projection pool
+        for this horizon window) exactly like the pre-Patch-84 single-move
+        reconstruction did. Returns `base_squad` unchanged if `moves` is
+        empty or malformed (no out_code/in_code columns)."""
+        if not moves:
+            return base_squad
+        moves_df = pd.DataFrame(moves)
+        if "out_code" not in moves_df.columns or "in_code" not in moves_df.columns:
+            return base_squad
+        out_codes = set(moves_df["out_code"])
+        in_codes = set(moves_df["in_code"])
+        result = pd.concat([
+            base_squad[~base_squad["code"].isin(out_codes)],
+            chip_adv_proj[chip_adv_proj["code"].isin(in_codes)],
+        ], ignore_index=True, sort=False)
+        if "code" in result.columns:
+            result = result.drop_duplicates(subset=["code"], keep="first")
+        return result
+
+    # Patch 84 (manager screenshot: paged the navigator to GW7 with "After
+    # recommended transfer (this week's move)" selected — the pitch still
+    # showed Gomez despite the Transfer Recommendations panel, for the same
+    # chained pacing plan, saying Gomez -> Groß lands in GW7. Root cause,
+    # confirmed by reading this function as it stood before this patch: the
+    # toggle only ever reconstructed `weekly_plan[0]`'s move (this week's
+    # move at `planning_gw`) into a single static `_nav_squad_after`, and
+    # every later GW the ◀▶ stepper pages to reused that SAME static squad —
+    # only the projection column (`xpts_gw{nav_gw}`) changed, never the
+    # squad's actual player composition. The prior comment here explicitly
+    # scoped this to week 0 on purpose ("later weeks' hypothetical chained
+    # moves stay out of scope for this preview") — that was a deliberate
+    # simplification, not an oversight, but the manager has now asked for
+    # the pitch to auto-update across the full horizon, not just GW1 of the
+    # plan, so this replaces that scope with a per-GW CUMULATIVE
+    # reconstruction: for the chained weekly pacing plan, `weekly_plan`'s
+    # weeks are applied to the squad IN ORDER (each week's `sim_squad` in
+    # recommend.py already chains off the previous week's, so replaying the
+    # same out/in moves in the same order here reproduces that exact chain),
+    # and `_nav_squad_after_by_gw[g]` holds the squad as it would stand once
+    # every move up to and including week `g` has been made. The pitch's GW
+    # stepper (`nav_gw`, below) then looks up the entry for the latest
+    # planned week at or before whatever GW is currently being viewed, so
+    # paging from GW6 to GW7 now genuinely reflects GW7's Gomez -> Groß move
+    # stacked on top of GW6's Palmer -> Saka move, not a frozen GW6 squad.
+    # A week with no move (e.g. a "Roll" week) simply carries the prior
+    # week's squad forward unchanged, which is correct: no transfer that
+    # week means no squad change that week.
+    _nav_squad_after = None
+    _nav_squad_after_by_gw = {}
     if rec.get("is_weekly_schedule"):
         _wk_plan = rec.get("weekly_plan") or []
+        _running_squad = squad_df_adv
+        _any_weekly_moves = False
+        for _wk in _wk_plan:
+            _wk_moves = _wk.get("moves") or []
+            if _wk_moves:
+                _any_weekly_moves = True
+                _running_squad = _apply_moves(_running_squad, _wk_moves)
+            _nav_squad_after_by_gw[_wk.get("gw")] = _running_squad
+        _nav_can_toggle = _any_weekly_moves
+        # Kept for anything downstream still expecting "this week's move"
+        # specifically (e.g. the pre-Patch-84 single-move fallback path).
         _this_week_moves = _wk_plan[0]["moves"] if _wk_plan and _wk_plan[0].get("gw") == planning_gw else []
         _nav_moves_df = pd.DataFrame(_this_week_moves) if _this_week_moves else pd.DataFrame()
     else:
         _nav_moves_df = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
-    _nav_can_toggle = (not _nav_moves_df.empty
-                       and "out_code" in _nav_moves_df.columns and "in_code" in _nav_moves_df.columns)
-    _nav_squad_after = None
-    if _nav_can_toggle:
-        _nav_out_codes = set(_nav_moves_df["out_code"])
-        _nav_in_codes = set(_nav_moves_df["in_code"])
-        _nav_squad_after = pd.concat([
-            squad_df_adv[~squad_df_adv["code"].isin(_nav_out_codes)],
-            chip_adv_proj[chip_adv_proj["code"].isin(_nav_in_codes)],
-        ], ignore_index=True, sort=False)
-        if "code" in _nav_squad_after.columns:
-            _nav_squad_after = _nav_squad_after.drop_duplicates(subset=["code"], keep="first")
+        _nav_can_toggle = (not _nav_moves_df.empty
+                           and "out_code" in _nav_moves_df.columns and "in_code" in _nav_moves_df.columns)
+        if _nav_can_toggle:
+            _nav_squad_after = _apply_moves(squad_df_adv, _nav_moves_df.to_dict("records"))
 
     # Patch 40 (manager, 2026-09-14: "the navigator can have a 3rd option to
     # read from the scenarios on the section for 'evaluate the scenario'") —
@@ -2994,7 +3117,15 @@ def _render_pitch_navigator():
             "squad": _fh_scen_squad, "gw_list": st.session_state.get("scenario_gw_list_fh")}
 
     _nav_options = ["Current squad"]
-    _after_tx_label = ("After recommended transfer (this week's move)" if rec.get("is_weekly_schedule")
+    # Patch 84: label no longer says "(this week's move)" for the chained
+    # weekly plan -- it now shows the CUMULATIVE squad through whichever GW
+    # the stepper is on (see _nav_squad_after_by_gw above), not just week 1.
+    # Deliberately doesn't embed the current nav_gw in the label text itself
+    # (e.g. "through GW7") -- that value changes every time the ◀▶ stepper
+    # is clicked, and Streamlit's st.radio keys off the option label, so an
+    # option whose text changes out from under it would silently reset the
+    # radio back to "Current squad" on every single GW-step click.
+    _after_tx_label = ("After recommended transfers (chained plan)" if rec.get("is_weekly_schedule")
                         else "After recommended transfer")
     if _nav_can_toggle:
         _nav_options.append(_after_tx_label)
@@ -3035,24 +3166,48 @@ def _render_pitch_navigator():
     st.session_state.nav_gw_idx = max(0, min(st.session_state.nav_gw_idx, len(_active_nav_gw_list) - 1))
 
     with nav_c2:
+        # Patch 84 (found while verifying the transfer-recommendation fix
+        # above, not reported by the manager, but confirmed live via
+        # Playwright: clicking ▶ showed the RIGHT GW's xPts/Rating/squad
+        # below, but the counter label between the two buttons stayed ONE
+        # CLICK BEHIND, e.g. reading "GW6 (1/3)" while the metrics under it
+        # already said "GW7 xPts"/"GW7 Rating"). Root cause: the counter
+        # (originally the middle `with pb2:` block) was rendered BETWEEN the
+        # ◀ button's handler (which mutates nav_gw_idx before the counter
+        # renders) and the ▶ button's handler (which mutated it AFTER the
+        # counter had already rendered) -- so a ◀ click was reflected
+        # immediately but a ▶ click only showed up on the NEXT rerun. Fixed
+        # by resolving both buttons' clicks first, then rendering the
+        # counter once nav_gw_idx is final for this run -- symmetric for
+        # both directions.
         pb1, pb2, pb3 = st.columns([1, 3, 1])
         with pb1:
-            if st.button("◀", key="nav_prev", disabled=st.session_state.nav_gw_idx == 0):
-                st.session_state.nav_gw_idx -= 1
+            _prev_clicked = st.button("◀", key="nav_prev", disabled=st.session_state.nav_gw_idx == 0)
+        with pb3:
+            _next_clicked = st.button("▶", key="nav_next",
+                                       disabled=st.session_state.nav_gw_idx == len(_active_nav_gw_list) - 1)
+        if _prev_clicked:
+            st.session_state.nav_gw_idx -= 1
+        if _next_clicked:
+            st.session_state.nav_gw_idx += 1
         with pb2:
             st.markdown(f'<div style="text-align:center;font-weight:600;padding-top:0.4rem;color:var(--ink);">'
                         f'GW{_active_nav_gw_list[st.session_state.nav_gw_idx]} '
                         f'({st.session_state.nav_gw_idx + 1}/{len(_active_nav_gw_list)})</div>',
                         unsafe_allow_html=True)
-        with pb3:
-            if st.button("▶", key="nav_next",
-                         disabled=st.session_state.nav_gw_idx == len(_active_nav_gw_list) - 1):
-                st.session_state.nav_gw_idx += 1
 
     nav_gw = _active_nav_gw_list[st.session_state.nav_gw_idx]
     nav_col = f"xpts_gw{nav_gw}"
     if _active_src is not None:
         nav_squad = _active_src["squad"]
+    elif nav_mode.startswith("After recommended transfer") and _nav_squad_after_by_gw:
+        # Patch 84: cumulative-through-this-GW lookup -- the latest planned
+        # week at or before `nav_gw` (weekly_plan only ever covers
+        # planning_gw onward, so a nav_gw before the first planned week
+        # can't happen via the stepper, but the empty-list fallback to
+        # squad_df_adv below stays defensive rather than assuming that).
+        _applicable_gws = [g for g in _nav_squad_after_by_gw if g is not None and g <= nav_gw]
+        nav_squad = _nav_squad_after_by_gw[max(_applicable_gws)] if _applicable_gws else squad_df_adv
     elif nav_mode.startswith("After recommended transfer") and _nav_squad_after is not None:
         nav_squad = _nav_squad_after
     else:

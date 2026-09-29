@@ -2866,6 +2866,55 @@ wildcard_trigger:
   gap_pct_threshold: 6.0
 
 # -----------------------------------------------------------------------------
+# Patch 83 (2026-09-29, v6.9 Standing Rule #46, Fixture-Adjusted Attack Rule)
+# -- team-strength tier only (manager-confirmed scope, 2026-09-29): goal/
+# assist terms are scaled by FF = (opponent's real, current-season xG-against
+# baseline / league-average xG) ^ strength, built from olbauday/FPL-Core-
+# Insights' real per-gameweek match-level team xG (fpl_data.
+# fetch_team_match_xg(), schema verified live before writing the fetcher --
+# see its docstring), NOT the static official strength_attack/strength_
+# defence ratings the CS% calc already uses (those never update in-season).
+#
+# strength: the doc's own s=0.6, "FIXED... not tuned in-season" (Rule
+# #46(c)) -- accepted band 0.5-0.75, refit only before the season and at
+# GW19 by the doc's own walk-forward backtest method, never a live dial.
+#
+# xg_shrinkage_matches: NOT a number the doc specifies -- a disclosed
+# modeling choice of this implementation (k in baseline = (n*team_mean +
+# k*league_avg)/(n+k)), so a team with only 1-2 finished matches this season
+# doesn't produce a wild baseline before real signal accumulates. Matches
+# the doc's own "early-season baselines shrink to the league average"
+# default (Decisions section). Open to revision like every other figure in
+# this block.
+#
+# min_ff/max_ff: a safety clamp on the fixture factor itself, same pattern
+# fpl_engine.cs_pct_poisson_vec() already uses for its own opponent-goals
+# estimate -- again not a number the doc states, disclosed here.
+#
+# SCOPE NOTE: the doc's full Rule #46(e) schedule is "next-GW from market
+# odds... GW+2 onward from the team-strength model blended with FDR, with s
+# shrinking toward 0 with distance... beyond GW+5... s=0." This
+# implementation has NO market-odds leg at all yet (verified live,
+# 2026-09-29: oddschecker's pages are genuinely fetchable, but this session
+# could not verify a plain-requests scrape -- the same method every other
+# source in fpl_data.py uses -- actually works from a production deploy,
+# and the doc itself flags automated-fetch terms of use as unverified for
+# that source). So EVERY gameweek here runs at this same team-strength tier
+# with the fixed strength above, not the doc's literal distance-decay
+# schedule (which exists specifically to hand off from a trusted near-term
+# market figure to a less-trusted longer-range one -- there is no near-term
+# market figure here to hand off FROM). Tracked as a fast-follow, not
+# silently declared "done" -- see PATCH_VERSION / model_config.yaml
+# changelog for this patch.
+# -----------------------------------------------------------------------------
+fixture_adjustment:
+  enabled: true
+  strength: 0.6
+  xg_shrinkage_matches: 6
+  min_ff: 0.7
+  max_ff: 1.4
+
+# -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
 # cumulative xPts difference smaller than max(floor_points, pct_of_total *
 # the compared total) is reported as a statistical tie, not a clear winner —

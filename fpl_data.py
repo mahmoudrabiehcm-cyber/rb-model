@@ -349,6 +349,104 @@ def load_historical_snapshot(season: str) -> Optional[pd.DataFrame]:
     return fetch_csv_mirror(season, "players_raw.csv")
 
 
+# ---------------------------------------------------------------------------
+# Patch 83 (v6.9 Standing Rule #46, Fixture-Adjusted Attack Rule) -- new
+# automated source. Manager confirmed the scope explicitly (2026-09-29):
+# build the team-strength tier now (real match-level team xG, verified live
+# before writing this), leave the market-odds tier as a fast-follow rather
+# than guess at scraping reliability this session couldn't fully verify.
+#
+# olbauday/FPL-Core-Insights ("Sources added in v6.9" in the model doc) --
+# real schema confirmed live (not guessed) via a direct fetch of
+# data/2026-2027/By Gameweek/GW1/matches.csv and GW6/matches.csv:
+#   - one CSV per gameweek at
+#     data/{season}/By Gameweek/GW{n}/matches.csv (NOT one combined
+#     season-level file -- that path 404s; confirmed by trying
+#     "2026-2027/matches.csv" and "2026-27/matches.csv" first, both 404).
+#   - columns include: gameweek, home_team, away_team, finished, tournament,
+#     home_expected_goals_xg, away_expected_goals_xg (there's also a
+#     non-penalty variant, home/away_non_penalty_xg, not used here --
+#     Rule #46 doesn't specify non-penalty for the team-level baseline, and
+#     penalties are a small, roughly team-neutral share of team xG).
+#   - home_team/away_team are numeric but NOT the season-specific 1-20 `id`
+#     FPL players/fixtures use -- they matched the STABLE `code` field
+#     instead (verified: Bournemouth=91, Brentford=94, Aston Villa=7 in a
+#     real fetched row, cross-checked against vaastav's 2026-27 teams.csv
+#     `code` column, which has exactly those same code->club mappings).
+#     Joining this data into the pipeline (which keys everything off `id`)
+#     requires the caller to build a code->id map from the current season's
+#     teams table.
+#   - tournament=="prem" filters to real Premier League matches only (the
+#     per-GW file observed was already prem-only in practice, but this repo
+#     explicitly also carries cups/friendlies/Euro competitions per its own
+#     README, so the filter is kept defensively rather than assumed).
+# ---------------------------------------------------------------------------
+OLBAUDAY_RAW = "https://raw.githubusercontent.com/olbauday/FPL-Core-Insights/main/data"
+
+
+def fetch_team_match_xg(season_slug: str, gw_list: list[int]) -> tuple[pd.DataFrame, Optional[str]]:
+    """Pulls olbauday's per-GW matches.csv for every GW in `gw_list`,
+    filters to finished, tournament=="prem" rows, and returns one row PER
+    TEAM PER MATCH (i.e. each match contributes two rows, home and away) so
+    the caller can group by team code directly:
+        team_code, opp_code, is_home, gameweek, xg_for, xg_against
+    `season_slug` is olbauday's own season folder name (e.g. "2026-2027" --
+    note the 4-digit-dash-4-digit form, different from vaastav's "2026-27").
+
+    Never raises -- a GW that fails to fetch (network blocked, file not
+    published yet, schema drift) is silently skipped, and the whole call
+    returns whatever finished matches it DID get plus a warning string
+    naming which GWs were missing (empty warning if none were). A totally
+    empty result (e.g. every GW blocked) still returns a valid, empty
+    DataFrame with the right columns -- callers must treat that as
+    "no fixture-adjustment data available this run" and fall back to FF=1.0
+    (Rule #46(a)'s own-baseline normalisation is a no-op with no baseline
+    data), never crash the page over it."""
+    cols = ["team_code", "opp_code", "is_home", "gameweek", "xg_for", "xg_against"]
+    frames = []
+    missing_gws = []
+    for gw in gw_list:
+        url = f"{OLBAUDAY_RAW}/{season_slug}/By%20Gameweek/GW{gw}/matches.csv"
+        r = _get(url, timeout=15)
+        if r is None:
+            missing_gws.append(gw)
+            continue
+        try:
+            df = pd.read_csv(io.StringIO(r.text))
+        except Exception:
+            missing_gws.append(gw)
+            continue
+        needed = {"home_team", "away_team", "finished", "tournament",
+                  "home_expected_goals_xg", "away_expected_goals_xg", "gameweek"}
+        if not needed.issubset(df.columns):
+            missing_gws.append(gw)
+            continue
+        df = df[(df["tournament"] == "prem") & (df["finished"] == True)]  # noqa: E712
+        if df.empty:
+            continue
+        home_rows = pd.DataFrame({
+            "team_code": df["home_team"], "opp_code": df["away_team"], "is_home": True,
+            "gameweek": df["gameweek"],
+            "xg_for": pd.to_numeric(df["home_expected_goals_xg"], errors="coerce"),
+            "xg_against": pd.to_numeric(df["away_expected_goals_xg"], errors="coerce"),
+        })
+        away_rows = pd.DataFrame({
+            "team_code": df["away_team"], "opp_code": df["home_team"], "is_home": False,
+            "gameweek": df["gameweek"],
+            "xg_for": pd.to_numeric(df["away_expected_goals_xg"], errors="coerce"),
+            "xg_against": pd.to_numeric(df["home_expected_goals_xg"], errors="coerce"),
+        })
+        frames.append(pd.concat([home_rows, away_rows], ignore_index=True))
+    if not frames:
+        warning = (f"could not fetch any of olbauday's per-GW matches.csv files for GWs {gw_list} "
+                   f"(network blocked or files not published yet)" if missing_gws else None)
+        return pd.DataFrame(columns=cols), warning
+    result = pd.concat(frames, ignore_index=True).dropna(subset=["xg_for", "xg_against"])
+    warning = (f"olbauday matches.csv unavailable for GW(s) {missing_gws} -- fixture-adjustment "
+               f"baselines are built from the other finished GWs only" if missing_gws else None)
+    return result[cols], warning
+
+
 if __name__ == "__main__":
     snap = load_snapshot()
     print(f"Source: {snap.source} | last completed GW: {snap.current_gw} | "
