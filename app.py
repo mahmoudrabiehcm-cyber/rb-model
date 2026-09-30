@@ -37,7 +37,30 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 92 (v6.9 Rules #44/#48/#49 read together, chip-aware weekly transfer plan — manager "
+PATCH_VERSION = ("Patch 93 (v6.9 Rule #49 follow-up, single-decision path auto chip-capping — manager, "
+                  "2026-09-30: \"let's patch the first one\" (of the queued-decisions list), closing the "
+                  "DISCLOSED GAP flagged at the end of Patch 92): confirmed via code read that "
+                  "suggest_transfers()'s single-decision path (horizon=1, or always under \"Force\") built its "
+                  "`chip_capped_gw_list` (drives the \"Chip-aware alt: Roll\" advisory note) EXCLUSIVELY from "
+                  "the sidebar's manual \"Next planned full-rebuild chip GW\" dropdown — never from the app's "
+                  "own auto-computed Rule #49 joint chip schedule (chip_portfolio) that Patch 92 already wired "
+                  "into the CHAINED planner. Same \"two disconnected sources of truth\" bug class as Patch "
+                  "91/92, on the other code path: at horizon=1 (the app's own default), a Wildcard the model "
+                  "itself had already scheduled produced NO chip-aware note unless the manager also happened "
+                  "to manually set the matching dropdown value. Fixed with a new small, pure "
+                  "recommend.resolve_chip_capped_gw_list(gw_list, manual_planned_chip_gw, auto_wildcard_gw) "
+                  "helper: prefers an explicit manual value (an override that may reflect something the "
+                  "auto-scheduler doesn't know) when the manager has set one, falls back to the auto-detected "
+                  "Wildcard GW (chip_portfolio['assignment']['wildcard']) otherwise, returns None when neither "
+                  "applies or the chip falls after the horizon — same edge-case contract as the inline logic "
+                  "it replaced, including the empty-list-vs-None distinction the downstream check relies on. "
+                  "Test-first: 6 new tests written and confirmed failing (AttributeError, function didn't "
+                  "exist) before implementation, all passing after; full 104-test regression suite passes "
+                  "(98 pre-existing + 6 new), zero regressions. DISCLOSED LIMITATION (unchanged from Patch "
+                  "92): live browser verification against the running app was not possible this session — "
+                  "this sandbox's network still cannot reach the official FPL API; verification rests on the "
+                  "test suite plus a direct code trace of the app.py wiring. Previously, Patch 92 (v6.9 Rules "
+                  "#44/#48/#49 read together, chip-aware weekly transfer plan — manager "
                   "discussion, 2026-09-30: \"is the wildcard considered... maybe the wildcard week will give us "
                   "another transfer plan\" caught, before building, that the originally-scoped simpler fix "
                   "(auto-extending the chained transfer plan's horizon for a cross-check note) would have been "
@@ -1978,9 +2001,21 @@ with st.spinner("Fetching live data and computing xPts..."):
     # pre-rebuild window. Neither changes anything when absent/inapplicable.
     _bb_play_gw = int(bb_advisor["verdict"].split("gw")[1]) \
         if bb_advisor and bb_advisor["verdict"].startswith("play_gw") else None
-    _chip_capped_gw_list = None
-    if planned_chip_gw is not None and transfer_gw_list and planned_chip_gw <= transfer_gw_list[-1]:
-        _chip_capped_gw_list = [g for g in transfer_gw_list if g < planned_chip_gw]
+    # Patch 93 (v6.9 Rule #49 follow-up — same "two disconnected sources of
+    # truth" bug class Patch 91/92 fixed on the chip-expiry window and the
+    # chained weekly planner, this time on suggest_transfers()'s own
+    # single-decision path used at horizon=1/"Force"): `_chip_capped_gw_list`
+    # used to come ONLY from the sidebar's manual "Next planned full-rebuild
+    # chip GW" dropdown, so a Wildcard the app's own Rule #49 joint scheduler
+    # had already scheduled (`chip_portfolio`, computed above) produced no
+    # "Chip-aware alt" note at all unless the manager also happened to set
+    # the matching dropdown value by hand. `recommend.resolve_chip_capped_
+    # gw_list()` now prefers the manual value when the manager explicitly
+    # set one (an override they may have reasons the auto-scheduler doesn't
+    # know), falling back to the auto-detected Wildcard GW otherwise.
+    _auto_wildcard_gw = (chip_portfolio or {}).get("assignment", {}).get("wildcard")
+    _chip_capped_gw_list = recommend.resolve_chip_capped_gw_list(
+        transfer_gw_list, manual_planned_chip_gw=planned_chip_gw, auto_wildcard_gw=_auto_wildcard_gw)
 
     # Post-Patch-34 follow-up (2026-09-14 manager report on a Foden->Damsgaard
     # recommendation that made no sense on its face): a disrupted outgoing

@@ -526,6 +526,33 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
     return new_chosen, plan_lines
 
 
+def resolve_chip_capped_gw_list(gw_list: list[int], manual_planned_chip_gw: int | None = None,
+                                 auto_wildcard_gw: int | None = None) -> list[int] | None:
+    """Patch 93 (v6.9 Rule #49 follow-up — closing the same "two disconnected
+    sources of truth" gap Patch 91/92 fixed elsewhere, this time on
+    `suggest_transfers()`'s single-decision path, used at horizon=1 or
+    "Force"): resolves the GW that should truncate the "Chip-aware alt"
+    horizon check (see the `chip_capped_gw_list` param on `suggest_transfers()`
+    below), preferring an explicit manual planned-chip GW (the sidebar's
+    "Next planned full-rebuild chip GW" dropdown — a manager override that
+    may reflect information the auto-scheduler doesn't have) over the
+    auto-detected Wildcard GW from the Rule #49 joint scheduler
+    (`chip_portfolio["assignment"]["wildcard"]`), and falling back to the
+    auto value only when the manual one is unset (None — never a falsy-but-
+    real GW like 0, checked with `is not None` throughout, not truthiness).
+
+    Returns None when neither is set, or when the resolved chip GW falls
+    after the full horizon (`gw_list[-1]`) — same edge-case contract the old
+    manual-only inline logic in app.py already had. Can return an EMPTY list
+    (not None) when the chip GW lands at or before `gw_list[0]` — callers
+    must keep testing `is not None` to distinguish "no cap at all" from "cap
+    to nothing", exactly as `suggest_transfers()` already does internally."""
+    chip_gw = manual_planned_chip_gw if manual_planned_chip_gw is not None else auto_wildcard_gw
+    if chip_gw is None or not gw_list or chip_gw > gw_list[-1]:
+        return None
+    return [g for g in gw_list if g < chip_gw]
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
