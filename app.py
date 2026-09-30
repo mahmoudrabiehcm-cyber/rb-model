@@ -37,7 +37,67 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 93 (v6.9 Rule #49 follow-up, single-decision path auto chip-capping — manager, "
+PATCH_VERSION = ("Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion continued, 2026-09-30, "
+                  "resolving the \"auto-extend horizon to reach the chip week\" scope chosen for the original "
+                  "'cross-check UI' idea): confirmed via code read that the Wildcard cross-check note (just "
+                  "fixed for its squad-reconstruction bug in Patch 94) is bounded by TWO separate windows "
+                  "neither tied to when the Rule #49 scheduler actually plans the Wildcard — the transfer-plan "
+                  "horizon (transfer_gw_list, capped by the Horizon slider, max 1-6) and the reachable-ceiling "
+                  "detection window (detect_gw_list, a fixed ~4-GW window from chip_shape_test."
+                  "detection_window_gws, app.py lines ~1402-1412). Manager confirmed (two AskUserQuestion "
+                  "rounds) extending BOTH sides to reach the scheduled Wildcard GW, capped at +8 GWs beyond "
+                  "whichever window currently reaches less far, and caching the extra computation. Adds "
+                  "recommend.resolve_cross_check_horizon(planning_gw, current_max_gw, target_gw, max_extension) "
+                  "— a small pure function deciding whether/how far to extend, before either extra family of "
+                  "MILP solves runs — and app.py's _extended_wc_cross_check_calc() (@st.cache_data(ttl=900), "
+                  "same pattern as _chip_portfolio_calc), which runs an extended recommend."
+                  "plan_transfer_schedule() (chip-schedule-aware, reusing Patch 92's machinery) AND an extended "
+                  "data_pipeline.solve_reachable_ceiling_by_gw() over the same capped GW range, wrapped in a "
+                  "try/except that falls back to the normal unextended check on any failure rather than risk "
+                  "the whole Chip Plan tab over what is explicitly a supplementary disclosure, never core "
+                  "output. Never touches `rec`, `reachable_by_gw`, or the Wildcard trigger's own headline % — "
+                  "this is a side computation purely for the cross-check note; the Transfer Recommendations tab "
+                  "is completely unaffected. The note's text now discloses whenever it's running over an "
+                  "auto-extended horizon, and separately flags it if the +8 GW cap still fell short of the "
+                  "actual scheduled GW, per Standing Rule #4 (show the inputs, never silently narrow the "
+                  "claim). Test-first: 7 new tests written and confirmed failing (AttributeError, function "
+                  "didn't exist) before implementation for resolve_cross_check_horizon() (the app.py wiring "
+                  "itself is Streamlit script code, verified by syntax check + full regression suite + a "
+                  "hand-traced walkthrough of every branch, same as every other app.py-only change this "
+                  "session), all passing after; full 116-test regression suite passes (109 pre-existing + 7 "
+                  "new), zero regressions. DISCLOSED LIMITATION (unchanged from Patch 92/93/94): live browser "
+                  "verification against the running app was not possible this session — this sandbox's "
+                  "network still cannot reach the official FPL API; verification rests on the test suite plus "
+                  "a direct code trace of the app.py wiring. Previously, Patch 94 (v6.9 Rule #49 cross-check "
+                  "correctness fix — manager discussion, 2026-09-30, "
+                  "\"let's start the discussion for second point Original 'cross-check UI'\": before designing "
+                  "anything new, checked the codebase for what already exists rather than assuming a blank "
+                  "slate. Found the Wildcard card's existing \"Cross-check against your own recommended "
+                  "transfer plan\" note (Patch 46-49) reconstructed \"the squad after your plan\" by flattening "
+                  "EVERY week's moves from the chained weekly plan (`rec['moves']` = every week's moves "
+                  "concatenated, confirmed via code read of recommend.plan_transfer_schedule()'s return dict) "
+                  "into ONE pd.concat applied all at once, regardless of which week each move belonged to — "
+                  "already misleading for any multi-week plan with more than one week of real moves, and "
+                  "actively wrong now that Patch 92 makes a scheduled Wildcard week inject a ~13-player "
+                  "wholesale rebuild into that same flat list, getting mashed together with ordinary "
+                  "pre/post-Wildcard transfers into a squad that was never actually reachable at any single "
+                  "point in time. Manager confirmed (AskUserQuestion) fixing this FIRST, standalone, before any "
+                  "new cross-check design. Fixed by extracting the CORRECT reconstruction that already existed "
+                  "elsewhere in this app — the pitch navigator's per-GW chained rebuild (Patch 84) — out of its "
+                  "private closure inside _render_pitch_navigator() into a new top-level, testable "
+                  "recommend.build_squad_after_by_gw(squad_df, weekly_plan, pool_df) function, now used by BOTH "
+                  "the navigator (replacing its own local _apply_moves loop, zero behavior change there — same "
+                  "chaining, same pool, same result) and the Wildcard cross-check (replacing the flat bug). "
+                  "Same \"stop having two disconnected reconstruction methods\" fix pattern as Patch 91/92/93. "
+                  "Test-first: 5 new tests written and confirmed failing (AttributeError, function didn't "
+                  "exist) before implementation — including one that specifically reproduces the Wildcard-week "
+                  "blending bug and proves the chained version threads through it correctly — all passing "
+                  "after; full 109-test regression suite passes (104 pre-existing + 5 new), zero regressions. "
+                  "DISCLOSED LIMITATION (unchanged from Patch 92/93): live browser verification against the "
+                  "running app was not possible this session — this sandbox's network still cannot reach the "
+                  "official FPL API; verification rests on the test suite plus a direct code trace of the "
+                  "app.py wiring. Previously, Patch 93 (v6.9 Rule #49 follow-up, single-decision path auto "
+                  "chip-capping — manager, "
                   "2026-09-30: \"let's patch the first one\" (of the queued-decisions list), closing the "
                   "DISCLOSED GAP flagged at the end of Patch 92): confirmed via code read that "
                   "suggest_transfers()'s single-decision path (horizon=1, or always under \"Force\") built its "
@@ -1100,6 +1160,57 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
     return wc_window_scan, chip_portfolio
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _extended_wc_cross_check_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_proj: pd.DataFrame,
+                                   cfg: dict, style_name: str, free_transfers: int, bank: float,
+                                   planning_gw: int, ext_gw_list: tuple, meaningful_bar: float,
+                                   bb_play_gw: int | None, disrupted_codes_items: tuple, hit_stance: str,
+                                   squad_codes_items: tuple, wildcard_gw: int | None,
+                                   wildcard_rebuild_squad: pd.DataFrame | None):
+    """Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion,
+    2026-09-30): when `recommend.resolve_cross_check_horizon()` (see its own
+    docstring) determines the Wildcard cross-check needs to reach further
+    than the app's normal windows, this runs the two extra, cross-check-only
+    computations that make that possible — extending BOTH the transfer plan
+    AND the reachable-ceiling ladder to the same GW range, confirmed via
+    code read (during this same discussion) to be two SEPARATE, differently-
+    sized windows today, so extending only one would still leave the other
+    as the limiting factor.
+
+    Wrapped in the same @st.cache_data(ttl=900) pattern as
+    `_chip_portfolio_calc` above, for the same reason: this is genuinely
+    expensive (one MILP solve per extra GW on each side, up to +8 GWs per
+    Standing manager-confirmed cap), so a rerun triggered by an unrelated
+    widget (Style toggle, materiality slider) must be a cache hit, not a
+    re-solve. Never touches `rec` or `reachable_by_gw` themselves — this is
+    a side computation purely for the cross-check note, so the Transfer
+    Recommendations tab and the Wildcard trigger's own headline % are both
+    completely unaffected by whatever this returns.
+
+    Returns {"weekly_plan": [...], "reachable_by_gw": {gw: solve_squad()
+    dict}} — the pieces `recommend.build_squad_after_by_gw()` and the
+    cross-check's own rating-% loop need, nothing else."""
+    disrupted_codes = set(disrupted_codes_items) if disrupted_codes_items else None
+    squad_codes = list(squad_codes_items)
+    ext_gw_list = list(ext_gw_list)
+    chip_schedule = None
+    if wildcard_gw is not None and wildcard_rebuild_squad is not None and not wildcard_rebuild_squad.empty:
+        chip_schedule = {"wildcard_gw": wildcard_gw, "wildcard_rebuild_squad": wildcard_rebuild_squad}
+    # "Force" has no meaningful multi-week pacing semantics to extend (it's
+    # a single, manager-forced transfer count for THIS week only) — falls
+    # back to "Hit if worth it" for this side computation alone, same
+    # fallback already applied to the extended plan's hit-stance elsewhere
+    # in this app's chip-aware wiring.
+    effective_stance = "Hit if worth it" if hit_stance == "Force" else hit_stance
+    ext_plan = recommend.plan_transfer_schedule(
+        squad_df, pool_df, cfg, style_name, free_transfers, bank, planning_gw, ext_gw_list,
+        meaningful_bar, None, bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes,
+        hit_stance=effective_stance, chip_schedule=chip_schedule)
+    ext_reachable_by_gw = data_pipeline.solve_reachable_ceiling_by_gw(
+        cfg, shape_proj, squad_codes, free_transfers, ext_gw_list)
+    return {"weekly_plan": ext_plan.get("weekly_plan") or [], "reachable_by_gw": ext_reachable_by_gw}
+
+
 # ---------------------------------------------------------------------------
 # Gate screen — team ID first, everything else unlocks after.
 # ---------------------------------------------------------------------------
@@ -2098,25 +2209,108 @@ with st.spinner("Fetching live data and computing xPts..."):
 # instead of once.
 _wc_check_note = None
 if wc_flag and reachable_by_gw and not squad_df.empty:
+    # Patch 94 (v6.9 Rule #49 cross-check correctness fix — discussion,
+    # 2026-09-30: before extending this cross-check, confirmed via code read
+    # that it reconstructed "the squad after your plan" by flattening EVERY
+    # week's moves from a chained weekly plan into one list and applying
+    # them all in a single pd.concat, regardless of which week each move
+    # actually belonged to — already misleading for a multi-week plan, and
+    # actively wrong once a scheduled Wildcard injects a ~13-player
+    # wholesale rebuild into that same flat list (Patch 92). Replaced with
+    # recommend.build_squad_after_by_gw() — the same correct per-GW chained
+    # reconstruction the pitch navigator already uses (Patch 84's
+    # `_nav_squad_after_by_gw`), now a single shared source of truth instead
+    # of two. The single-decision path (horizon=1/"Force", NOT a weekly
+    # schedule) never had this bug — one decision has nothing to chain — so
+    # it keeps the original one-shot reconstruction unchanged.
     _moves_all = rec.get("moves") or []
-    if _moves_all:
+
+    # Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion,
+    # 2026-09-30): the transfer-plan horizon (`transfer_gw_list`, capped by
+    # the Horizon slider) and the reachable-ceiling window (`detect_gw_list`,
+    # a separate, fixed ~4-GW window) are both, confirmed via code read,
+    # unrelated to when the Rule #49 scheduler actually plans to play the
+    # Wildcard — so this cross-check could silently stop short of the GW
+    # that matters for the "is the chip worth it" decision. When a
+    # scheduled Wildcard falls beyond whichever of those two windows
+    # currently reaches less far, run a SEPARATE, cross-check-only extended
+    # computation (capped at +8 GWs, manager-confirmed) that reaches it —
+    # never touching `rec`/`reachable_by_gw` themselves, so the Transfer
+    # Recommendations tab and the Wildcard trigger's own headline % stay
+    # exactly as they are today.
+    _wc_current_max_gw = min(transfer_gw_list[-1], detect_gw_list[-1]) if transfer_gw_list and detect_gw_list \
+        else (transfer_gw_list[-1] if transfer_gw_list else (detect_gw_list[-1] if detect_gw_list else planning_gw))
+    _wc_extend_info = recommend.resolve_cross_check_horizon(
+        planning_gw, _wc_current_max_gw, _auto_wildcard_gw, max_extension=8) if _auto_wildcard_gw is not None \
+        else None
+    _wc_extended_active = False
+    _wc_extended_reached_target = True
+    _squad_after_by_gw = None
+    _wc_check_reachable_by_gw = None
+    _wc_check_gw_source = None
+    if _wc_extend_info is not None:
+        # Defensive: this extended computation is pure upside for the
+        # cross-check note (Standing Rule #4-style disclosure, never a
+        # required input) — a failure here (e.g. an infeasible solve at some
+        # extended GW) falls back to the normal, unextended check below
+        # rather than taking down the whole Chip Plan tab over a note that's
+        # explicitly a "nice to have deeper check", not core output.
+        try:
+            _ext = _extended_wc_cross_check_calc(
+                squad_df, pool_df, shape_proj, cfg, style_name, ft["free_transfers"], bank, planning_gw,
+                tuple(_wc_extend_info["gw_list"]), meaningful_bar_override, _bb_play_gw,
+                tuple(sorted(_disrupted_codes)) if _disrupted_codes else (), hit_stance,
+                tuple(squad_codes), _chip_schedule.get("wildcard_gw") if _chip_schedule else None,
+                _chip_schedule.get("wildcard_rebuild_squad") if _chip_schedule else None)
+            _squad_after_by_gw = recommend.build_squad_after_by_gw(squad_df, _ext["weekly_plan"], proj)
+            _wc_extended_active = True
+            _wc_extended_reached_target = _wc_extend_info["reached_target"]
+            _wc_check_reachable_by_gw = _ext["reachable_by_gw"]
+            _wc_check_gw_source = _wc_extend_info["gw_list"]
+        except Exception:
+            _squad_after_by_gw = None
+            _wc_extended_active = False
+
+    # Falls through here both when no extension was needed at all, AND when
+    # an attempted extension failed above (_wc_extended_active stays False
+    # in both cases) — same unextended logic either way, never a crash.
+    if not _wc_extended_active and rec.get("is_weekly_schedule"):
+        _squad_after_by_gw = recommend.build_squad_after_by_gw(squad_df, rec.get("weekly_plan") or [], proj)
+        _wc_check_reachable_by_gw = reachable_by_gw
+        _wc_check_gw_source = transfer_gw_list
+    elif not _wc_extended_active and _moves_all:
         _out_codes = {m["out_code"] for m in _moves_all}
         _in_codes = {m["in_code"] for m in _moves_all}
-        _after_plan_squad = pd.concat(
+        _squad_after_by_gw = {planning_gw: pd.concat(
             [squad_df[~squad_df["code"].isin(_out_codes)], proj[proj["code"].isin(_in_codes)]],
-            ignore_index=True, sort=False)
-    else:
-        _after_plan_squad = squad_df
-    _check_gws = [g for g in transfer_gw_list
-                  if f"xpts_gw{g}" in _after_plan_squad.columns and reachable_by_gw.get(g) is not None
-                  and reachable_by_gw[g].get("squad") is not None
-                  and f"xpts_gw{g}" in reachable_by_gw[g]["squad"].columns]
+            ignore_index=True, sort=False)}
+        _wc_check_reachable_by_gw = reachable_by_gw
+        _wc_check_gw_source = transfer_gw_list
+    elif not _wc_extended_active:
+        _squad_after_by_gw = {}
+        _wc_check_reachable_by_gw = reachable_by_gw
+        _wc_check_gw_source = transfer_gw_list
+
+    def _squad_as_of(gw: int) -> pd.DataFrame:
+        """The squad as it would stand at gameweek `gw` if the plan were
+        followed in order — the latest planned week at or before `gw`,
+        exactly the same lookup rule the pitch navigator's GW stepper uses,
+        so this cross-check and the navigator can never quote two different
+        squads for the same GW. Falls back to today's actual squad if no
+        planned week is at/before `gw` yet."""
+        applicable = [g for g in _squad_after_by_gw if g is not None and g <= gw]
+        return _squad_after_by_gw[max(applicable)] if applicable else squad_df
+
+    _check_gws = [g for g in _wc_check_gw_source
+                  if f"xpts_gw{g}" in proj.columns and _wc_check_reachable_by_gw.get(g) is not None
+                  and _wc_check_reachable_by_gw[g].get("squad") is not None
+                  and f"xpts_gw{g}" in _wc_check_reachable_by_gw[g]["squad"].columns]
     if _check_gws:
         _ratings = []
         for _g in _check_gws:
             _col = f"xpts_gw{_g}"
-            _sv = opt.rating_gw_value(_after_plan_squad, _col, cfg)["total_realized"]
-            _rv = opt.rating_gw_value(reachable_by_gw[_g]["squad"], _col, cfg)["total_realized"]
+            _sv = opt.rating_gw_value(_squad_as_of(_g), _col, cfg)["total_realized"]
+            _rv = opt.rating_gw_value(_wc_check_reachable_by_gw[_g]["squad"], _col, cfg)["total_realized"]
             _rp = eng.team_rating_pct(_sv, _rv, "")["rating_pct"]
             if _rp is not None:
                 _ratings.append(_rp)
@@ -2126,9 +2320,26 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             _avg_after_gap = round(100.0 - _avg_after, 1)
             _closes = _avg_after_gap < _wc_gap_threshold
             _plan_desc = (f"the {len(_moves_all)}-move plan" if _moves_all else "no transfer (this run rolls)")
+            # Patch 95 — disclose whenever this note is scored over an
+            # auto-extended horizon rather than your normal Horizon-slider/
+            # detection window, and separately flag it if the +8 GW cap
+            # still fell short of the actual scheduled Wildcard GW (Standing
+            # Rule #4 — show the inputs, never silently narrow the claim).
+            _wc_extend_note = ""
+            if _wc_extended_active:
+                _wc_extend_note = (
+                    f" (auto-extended to GW{_check_gws[-1]} to reach your scheduled Wildcard at "
+                    f"GW{_auto_wildcard_gw}, beyond your current Horizon/detection window — this extension is "
+                    f"only for this cross-check, your Transfer Recommendations and Wildcard trigger % above are "
+                    f"unaffected)")
+                if not _wc_extended_reached_target:
+                    _wc_extend_note += (
+                        f" — capped at +8 GWs and did NOT reach GW{_auto_wildcard_gw} yet; treat this as a "
+                        f"partial check, not the full picture.")
             _wc_check_note = (
                 f"Cross-check against your own recommended transfer plan ({hit_stance}, {_plan_desc}, "
-                f"GW{_check_gws[0]}-GW{_check_gws[-1]}): if followed in full, your squad's average Team "
+                f"GW{_check_gws[0]}-GW{_check_gws[-1]}{_wc_extend_note}): if followed in full, your squad's "
+                f"average Team "
                 f"Rating % over that span is projected to rise to {_avg_after}% ({_avg_after_gap}% gap; currently "
                 f"{wc_trigger['avg_rating_pct']}%) — "
                 + (f"already below the {_wc_gap_threshold:.0f}% trigger gap, so ordinary transfers may close "
@@ -3589,15 +3800,16 @@ def _render_pitch_navigator():
     _nav_squad_after = None
     _nav_squad_after_by_gw = {}
     if rec.get("is_weekly_schedule"):
+        # Patch 94: this per-GW chained reconstruction now lives in
+        # recommend.build_squad_after_by_gw() — the exact same logic that
+        # used to be this function's own private `_apply_moves` + loop,
+        # extracted so the Wildcard cross-check note (app.py, computed much
+        # earlier in the script than this function is even called) can
+        # share it instead of using its own, buggy flat reconstruction. No
+        # behavior change here: same chaining, same pool, same result.
         _wk_plan = rec.get("weekly_plan") or []
-        _running_squad = squad_df_adv
-        _any_weekly_moves = False
-        for _wk in _wk_plan:
-            _wk_moves = _wk.get("moves") or []
-            if _wk_moves:
-                _any_weekly_moves = True
-                _running_squad = _apply_moves(_running_squad, _wk_moves)
-            _nav_squad_after_by_gw[_wk.get("gw")] = _running_squad
+        _nav_squad_after_by_gw = recommend.build_squad_after_by_gw(squad_df_adv, _wk_plan, chip_adv_proj)
+        _any_weekly_moves = any(_wk.get("moves") for _wk in _wk_plan)
         _nav_can_toggle = _any_weekly_moves
         # Kept for anything downstream still expecting "this week's move"
         # specifically (e.g. the pre-Patch-84 single-move fallback path).

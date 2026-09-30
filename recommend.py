@@ -526,6 +526,89 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
     return new_chosen, plan_lines
 
 
+def resolve_cross_check_horizon(planning_gw: int, current_max_gw: int, target_gw: int | None,
+                                 max_extension: int = 8) -> dict | None:
+    """Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion,
+    2026-09-30): decides whether the Wildcard cross-check's horizon needs
+    extending to reach a scheduled chip's GW, and how far, BEFORE either
+    extra family of MILP solves (a longer `plan_transfer_schedule()` run, a
+    wider `data_pipeline.solve_reachable_ceiling_by_gw()` window) is
+    invoked. `current_max_gw` is whichever of the transfer-plan horizon and
+    the reachable-ceiling detection window currently reaches LESS far (the
+    real limiting factor today — confirmed via code read that these are two
+    separate, differently-sized windows, neither tied to when a chip is
+    actually scheduled).
+
+    Returns None when no extension applies — `target_gw` is unset, or
+    already within `current_max_gw` (nothing to extend for). Otherwise
+    returns {"gw_list": [...], "reached_target": bool}: `gw_list` runs from
+    `planning_gw` through `min(target_gw, current_max_gw + max_extension)` —
+    capping how far this cross-check-only computation extends beyond the
+    app's normal windows, so a chip scheduled very far out doesn't trigger
+    an unbounded extra solve. `reached_target` is False when the cap
+    prevented `gw_list` from actually reaching `target_gw`, so the caller
+    can disclose the cap explicitly rather than silently show a comparison
+    that still doesn't cover the real chip week."""
+    if target_gw is None or target_gw <= current_max_gw:
+        return None
+    capped_target = min(target_gw, current_max_gw + max_extension)
+    return {"gw_list": list(range(planning_gw, capped_target + 1)),
+            "reached_target": capped_target >= target_gw}
+
+
+def build_squad_after_by_gw(squad_df: pd.DataFrame, weekly_plan: list[dict],
+                             pool_df: pd.DataFrame) -> dict[int, pd.DataFrame]:
+    """Patch 94 (v6.9 Rule #49 cross-check correctness fix — discussion,
+    2026-09-30: before building the requested "cross-check UI" extension,
+    checked the codebase and found app.py's existing Wildcard cross-check
+    note (Patch 46-49) reconstructed "the squad after your plan" by
+    flattening EVERY week's moves from `weekly_plan` into one list and
+    applying them all in a single pd.concat, regardless of which week each
+    move actually belonged to — already misleading for any multi-week plan,
+    and actively wrong once a scheduled Wildcard week injects a ~13-player
+    wholesale rebuild into that same flat list (Patch 92).
+
+    This is the single correct reconstruction, extracted from what was
+    previously a private closure nested inside app.py's
+    `_render_pitch_navigator()` (Patch 84's `_apply_moves` + its per-week
+    loop) so both that navigator AND the Wildcard cross-check now share one
+    source of truth instead of two, the same "stop having two disconnected
+    reconstruction methods" fix pattern as Patch 91/92/93.
+
+    Chains each week's moves onto the LITERAL resulting squad of the week
+    before it, in `weekly_plan` order — exactly how
+    `plan_transfer_schedule()` built `sim_squad` internally, so replaying
+    the same moves here in the same order reproduces that exact chain. A
+    week with no moves (a "Roll" week, or a week whose moves are malformed —
+    missing `out_code`/`in_code`) simply carries the prior week's squad
+    forward unchanged. A Wildcard week's wholesale-rebuild moves (however
+    many) are applied as one atomic swap against the PRIOR week's squad, not
+    blended with any other week's moves.
+
+    Returns `{gw: squad_df_after_that_week}` for every week in
+    `weekly_plan`, in order. Empty `weekly_plan` returns `{}`. Incoming
+    players are pulled from `pool_df` — pass whichever full projection pool
+    is appropriate for the caller's context (e.g. the pitch navigator's
+    window-scoped pool, or the main run's full `proj`)."""
+    result: dict[int, pd.DataFrame] = {}
+    running = squad_df
+    for wk in weekly_plan or []:
+        moves = wk.get("moves") or []
+        if moves:
+            moves_df = pd.DataFrame(moves)
+            if "out_code" in moves_df.columns and "in_code" in moves_df.columns:
+                out_codes = set(moves_df["out_code"])
+                in_codes = set(moves_df["in_code"])
+                running = pd.concat([
+                    running[~running["code"].isin(out_codes)],
+                    pool_df[pool_df["code"].isin(in_codes)],
+                ], ignore_index=True, sort=False)
+                if "code" in running.columns:
+                    running = running.drop_duplicates(subset=["code"], keep="first")
+        result[wk.get("gw")] = running
+    return result
+
+
 def resolve_chip_capped_gw_list(gw_list: list[int], manual_planned_chip_gw: int | None = None,
                                  auto_wildcard_gw: int | None = None) -> list[int] | None:
     """Patch 93 (v6.9 Rule #49 follow-up — closing the same "two disconnected
