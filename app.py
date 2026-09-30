@@ -37,7 +37,31 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 96 (v6.9 Standing Rule #50, Chip Timing Harmony — manager discussion, 2026-09-30, "
+PATCH_VERSION = ("Patch 97 (2026-09-30, manager-reported ~6m45s runtime regression after deploying Patch 96, "
+                  "live screenshot of team 26073's Chip Plan tab confirming Patch 96's harmony logic IS working "
+                  "live — Triple Captain@GW10/Free Hit@GW11 both pre-Wildcard, Wildcard@GW12, Bench Boost@GW13 "
+                  "post-Wildcard, a genuinely joint 4-chip sequence): found and fixed ONE real, confirmed "
+                  "deviation from this codebase's own caching discipline — Patch 96's reachable_ceiling_by_gw "
+                  "param was threaded into a @st.cache_data-wrapped function carrying data_pipeline."
+                  "solve_reachable_ceiling_by_gw()'s FULL per-GW result (an embedded 15-row squad DataFrame plus "
+                  "cost/total_xpts, confirmed via code read of data_pipeline.py lines 833-863), when chip_"
+                  "protocol._apply_squad_health_guardrail() only ever reads one float (total_xpts) out of it — "
+                  "every other value already crossing that same cache boundary (fh_gap_table) was already "
+                  "reduced to plain floats first, for exactly this reason; this one wasn't. Reduced at the "
+                  "app.py call site to {gw: {\"total_xpts\": float}} before it reaches _chip_portfolio_calc — "
+                  "zero change to chip_protocol.py's guardrail (same shape it already expected), so every "
+                  "existing Patch 96 test keeps passing unmodified (126/126, zero regressions). DISCLOSED, NOT "
+                  "OVERCLAIMED: benchmarked the DataFrame-hashing overhead directly (~27ms/call in this "
+                  "sandbox) and it is NOT obviously enough on its own to explain a jump to 6m45s — this is a "
+                  "real, confirmed fix worth shipping regardless, but not asserted as the full explanation. "
+                  "Also flagged plainly: Patch 96's own ~40-50s performance estimate was scoped ONLY to the "
+                  "isolated chip_portfolio_schedule() computation benchmarked directly at the time, NOT the "
+                  "full \"Run Model\" click across every tab (Transfer Recommendations' chained plan, Patch 95's "
+                  "own extended Wildcard cross-check solve, captaincy, disruption checks, etc. all run on the "
+                  "same click) — that scope gap was not caught before the estimate was given, and awaiting the "
+                  "manager's confirmation of what the 6m45s stopwatch actually covered (this tab alone vs. the "
+                  "full page) before further profiling, rather than guessing at the remaining gap. Previously, "
+                  "Patch 96 (v6.9 Standing Rule #50, Chip Timing Harmony — manager discussion, 2026-09-30, "
                   "\"chips can work on harmony if it's applicable and not stand alone chips\"): confirmed via "
                   "code read BEFORE scoping anything that chip_portfolio_schedule() (Rule #49) already runs all "
                   "4 chips together maximising their COMBINED total via brute-force search — that part needed "
@@ -2101,7 +2125,34 @@ with st.spinner("Fetching live data and computing xPts..."):
         # set) rather than firing. Extending real coverage to the full
         # scan's checkpoint GW would need one additional bounded solve (not
         # per-candidate) -- not yet built, flagged as a fast-follow.
-        _reachable_ceiling_for_guardrail = locals().get("reachable_by_gw")
+        # Patch 96b (2026-09-30, manager-reported ~6m45s runtime regression
+        # after Patch 96's deploy) -- confirmed via code read that
+        # solve_reachable_ceiling_by_gw()'s return shape is {gw: {"squad":
+        # <15-row DataFrame>, "total_xpts": float, "cost": float}} (data_
+        # pipeline.py lines 833-863/808-828) -- the FULL solve_squad() result,
+        # not just the number _apply_squad_health_guardrail() actually reads
+        # (ceiling_info.get("total_xpts"), confirmed in chip_protocol.py).
+        # Passing that whole nested structure (embedded DataFrames included)
+        # into a @st.cache_data-wrapped function breaks the same discipline
+        # every OTHER value threaded into _chip_portfolio_calc already
+        # follows -- _fh_gap_table, for exactly this reason, was already
+        # reduced to a flat {gw: float} before crossing that boundary; this
+        # one wasn't. Reduced here to the one number the guardrail actually
+        # uses, same shape the guardrail expects ({gw: {"total_xpts": ...}})
+        # so chip_protocol.py needed no change and every existing Patch 96
+        # test keeps passing unmodified. Benchmarked directly (2026-09-30):
+        # hashing a dict of embedded DataFrames costs ~27ms/call in this
+        # sandbox, not obviously enough on its own to explain a 6m45s
+        # regression -- flagged plainly to the manager as a real but likely
+        # PARTIAL fix, not a confirmed full explanation, pending clarification
+        # on whether the timed run covered this tab alone or the full "Run
+        # Model" click across every tab (a materially different scope than
+        # what Patch 96's own ~40-50s estimate covered).
+        _reachable_by_gw_raw = locals().get("reachable_by_gw")
+        _reachable_ceiling_for_guardrail = (
+            {gw: {"total_xpts": v["total_xpts"]} for gw, v in _reachable_by_gw_raw.items()
+             if v is not None and v.get("total_xpts") is not None}
+            if _reachable_by_gw_raw else None)
         # Patch 91 (v6.9 Rule #49, chip-expiry correctness) -- confirmed via
         # code read (2026-09-30) that chip_portfolio_schedule() considered
         # every GW in `_portfolio_gw_list` (which can reach 8-16 GWs ahead,
