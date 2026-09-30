@@ -37,7 +37,40 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 88 (manager follow-up, same day: the Patch 87 fix still left a one-line caption + a "
+PATCH_VERSION = ("Patch 89 (model: v6.9 Standing Rule #50 Chip-Gain Reporting + Rule #51 Cross-Tool "
+                  "Reconciliation, plus partial Rule #49(d)/(f) — confirmed via code read that no quoted chip "
+                  "gain anywhere in this app stated its horizon, formula variant, or baseline, and nothing "
+                  "decomposed a disagreement with another tool's figure input-by-input. Adds chip_protocol."
+                  "gain_disclosure() — a shared formatter appended to every chip-gain caption/tooltip stating "
+                  "the horizon, formula variant (base/adjusted, read from cfg), tier, and baseline, with "
+                  "hold-squad/no-transfer baselines explicitly flagged as NOT the Rule #50 decision basis — "
+                  "applied to both Wildcard rebuild captions (auto and manual scenario) and the joint chip "
+                  "sequence's card tooltips. Adds a new \"Cross-Tool Reconciliation (Rule #51)\" expander on the "
+                  "Chip Plan tab: enter another tool's quoted Wildcard gain for a candidate week and "
+                  "chip_protocol.reconcile_wildcard_gain() decomposes the difference one input at a time — "
+                  "captain doubling (Standing Rule #31: re-scores the same squads with rating_horizon_value() "
+                  "vs. this app's captain-excluded realized_horizon_value()), free-transfer accrual (one extra "
+                  "solve at a static FT count), horizon length and team value (both a full re-scan at the "
+                  "alternate setting) — reporting each input's share of the gap and any residual as explicitly "
+                  "UNEXPLAINED rather than guessed at; formula variant (base/adjusted) and availability "
+                  "assumptions are the 2 of 6 doc-listed inputs NOT yet automated, named via the panel's own "
+                  "\"Not yet automated\" expander. Rule #49(d): chip_portfolio_schedule()'s Bench Boost/Triple "
+                  "Captain valuation now solves each candidate week's actually-reachable squad under accruing "
+                  "free transfers (new _reachable_bb_tc_tables(), reusing the same one-shot solve_squad() "
+                  "pattern wildcard_window_value_scan() already uses) instead of scoring the CURRENT squad "
+                  "unchanged at every week — still a one-shot approximation, not a fully chained transfer "
+                  "simulation, and disclosed as such. Rule #49(f): when the joint schedule places Bench Boost on "
+                  "or after Wildcard, the Wildcard card's tooltip now also reports (never re-scores) that "
+                  "build's own bench sum at the Bench Boost week, reusing the already-computed rebuild-squad "
+                  "path. Live-verified: all 4 automated Rule #51 components render correctly with a real "
+                  "decomposition table and residual figure; the Reconcile button's own computation (several "
+                  "MILP re-solves) takes several seconds, so it's now wrapped in an explicit spinner so a click "
+                  "doesn't look like a no-op while it runs. NOT in this patch, staying explicitly out of scope: "
+                  "the Rule #46/#47 market-odds fixture leg (team-strength tier only, per Patch 83's own "
+                  "disclosure — unchanged), the v6.9 Step 0 calibration log (separate infrastructure, not "
+                  "started), and Rule #51's 2 not-yet-automated inputs named above. No scheduling/tie-break "
+                  "logic changed — confirmed via the full pre-existing test suite passing unmodified. "
+                  "Previously, Patch 88 (manager follow-up, same day: the Patch 87 fix still left a one-line caption + a "
                   "second \"Scope note\" expander sitting below the card grid — manager's call: \"only one should "
                   "exist.\" That leftover always-visible caption and its own expander are removed entirely; the "
                   "combined total/tie-band figure moves into each scheduled card's own tooltip "
@@ -959,9 +992,14 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
         squad_df_adv, pool_df_adv, cfg, free_transfers, bank,
         list(portfolio_gw_list), list(portfolio_gw_list), window_len=window_len)
         if "wildcard" in available_chip_types else {"by_gw": {}, "best_gw": None, "best_gap": None})
+    # Patch 89 (Rule #49d) -- pool_df_adv/free_transfers passed through so
+    # chip_portfolio_schedule() can build the reachable pre-Wildcard Bench
+    # Boost/Triple Captain table (_reachable_bb_tc_tables()) instead of the
+    # flat, unchanged-squad one it used before this patch.
     chip_portfolio = chip_protocol.chip_portfolio_schedule(
         available_chip_types, wc_window_scan, fh_gap_table, squad_df_adv,
-        list(portfolio_gw_list), cfg, lambda total: eng.margin_of_error_threshold(total, cfg))
+        list(portfolio_gw_list), cfg, lambda total: eng.margin_of_error_threshold(total, cfg),
+        pool_df=pool_df_adv, free_transfers=free_transfers)
     return wc_window_scan, chip_portfolio
 
 
@@ -2544,7 +2582,10 @@ with tab_chips:
                 "value": info["value"] if info else None, "order": _seq_order.get(chip_key),
                 "n_scheduled": _seq_n, "total_gain": chip_portfolio.get("total_gain"),
                 "tie_band": chip_portfolio.get("tie_band"),
-                "near_tie_count": chip_portfolio.get("near_tie_count")}
+                "near_tie_count": chip_portfolio.get("near_tie_count"),
+                # Rule #49(f) -- only ever set on the "wildcard" entry, only
+                # when Bench Boost is also scheduled at/after it.
+                "bench_term": (info or {}).get("bench_term")}
 
     def _seq_combined_note(seq: dict) -> str:
         """Patch 87b (manager: cards and a separate sequence summary read as
@@ -2552,13 +2593,25 @@ with tab_chips:
         scope disclosure that used to live in its own always-visible caption
         below the grid now lives ONLY here, in each scheduled card's own
         tooltip — the grid is the single visible surface, hover for the
-        rest, same convention as every other card on this tab."""
+        rest, same convention as every other card on this tab.
+
+        Patch 89 (Rule #50, Chip-Gain Reporting) — appends the doc-required
+        horizon/formula-variant/tier disclosure via the shared gain_
+        disclosure() formatter, and (Rule #49d/#49f) updates the scope note
+        now that both are partially modeled instead of not at all: (d) uses
+        a one-shot reachable-squad approximation, not a full chained
+        simulation; (f) is a disclosure-only addition, not a scoring
+        change."""
+        _gw_list = chip_adv_window["gw_list"] if chip_adv_window else None
         return (f" Combined across this {seq['n_scheduled']}-chip sequence: {seq['total_gain']:+.1f} xPts vs. the "
                 f"best transfer path (tie band ±{seq['tie_band']:.1f} xPts, {seq['near_tie_count']} sequence(s) "
-                f"inside it, later commitment preferred — Rule #34/#49). Not yet modeled: preparation transfers "
-                f"drawing on accrued free transfers ahead of a chip week (Rule #49d), and a Wildcard build's "
-                f"explicit bench term when a Bench Boost is planned soon after (Rule #49f) — tracked as open "
-                f"follow-ups. Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32).")
+                f"inside it, later commitment preferred — Rule #34/#49) "
+                f"{chip_protocol.gain_disclosure('best_transfer_path', _gw_list, cfg)}. Rule #49d (preparation "
+                f"transfers) uses a one-shot reachable-squad approximation per candidate week, not a full "
+                f"week-by-week chained simulation — same performance tradeoff already disclosed for Rule #48's "
+                f"own baseline. Rule #49f (Wildcard bench term) is a disclosure only, shown on the Wildcard card "
+                f"when Bench Boost is also scheduled — it does not change any reported value. Re-run every "
+                f"gameweek — this is a hypothesis, not a commitment (Rule #32).")
 
     # Chip Signals — Patch 31 visual redesign. Replaces the old paragraph-per-
     # rule Chip Advisor + Chip Strategy expanders with one scannable card grid;
@@ -2659,12 +2712,19 @@ with tab_chips:
     _wc_seq_sub_suffix, _wc_seq_tooltip_suffix = "", ""
     if _wc_seq is not None:
         if _wc_seq["scheduled"]:
+            # Rule #49(f) -- disclose the bench sum this build carries into
+            # a Bench Boost scheduled at/after it, when chip_portfolio_
+            # schedule() reported one (chip_protocol.py sets bench_term
+            # only on the "wildcard" detail entry, only in that case).
+            _bench_note = (f" This build also carries a bench worth {_wc_seq['bench_term']:+.1f} xPts for the "
+                            f"Bench Boost planned soon after (Rule #49f)."
+                            if _wc_seq.get("bench_term") is not None else "")
             _wc_seq_sub_suffix = (f" · sequenced GW{_wc_seq['gw']} ({_ordinal(_wc_seq['order'])} of "
                                    f"{_wc_seq['n_scheduled']}, {_wc_seq['value']:+.1f} xPts)")
             _wc_seq_tooltip_suffix = (f" Rule #48/#49's joint sequence recommends playing it GW{_wc_seq['gw']} "
                                        f"({_wc_seq['value']:+.1f} xPts vs. the best no-chip transfer path) as part "
                                        f"of a {_wc_seq['n_scheduled']}-chip sequence — the exact date remains your "
-                                       f"own call (Rule #32)." + _seq_combined_note(_wc_seq))
+                                       f"own call (Rule #32)." + _bench_note + _seq_combined_note(_wc_seq))
         else:
             _wc_seq_sub_suffix = " · no positive slot in the current joint sequence"
             _wc_seq_tooltip_suffix = (" Rule #48/#49's joint sequence finds no positive slot for the Wildcard "
@@ -2776,20 +2836,94 @@ with tab_chips:
                         f"vs. the best transfer path across the {_seq_n} chips scheduled on the cards above (tie "
                         f"band ±{chip_portfolio['tie_band']:.1f} xPts, {chip_portfolio['near_tie_count']} "
                         f"sequence(s) inside it, later commitment preferred).")
+            # Patch 89 — (d) and (f) are now partially modeled (see
+            # chip_protocol.py's _reachable_bb_tc_tables() and the
+            # bench_term disclosure), so this bullet list states their real
+            # scope instead of claiming "not yet modeled."
             st.markdown(
                 "- Bench Boost/Triple Captain values switch to the Wildcard's own rebuild squad for any week at or "
                 "after a scheduled Wildcard (Rule #49b) — verified in code, not assumed.\n"
                 "- Free Hit's value is a full rebuild vs. your own best XI that week, and doesn't depend on squad "
                 "path (Rule #49c).\n"
-                "- **Not yet modeled**: preparation transfers drawing on accrued free transfers ahead of a chip "
-                "week (Rule #49d), and a Wildcard build's explicit bench term when a Bench Boost is planned soon "
-                "after (Rule #49f). Tracked as open follow-ups, same disclosure standard as this project's other "
-                "fast-follows.\n"
+                "- Pre-Wildcard Bench Boost/Triple Captain values use a one-shot reachable-squad approximation per "
+                "candidate week (Rule #49d) — not a full week-by-week chained transfer simulation, same "
+                "performance tradeoff already disclosed for Rule #48's own baseline.\n"
+                "- When a Wildcard and Bench Boost are scheduled together, the Wildcard card discloses that "
+                "build's bench sum at the Bench Boost week (Rule #49f) — a disclosure only, it doesn't change any "
+                "reported value.\n"
                 "- Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32).")
         elif chip_portfolio is not None:
             st.markdown("---")
             st.caption("🗓️ Sequencing your available chips together finds no positive combined assignment this "
                        "run — holding all for now (Rule #32).")
+
+    # Patch 89 (v6.9 Standing Rule #51, Cross-Tool Reconciliation Rule) —
+    # confirmed via code read (2026-09-29) that nothing in this app
+    # decomposed a disagreement with another tool's quoted figure before
+    # this patch; the closest existing thing (the Wildcard what-if captions
+    # above) only ever reports THIS app's own number, never compares it
+    # input-by-input against a different tool's. Scoped to the Wildcard
+    # window-value gain (Rule #48) — the doc's own worked origin example
+    # for this rule is specifically a Wildcard-size disagreement, and
+    # that's where this app already has the richest machinery
+    # (wildcard_window_value_scan) to build a decomposition on. See
+    # chip_protocol.reconcile_wildcard_gain() for exactly which of the
+    # doc's six listed inputs are automated here (4 of 6) vs. disclosed as
+    # not yet modeled (2 of 6 — formula variant, availability assumptions).
+    with st.expander("🔍 Cross-Tool Reconciliation (Rule #51) — compare against another tool's Wildcard figure"):
+        st.caption("Enter another tool's quoted Wildcard gain for a candidate week, and this decomposes the "
+                   "difference from this app's own figure one input at a time — captain doubling, free-transfer "
+                   "accrual, horizon length, and team value — instead of either number being accepted at face "
+                   "value.")
+        _rc_col1, _rc_col2, _rc_col3 = st.columns(3)
+        with _rc_col1:
+            _rc_gw = st.number_input("Candidate GW", min_value=int(planning_gw),
+                                      max_value=int(planning_gw) + 37, value=int(planning_gw), step=1,
+                                      key="reconcile_gw")
+        with _rc_col2:
+            _rc_other_gain = st.number_input("Other tool's quoted gain (xPts)", value=0.0, step=0.1,
+                                              key="reconcile_other_gain")
+        with _rc_col3:
+            _rc_window_len = st.number_input("This app's window length (GWs)", min_value=1, max_value=10,
+                                              value=int(cfg.get("chip_portfolio", {}).get("window_value_len", 4)),
+                                              step=1, key="reconcile_window_len")
+        _rc_adv_col1, _rc_adv_col2 = st.columns(2)
+        with _rc_adv_col1:
+            _rc_alt_window = st.number_input("Alt. window length to test (optional, 0 = skip)", min_value=0,
+                                              max_value=10, value=0, step=1, key="reconcile_alt_window")
+        with _rc_adv_col2:
+            _rc_alt_budget = st.number_input("Alt. team value £m to test (optional, 0 = skip)", min_value=0.0,
+                                              value=0.0, step=0.5, key="reconcile_alt_budget")
+        if st.button("Reconcile", key="reconcile_run") and not squad_df.empty:
+            with st.spinner("Reconciling against the current squad and pool — this re-solves several "
+                             "squad variants and can take a few seconds..."):
+                _rc_result = chip_protocol.reconcile_wildcard_gain(
+                    squad_df_adv, pool_df_adv, cfg, ft["free_transfers"], bank, int(_rc_gw),
+                    chip_adv_window["gw_list"] if chip_adv_window else gw_list, float(_rc_other_gain),
+                    window_len=int(_rc_window_len),
+                    alt_window_len=int(_rc_alt_window) if _rc_alt_window else None,
+                    alt_budget=float(_rc_alt_budget) if _rc_alt_budget else None)
+            if not _rc_result["feasible"]:
+                st.info(_rc_result.get("reason", "Couldn't reconcile this run."))
+            else:
+                st.markdown(f"**This app's own gain: {_rc_result['model_gap']:+.1f} xPts** vs. the other tool's "
+                            f"**{_rc_result['other_gain']:+.1f} xPts** — a **{_rc_result['gap_to_explain']:+.1f} "
+                            f"xPts** difference to explain.")
+                if _rc_result["components"]:
+                    _rc_rows = pd.DataFrame([
+                        {"Input tested": c["input"], "Gain under that input": f"{c['variant_gap']:+.1f}",
+                         "Share of the gap it explains": f"{c['delta']:+.1f}"}
+                        for c in _rc_result["components"]])
+                    st.dataframe(_rc_rows, hide_index=True, use_container_width=True)
+                    for c in _rc_result["components"]:
+                        st.caption(f"• **{c['input']}**: {c['note']}")
+                st.markdown(f"**Explained so far: {_rc_result['explained_total']:+.1f} xPts · "
+                            f"Residual unexplained: {_rc_result['residual_unexplained']:+.1f} xPts** — per Rule "
+                            f"#51, a difference that can't be reproduced is reported as unexplained, with its "
+                            f"size, never guessed at.")
+                with st.expander("Not yet automated (Rule #51 scope)"):
+                    for item in _rc_result["not_modeled"]:
+                        st.markdown(f"- {item}")
 
 with tab_transfers:
     # ---------------------------------------------------------------------------
@@ -2822,10 +2956,17 @@ with tab_transfers:
                     styled_wc = recommend.apply_style_to_wildcard_squad(
                         squad_df, wc_eval_auto["rebuild_squad"], _full_pool_now, style_name, cfg, _wc_col)
                     gap = wc_eval_auto["gap"]
+                    # Patch 89 (Rule #50) — this figure is against HOLDING
+                    # the squad, not the best no-chip transfer path Rule #50
+                    # requires for a decision; the shared gain_disclosure()
+                    # formatter states that plainly plus horizon/variant/
+                    # tier, instead of this caption's own ad hoc wording.
                     st.caption(f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
                                f"{wc_eval_auto['hold_total']:.1f} xPts holding your current squad over this window "
-                               f"({gap:+.1f} xPts). Style profile **{style_name}** applied. Date remains your own "
-                               f"call (Standing Rule #32) — this is the model's current best rebuild if played now.")
+                               f"({gap:+.1f} xPts) "
+                               f"{chip_protocol.gain_disclosure('hold_squad', detect_gw_list or gw_list, cfg)}. "
+                               f"Style profile **{style_name}** applied. Date remains your own call (Standing "
+                               f"Rule #32) — this is the model's current best rebuild if played now.")
                     if _wc_col in styled_wc.columns:
                         xi_res = opt.best_starting_xi(styled_wc, _wc_col)
                         cols = ["web_name", "team", "position", "price", _wc_col]
@@ -3112,10 +3253,15 @@ def _render_scenario_results():
                            f"a 3-GW minimum applies to Wildcard rebuilds regardless of the sidebar horizon "
                            f"(currently {horizon} GW).")
             gap = wc_cache["gap"]
+            # Patch 89 (Rule #50) — same "labelled as such, never the
+            # decision basis" treatment as the auto-rebuild caption above:
+            # this is a hold-squad baseline, not the best no-chip transfer
+            # path.
             st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
                         f'{wc_cache["rebuild_total"]:.1f} xPts vs {wc_cache["hold_total"]:.1f} xPts holding your '
                         f'current squad, over the same {len(wc_cache["future_gw_list"])}-GW window ({gap:+.1f} '
-                        f'xPts). Informational only — this candidate GW is your own choice, and the model never '
+                        f'xPts) {chip_protocol.gain_disclosure("hold_squad", wc_cache["future_gw_list"], cfg)}. '
+                        f'Informational only — this candidate GW is your own choice, and the model never '
                         f'names a single "play" date (Standing Rule #32); see Chip Rack above for whether '
                         f'v6.4\'s own Wildcard trigger is currently active.</div>', unsafe_allow_html=True)
             st.caption("📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
