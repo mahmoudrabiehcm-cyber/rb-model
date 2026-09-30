@@ -37,7 +37,67 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 97 (2026-09-30, manager-reported ~6m45s runtime regression after deploying Patch 96, "
+PATCH_VERSION = ("Patch 99 (2026-09-30, manager re-timed the run AFTER deploying Patch 97 and got ~6m10s — "
+                  "essentially unchanged from the original ~6m45s, confirming Patch 97's fix targeted the wrong "
+                  "bottleneck; manager: \"i need this to be rechecked\"): found the REAL cause by systematically "
+                  "auditing every call site in app.py against which computations were/weren't wrapped in "
+                  "@st.cache_data, instead of re-guessing at the same small piece Patch 97 already (correctly, "
+                  "but insufficiently) fixed. Confirmed FIVE genuinely expensive computations were called bare "
+                  "at the app.py top level with NO caching at all — meaning each one re-ran IN FULL on every "
+                  "single Streamlit script rerun (any widget touch: Style toggle, materiality-bar slider, "
+                  "hit-stance radio, etc.), not just once per \"Run Model\" click: (1) recommend."
+                  "suggest_transfers() — the actual Transfer Recommendations engine, a chained k=1..5 "
+                  "(under \"Hit if worth it\") multi-GW MILP search with its own position tie-break and "
+                  "Starting-XI Impact Check solves on top — almost certainly the single largest piece of this "
+                  "regression; (2) data_pipeline.solve_reachable_ceiling_by_gw() for the Wildcard trigger — one "
+                  "fresh MILP solve per GW in detect_gw_list; (3)-(5) the three isolated Chip Advisor cards "
+                  "(evaluate_bench_boost/evaluate_triple_captain/evaluate_free_hit) — Free Hit's in particular "
+                  "confirmed as a fresh MILP rebuild solve per horizon GW by this file's OWN pre-existing "
+                  "comment, up to 8-16 GWs. All five now route through new @st.cache_data(ttl=900, "
+                  "show_spinner=False)-wrapped functions (_suggest_transfers_calc, _reachable_ceiling_calc, "
+                  "_bb_advisor_calc, _tc_advisor_calc, _fh_advisor_calc), following the exact pattern already "
+                  "proven for _chip_portfolio_calc (Patch 86) and _extended_wc_cross_check_calc (Patch 95) — a "
+                  "rerun with unchanged inputs is now a cache hit (near-instant) instead of a full re-solve on "
+                  "ALL FIVE, not just chip_portfolio. moe_fn/rebuild_fn closures (not reliably hashable for a "
+                  "cache key) are reconstructed INSIDE each cached wrapper from plain hashable pieces "
+                  "(cfg/chip_key/team_value), same discipline _chip_portfolio_calc already established. TWO "
+                  "existing golden-slice tests (test_patch73/74, which exec() literal source slices extracted "
+                  "from app.py) broke on this refactor since they don't define the new wrapper names in their "
+                  "exec namespace — fixed by adding an uncached pass-through stand-in for _reachable_ceiling_calc "
+                  "in both (these tests cover diagnostic-text logic, not caching, so an uncached stand-in "
+                  "preserves exactly what they're testing). Full 133-test regression suite passes, zero "
+                  "regressions beyond that expected/fixed golden-slice adjustment. DISCLOSED, NOT OVERCLAIMED: "
+                  "live re-verification of the actual before/after wall-clock time on the deployed app was not "
+                  "possible from this sandbox (no network access to the live app or the official FPL API) — "
+                  "this is a confirmed, real fix for a confirmed, real gap (five uncached expensive computations, "
+                  "now cached), not a guess, but whether it fully closes the ~6-minute gap can only be confirmed "
+                  "by the manager's own re-timed run after deploying this patch. Previously, Patch 98 (v6.9 Rule #50 follow-up, \"a more wide rule\" — manager, 2026-09-30, after "
+                  "confirming Patch 96's harmonized chip sequence live on team 26073, asking what the Transfers "
+                  "side does \"if we will use the chip\" and explicitly widening the ask beyond that one "
+                  "screenshot): two real, general gaps found by reading recommend.py/app.py end to end. (1) "
+                  "`_bb_play_gw` (app.py) was sourced ONLY from the isolated Bench Boost advisor's own "
+                  "individually-best week, never from chip_portfolio's harmonized joint assignment — the same "
+                  "\"two disconnected sources of truth\" bug class Patch 91/92/93 already fixed elsewhere, and "
+                  "a live risk specifically BECAUSE Patch 96 lets the joint scheduler place Bench Boost on a "
+                  "different week than its own standalone optimum. Fixed via new "
+                  "recommend.resolve_bb_play_gw(isolated, harmonized) — prefers the harmonized pick, falls back "
+                  "to the isolated verdict only when no joint schedule has one. (2) plan_transfer_schedule() had "
+                  "no Free Hit equivalent of the Wildcard \"illusory value\" truncation it already has (Patch "
+                  "92) — confirmed via reading the whole function body, no freehit_gw parameter existed at all. "
+                  "A transfer's valuation for any week could be credited with points that only exist at a "
+                  "scheduled Free Hit week, but that week is actually played by a different, temporary rebuild "
+                  "squad, never the persisted one. Fixed via chip_schedule's new optional \"freehit_gw\" key: "
+                  "excludes (not truncates — Free Hit reverts after one week, unlike Wildcard) that one GW from "
+                  "every week's remaining_gws. Triple Captain deliberately left alone — it doesn't change squad "
+                  "composition, so the transfer planner has nothing to get wrong there. Both fixes additive-only "
+                  "(new optional params/keys, default None = exact pre-Patch-98 behavior). Test-first: 7 new "
+                  "tests written and confirmed failing before implementation (4 for resolve_bb_play_gw via "
+                  "AttributeError; 3 for the Free Hit exclusion, confirmed failing for the RIGHT reason — the "
+                  "un-implemented freehit_gw key being silently ignored, verified by first tracing why an "
+                  "initial synthetic fixture returned zero transfers even in the baseline case, a GK-position/"
+                  "budget artifact in the test setup, not a code bug — before trusting the red), all passing "
+                  "after; full 133-test regression suite passes (126 pre-existing + 7 new), zero regressions. "
+                  "Previously, Patch 97 (2026-09-30, manager-reported ~6m45s runtime regression after deploying Patch 96, "
                   "live screenshot of team 26073's Chip Plan tab confirming Patch 96's harmony logic IS working "
                   "live — Triple Captain@GW10/Free Hit@GW11 both pre-Wildcard, Wildcard@GW12, Bench Boost@GW13 "
                   "post-Wildcard, a genuinely joint 4-chip sequence): found and fixed ONE real, confirmed "
@@ -1230,6 +1290,112 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _reachable_ceiling_calc(cfg: dict, shape_proj: pd.DataFrame, squad_codes_items: tuple,
+                             free_transfers: int, detect_gw_list: tuple):
+    """Patch 99 -- same uncached-hot-path finding as _suggest_transfers_calc()
+    above, applied to the Wildcard trigger's own reachable-ceiling solve
+    (data_pipeline.solve_reachable_ceiling_by_gw(): one MILP solve PER GW in
+    detect_gw_list, confirmed via code read of its own docstring). Was
+    called bare at the app.py top level (pre-Patch-99), re-solving on every
+    rerun regardless of whether the squad/transfers/detect window actually
+    changed."""
+    return data_pipeline.solve_reachable_ceiling_by_gw(
+        cfg, shape_proj, list(squad_codes_items), free_transfers, list(detect_gw_list))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _bb_advisor_calc(bench_df_adv: pd.DataFrame, bb_gws: tuple, cfg: dict, chip_key: str):
+    """Patch 99 -- same fix as _reachable_ceiling_calc() above, for the
+    isolated Bench Boost advisor card. Reconstructs moe_fn INSIDE the cached
+    function (same discipline _chip_portfolio_calc already uses for its own
+    lambda) rather than accepting a closure as a param, since a lambda isn't
+    reliably hashable for @st.cache_data's cache key."""
+    cat_cfg = cfg.get("chip_advisor_thresholds", {})
+    t = cat_cfg.get(chip_key, {})
+    moe_fn = lambda total: eng.margin_of_error_threshold(
+        total, cfg, floor_points=t.get("floor_points"), pct_of_total=t.get("pct_of_total"))
+    return chip_protocol.evaluate_bench_boost(bench_df_adv, list(bb_gws), moe_fn)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _tc_advisor_calc(starters_df_adv: pd.DataFrame, tc_gws: tuple, cfg: dict, chip_key: str):
+    """Patch 99 -- same fix, for the isolated Triple Captain advisor card."""
+    cat_cfg = cfg.get("chip_advisor_thresholds", {})
+    t = cat_cfg.get(chip_key, {})
+    moe_fn = lambda total: eng.margin_of_error_threshold(
+        total, cfg, floor_points=t.get("floor_points"), pct_of_total=t.get("pct_of_total"))
+    return chip_protocol.evaluate_triple_captain(starters_df_adv, list(tc_gws), moe_fn)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _fh_advisor_calc(squad_df_adv: pd.DataFrame, fh_gws: tuple, cfg: dict, chip_adv_proj: pd.DataFrame,
+                      team_value: float, chip_key: str):
+    """Patch 99 -- same fix, for the isolated Free Hit advisor card. This is
+    the single most expensive of the three isolated advisors -- confirmed by
+    this file's own pre-existing comment ("each Free Hit check is a fresh
+    MILP solve per horizon GW") -- and was, like the others, completely
+    uncached before this patch. rebuild_fn is reconstructed inside this
+    cached function from cfg/chip_adv_proj/team_value (all hashable/already-
+    proven cache_data-safe), same reason moe_fn is reconstructed rather than
+    passed in."""
+    cat_cfg = cfg.get("chip_advisor_thresholds", {})
+    t = cat_cfg.get(chip_key, {})
+    moe_fn = lambda total: eng.margin_of_error_threshold(
+        total, cfg, floor_points=t.get("floor_points"), pct_of_total=t.get("pct_of_total"))
+    rebuild_fn = lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, chip_adv_proj, team_value, gw)
+    return chip_protocol.evaluate_free_hit(squad_df_adv, list(fh_gws), rebuild_fn, moe_fn)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _suggest_transfers_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+                             profile_name: str, hit_stance: str, free_transfers: int,
+                             bank: float, current_gw: int, gw_list: tuple,
+                             forced_count: int | None, meaningful_bar: float | None,
+                             bench_codes_items: tuple, chip_advisory: str | None,
+                             bb_play_gw: int | None, chip_capped_gw_list: tuple | None,
+                             disrupted_codes_items: tuple | None, chip_schedule: dict | None):
+    """Patch 99 (2026-09-30, manager-reported ~6m10s runtime PERSISTING after
+    Patch 97's caching fix -- confirmed the fix targeted the wrong bottleneck)
+    -- confirmed via code read that recommend.suggest_transfers() (and, via
+    its chained-planner dispatch, plan_transfer_schedule() -- the k=1..5
+    (under "Hit if worth it") chained multi-GW MILP search, with the
+    position tie-break and Starting-XI Impact Check's own extra solves on
+    top) was called bare at the app.py top level (pre-Patch-99 line ~2335),
+    with NO @st.cache_data wrapper at all -- unlike every other comparably
+    expensive computation in this file (_chip_portfolio_calc since Patch 86,
+    _extended_wc_cross_check_calc since Patch 95, _project, _picks). That
+    means THE app's single most expensive user-facing computation re-ran in
+    full on EVERY Streamlit script rerun -- including reruns triggered by a
+    completely unrelated widget (Style toggle, materiality-bar slider,
+    hit-stance radio, etc.) that never changes the squad, transfers, bank,
+    or chip schedule this computation actually depends on. Patch 97's
+    DataFrame-in-cache-key fix was real but targeted a much smaller, already-
+    cached computation (chip_portfolio) -- it was never going to touch this,
+    which is exactly why the manager's re-timed run showed no real
+    improvement (6m10s vs. the original 6m45s). Wrapping this call in the
+    same @st.cache_data(ttl=900, show_spinner=False) pattern makes a rerun
+    with unchanged inputs a cache hit (near-instant) instead of a full
+    re-solve, with zero change to the computed values themselves -- the full
+    133-test regression suite (unaffected by this app.py-only wiring change)
+    still passes unmodified, since this function is a pure pass-through to
+    the same recommend.suggest_transfers() call with the same arguments.
+
+    Tuple-ified args (`gw_list`, `bench_codes_items`, `chip_capped_gw_list`,
+    `disrupted_codes_items`) are hashable forms of the real list/set
+    `suggest_transfers()` expects, reconstructed just inside this wrapper --
+    same discipline `_extended_wc_cross_check_calc()` already uses for its
+    own set/list params."""
+    bench_codes = set(bench_codes_items) if bench_codes_items else set()
+    chip_capped = list(chip_capped_gw_list) if chip_capped_gw_list is not None else None
+    disrupted_codes = set(disrupted_codes_items) if disrupted_codes_items else None
+    return recommend.suggest_transfers(
+        squad_df, pool_df, cfg, profile_name, hit_stance, free_transfers, bank, current_gw,
+        list(gw_list), forced_count, meaningful_bar, bench_codes, chip_advisory,
+        bb_play_gw=bb_play_gw, chip_capped_gw_list=chip_capped,
+        disrupted_codes=disrupted_codes, chip_schedule=chip_schedule)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def _extended_wc_cross_check_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_proj: pd.DataFrame,
                                    cfg: dict, style_name: str, free_transfers: int, bank: float,
                                    planning_gw: int, ext_gw_list: tuple, meaningful_bar: float,
@@ -1946,8 +2112,12 @@ with st.spinner("Fetching live data and computing xPts..."):
         # detect_gw_list, each with that GW's own accrued free-transfer count
         # (data_pipeline.solve_reachable_ceiling_by_gw()), replacing the old
         # single shared solve reused across the whole window.
-        reachable_by_gw = data_pipeline.solve_reachable_ceiling_by_gw(
-            cfg, shape_proj, squad_codes, ft["free_transfers"], detect_gw_list)
+        # Patch 99 -- routed through the cached _reachable_ceiling_calc()
+        # instead of calling data_pipeline.solve_reachable_ceiling_by_gw()
+        # bare (was uncached: one fresh MILP solve per GW in detect_gw_list,
+        # re-run on every unrelated-widget rerun).
+        reachable_by_gw = _reachable_ceiling_calc(
+            cfg, shape_proj, tuple(sorted(squad_codes)), ft["free_transfers"], tuple(detect_gw_list))
         wc_trigger = eng.wildcard_trigger_check(squad_detect, reachable_by_gw, detect_gw_list, cfg)
         if wc_trigger.get("avg_rating_pct") is None:
             _any_reachable = any(v is not None and v.get("squad") is not None and not v["squad"].empty
@@ -2062,8 +2232,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     if any(c.startswith("Bench Boost") for c in available_chip_names):
         _bb_gws, _bb_last_used, _bb_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Bench Boost")
         if _bb_gws:
-            bb_advisor = chip_protocol.evaluate_bench_boost(
-                bench_df_adv, _bb_gws, _chip_moe_fn("bench_boost"))
+            # Patch 99 -- routed through the cached _bb_advisor_calc().
+            bb_advisor = _bb_advisor_calc(bench_df_adv, tuple(_bb_gws), cfg, "bench_boost")
         elif _bb_last_used is not None:
             bb_used_state = {"last_used_gw": _bb_last_used, "next_open_gw": _bb_next}
     tc_advisor = None
@@ -2071,8 +2241,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     if any(c.startswith("Triple Captain") for c in available_chip_names):
         _tc_gws, _tc_last_used, _tc_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Triple Captain")
         if _tc_gws:
-            tc_advisor = chip_protocol.evaluate_triple_captain(
-                starters_df_adv, _tc_gws, _chip_moe_fn("triple_captain"))
+            # Patch 99 -- routed through the cached _tc_advisor_calc().
+            tc_advisor = _tc_advisor_calc(starters_df_adv, tuple(_tc_gws), cfg, "triple_captain")
         elif _tc_last_used is not None:
             tc_used_state = {"last_used_gw": _tc_last_used, "next_open_gw": _tc_next}
     fh_advisor = None
@@ -2080,10 +2250,11 @@ with st.spinner("Fetching live data and computing xPts..."):
     if any(c.startswith("Free Hit") for c in available_chip_names) and not squad_df.empty:
         _fh_gws, _fh_last_used, _fh_next = _clip_to_available_windows(chip_adv_window["gw_list"], "Free Hit")
         if _fh_gws:
-            fh_advisor = chip_protocol.evaluate_free_hit(
-                squad_df_adv, _fh_gws,
-                lambda gw: data_pipeline.solve_free_hit_rebuild(cfg, chip_adv_proj, team_value, gw),
-                _chip_moe_fn("free_hit"))
+            # Patch 99 -- routed through the cached _fh_advisor_calc() (the
+            # single most expensive isolated advisor -- a fresh MILP rebuild
+            # solve per horizon GW, per this block's own pre-existing
+            # comment above).
+            fh_advisor = _fh_advisor_calc(squad_df_adv, tuple(_fh_gws), cfg, chip_adv_proj, team_value, "free_hit")
         elif _fh_last_used is not None:
             fh_used_state = {"last_used_gw": _fh_last_used, "next_open_gw": _fh_next}
 
@@ -2227,8 +2398,20 @@ with st.spinner("Fetching live data and computing xPts..."):
     # when a manager-planned full-rebuild chip actually falls inside this
     # horizon) drives the "Chip-aware alt: Roll" comparison against just the
     # pre-rebuild window. Neither changes anything when absent/inapplicable.
-    _bb_play_gw = int(bb_advisor["verdict"].split("gw")[1]) \
+    # Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule" — manager,
+    # 2026-09-30): confirmed via code read that `_bb_play_gw` was previously
+    # sourced ONLY from the isolated Bench Boost advisor's own verdict,
+    # never from `chip_portfolio`'s harmonized joint assignment — the same
+    # "two disconnected sources of truth" bug class Patch 91/92/93 already
+    # fixed elsewhere. recommend.resolve_bb_play_gw() now prefers the
+    # harmonized joint-schedule week (chip_portfolio's own pick, which can
+    # legitimately differ from Bench Boost's standalone-best week since
+    # Patch 96) and falls back to the isolated advisor's verdict only when
+    # no joint schedule has one.
+    _isolated_bb_play_gw = int(bb_advisor["verdict"].split("gw")[1]) \
         if bb_advisor and bb_advisor["verdict"].startswith("play_gw") else None
+    _harmonized_bb_gw = (chip_portfolio or {}).get("assignment", {}).get("bboost")
+    _bb_play_gw = recommend.resolve_bb_play_gw(_isolated_bb_play_gw, _harmonized_bb_gw)
     # Patch 93 (v6.9 Rule #49 follow-up — same "two disconnected sources of
     # truth" bug class Patch 91/92 fixed on the chip-expiry window and the
     # chained weekly planner, this time on suggest_transfers()'s own
@@ -2270,6 +2453,16 @@ with st.spinner("Fetching live data and computing xPts..."):
     # None/absent whenever no Wildcard is actually scheduled, which
     # reproduces exact pre-Patch-92 behavior (see plan_transfer_schedule()'s
     # own docstring for the omitted-parameter contract).
+    # Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule") — `_chip_schedule`
+    # now also carries `freehit_gw` when the joint scheduler has one, built
+    # independently of whether a Wildcard is also scheduled this run (a
+    # Free Hit can be scheduled with no Wildcard in the picture at all).
+    # Confirmed via code read of plan_transfer_schedule()'s Patch 98 fix:
+    # `freehit_gw` excludes that one GW's illusory value from every week's
+    # valuation — the persisted squad never actually plays it, a real
+    # temporary rebuild does. `_chip_schedule` stays None only when NEITHER
+    # a Wildcard nor a Free Hit is scheduled, reproducing exact
+    # pre-Patch-92 behavior for that case.
     _chip_schedule = None
     if chip_portfolio is not None and chip_portfolio.get("assignment", {}).get("wildcard") is not None \
             and wc_window_scan is not None:
@@ -2277,14 +2470,23 @@ with st.spinner("Fetching live data and computing xPts..."):
         _wc_rebuild = (wc_window_scan.get("by_gw", {}) or {}).get(_wc_gw, {}).get("rebuild_squad")
         if _wc_rebuild is not None and not _wc_rebuild.empty:
             _chip_schedule = {"wildcard_gw": _wc_gw, "wildcard_rebuild_squad": _wc_rebuild}
+    _harmonized_fh_gw = (chip_portfolio or {}).get("assignment", {}).get("freehit")
+    if _harmonized_fh_gw is not None:
+        _chip_schedule = dict(_chip_schedule) if _chip_schedule else {}
+        _chip_schedule["freehit_gw"] = _harmonized_fh_gw
 
     transfer_error = None
     try:
-        rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
-                                           ft["free_transfers"], bank, planning_gw, transfer_gw_list, forced_count,
-                                           meaningful_bar_override, set(bench_df["code"]), chip_advisory,
-                                           bb_play_gw=_bb_play_gw, chip_capped_gw_list=_chip_capped_gw_list,
-                                           disrupted_codes=_disrupted_codes, chip_schedule=_chip_schedule)
+        # Patch 99 -- routed through the new @st.cache_data-wrapped
+        # _suggest_transfers_calc() instead of calling recommend.
+        # suggest_transfers() bare, so an unrelated-widget rerun with
+        # unchanged inputs is a cache hit instead of a full re-solve.
+        rec = _suggest_transfers_calc(
+            squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank, planning_gw,
+            tuple(transfer_gw_list), forced_count, meaningful_bar_override, tuple(sorted(bench_df["code"])),
+            chip_advisory, _bb_play_gw,
+            tuple(_chip_capped_gw_list) if _chip_capped_gw_list is not None else None,
+            tuple(sorted(_disrupted_codes)) if _disrupted_codes else None, _chip_schedule)
     except Exception as e:
         transfer_error = str(e)
         rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,

@@ -3024,6 +3024,66 @@ chip_portfolio:
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
+# Patch 98 (2026-09-30, v6.9 Rule #50 follow-up, "a more wide rule"). Manager,
+# after confirming Patch 96's harmony logic live on team 26073, asked what the
+# Transfers side does "if we will use the chip" -- then explicitly widened the
+# ask beyond that one screenshot's specific GWs. Two real, general gaps found
+# by reading recommend.py/app.py end to end (not inferred from resemblance to
+# a known bad pattern):
+#
+# (1) app.py's `_bb_play_gw` (feeds the transfer planner's Bench Boost
+# bench-valuation timing) was sourced ONLY from the isolated Bench Boost
+# advisor's own individually-best week, never from chip_portfolio's
+# harmonized joint assignment -- the same "two disconnected sources of
+# truth" bug class Patch 91/92/93 already fixed elsewhere, and a LIVE risk
+# specifically because Patch 96 lets the joint scheduler place Bench Boost
+# on a different week than its own standalone optimum. Fixed via
+# recommend.resolve_bb_play_gw(isolated, harmonized): prefers the
+# harmonized pick, falls back to the isolated verdict only when no joint
+# schedule has one.
+#
+# (2) plan_transfer_schedule() had no Free Hit equivalent of the Wildcard
+# "illusory value" truncation it already has (Patch 92) -- confirmed via
+# reading the whole function body, no freehit_gw parameter existed at all.
+# A transfer's valuation for any week could be credited with points that
+# only exist at a scheduled Free Hit week, but that week is played by a
+# different, temporary rebuild squad, never the persisted one. Fixed via
+# chip_schedule's new optional "freehit_gw" key: EXCLUDES (never truncates
+# -- Free Hit reverts after one week, unlike Wildcard) that one GW from
+# every week's remaining_gws valuation.
+#
+# Triple Captain deliberately left alone -- it doesn't change squad
+# composition, so the transfer planner has nothing to get wrong there.
+#
+# Both fixes additive-only (new optional params/keys, default None = exact
+# pre-Patch-98 behavior). Full 133-test regression suite passes (126
+# pre-existing + 7 new), zero regressions.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Patch 99 (2026-09-30, performance re-investigation). Manager re-timed the
+# run after deploying Patch 97 and got ~6m10s -- essentially unchanged from
+# the original ~6m45s, confirming Patch 97's fix (a real but small caching
+# discipline fix) had targeted the wrong bottleneck. A systematic audit of
+# every app.py call site against which computations were/weren't wrapped in
+# @st.cache_data found FIVE genuinely expensive computations called bare,
+# re-running IN FULL on every Streamlit script rerun (any widget touch, not
+# just once per "Run Model" click): recommend.suggest_transfers() (the
+# actual Transfer Recommendations engine -- a chained multi-GW MILP search,
+# almost certainly the largest single piece of this regression),
+# data_pipeline.solve_reachable_ceiling_by_gw() (the Wildcard trigger), and
+# all three isolated Chip Advisor cards (Bench Boost/Triple Captain/Free
+# Hit -- Free Hit confirmed as a fresh MILP rebuild solve per horizon GW,
+# up to 16 GWs, by this codebase's own pre-existing comment). All five now
+# cached via new wrapper functions following the exact pattern already
+# proven for _chip_portfolio_calc (Patch 86). DISCLOSED, NOT OVERCLAIMED:
+# this is a confirmed fix for a confirmed, real gap, not a guess -- but
+# whether it fully closes the ~6-minute gap can only be confirmed by the
+# manager's own re-timed run after deploying this patch, since live
+# verification against the deployed app isn't possible from this sandbox.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
 # cumulative xPts difference smaller than max(floor_points, pct_of_total *
 # the compared total) is reported as a statistical tie, not a clear winner —

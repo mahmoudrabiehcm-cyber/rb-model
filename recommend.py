@@ -636,6 +636,31 @@ def resolve_chip_capped_gw_list(gw_list: list[int], manual_planned_chip_gw: int 
     return [g for g in gw_list if g < chip_gw]
 
 
+def resolve_bb_play_gw(isolated_bb_play_gw: int | None, harmonized_bb_gw: int | None) -> int | None:
+    """Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule" — manager,
+    2026-09-30): closes the same "two disconnected sources of truth" gap
+    Patch 91/92/93 already fixed elsewhere, this time on the transfer
+    planner's Bench Boost timing. Confirmed via code read of app.py's
+    pre-Patch-98 `_bb_play_gw` (`int(bb_advisor["verdict"].split("gw")[1])`):
+    it was parsed ONLY from the ISOLATED Bench Boost advisor's own
+    individually-best week, never from `chip_portfolio`'s harmonized joint
+    schedule (`chip_portfolio["assignment"]["bboost"]`) — the number Rule
+    #49/#50's joint scheduler can, by design since Patch 96, place on a
+    DIFFERENT week than the isolated advisor's own optimum, whenever doing
+    so raises the combined 4-chip total. Without this, the Chip Plan tab
+    could show one Bench Boost week while the transfer planner silently
+    valued bench strength for a different one.
+
+    Prefers `harmonized_bb_gw` (the joint scheduler's pick — more informed,
+    since it knows about all 4 chips together) whenever it's set, falling
+    back to `isolated_bb_play_gw` (the standalone advisor's own verdict)
+    only when no joint schedule exists. Checked with `is not None`
+    throughout, never truthiness — a real GW of 0 must not be treated as
+    unset, same discipline `resolve_chip_capped_gw_list()` already
+    documents for this exact class of bug."""
+    return harmonized_bb_gw if harmonized_bb_gw is not None else isolated_bb_play_gw
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
@@ -705,6 +730,24 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     pre-Patch-92 behavior — verified by the full existing test suite
     passing unmodified.
 
+    Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule" — manager,
+    2026-09-30, after confirming Patch 96's harmonized chip sequence was
+    live and correct on team 26073, then asking what the Transfers side
+    does "if we will use the chip" and explicitly generalizing the ask):
+    `chip_schedule` gains an optional `"freehit_gw": int|None` key. Free
+    Hit has the identical "illusory value" problem Wildcard already had a
+    fix for (a) above, and had NO fix at all before this patch — a
+    transfer's valuation for any week could be credited with points that
+    only exist at the scheduled Free Hit week, but that week is actually
+    played by an entirely different, temporary rebuild squad, so that value
+    is never actually realized by the persisted squad this plan tracks.
+    Unlike Wildcard, Free Hit reverts after one week, so this is an
+    EXCLUSION of that one GW from `remaining_gws` wherever it's used, never
+    a truncation of everything from it onward — a candidate whose value
+    lands at a week AFTER the Free Hit week is completely unaffected.
+    Omitting the key (or omitting `chip_schedule` entirely) reproduces
+    exact pre-Patch-98 behavior.
+
     Returns the same top-level keys `suggest_transfers()` returns (so
     existing callers/UI code work unchanged), plus `weekly_plan`: a list of
     one dict per GW — {gw, moves, net_gain, ft_available, ft_used,
@@ -714,6 +757,10 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     from the single-decision return if it wants to render it differently."""
     wildcard_gw = chip_schedule.get("wildcard_gw") if chip_schedule else None
     wildcard_rebuild_squad = chip_schedule.get("wildcard_rebuild_squad") if chip_schedule else None
+    # Patch 98 -- see the docstring's "Patch 98" paragraph below; None (the
+    # default, and the value when `chip_schedule` omits this key entirely)
+    # reproduces exact pre-Patch-98 behavior.
+    freehit_gw = chip_schedule.get("freehit_gw") if chip_schedule else None
     profile = style_profiles.get_profile(profile_name)
     hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
     threshold = profile["hit_cost_threshold"]
@@ -763,6 +810,22 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         if wildcard_gw is not None and gw < wildcard_gw:
             remaining_gws = [g for g in remaining_gws if g < wildcard_gw]
 
+        # Patch 98 (Rule #50 follow-up, "a more wide rule" — manager,
+        # 2026-09-30): the SAME illusory-value problem Wildcard already had
+        # a fix for also applies to a scheduled Free Hit, and had NO fix at
+        # all before this patch — confirmed via code read of the whole
+        # function body. Unlike Wildcard, Free Hit reverts after one week,
+        # so this is an EXCLUSION of that one GW only, never a truncation of
+        # everything from it onward (weeks after it are unaffected — the
+        # persisted squad resumes normally). Applies to every week's
+        # valuation, before, at, or after the Free Hit week, since
+        # `remaining_gws` here is reused both for THIS week's own old/new
+        # comparison and (via the wholesale-rebuild branch just below, and
+        # every later iteration's own `gw_list[wi:]` slice) for every other
+        # week's too.
+        if freehit_gw is not None:
+            remaining_gws = [g for g in remaining_gws if g != freehit_gw]
+
         # Patch 92 (b): at the scheduled Wildcard week itself, bypass the
         # ordinary k=1..k_upper search entirely — the whole squad is
         # replaced wholesale by the pre-computed rebuild squad, for free
@@ -771,7 +834,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         if wildcard_gw is not None and gw == wildcard_gw and wildcard_rebuild_squad is not None:
             new_squad = wildcard_rebuild_squad.copy()
             bench_w_wc = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
-            wc_remaining = gw_list[wi:]
+            # Patch 98 -- reuses `remaining_gws` (already Free-Hit-excluded
+            # above) instead of recomputing an independent `gw_list[wi:]`
+            # slice, so the Wildcard substitution week's own valuation gets
+            # the same Free Hit exclusion every other week gets.
+            wc_remaining = remaining_gws
             old_total_wc = opt.realized_horizon_value(sim_squad, wc_remaining, cfg,
                                                         bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
             new_total_wc = opt.realized_horizon_value(new_squad, wc_remaining, cfg,
