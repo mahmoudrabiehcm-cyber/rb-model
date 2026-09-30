@@ -5,6 +5,8 @@ the CLI tool's run_weekly_report.py so the Streamlit app and the CLI stay
 on the exact same pipeline — this is the one place that logic lives.
 """
 from __future__ import annotations
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -85,7 +87,164 @@ def compute_team_fixture_baselines(cfg: dict, team_match_xg: pd.DataFrame,
     return {"by_id": by_id, "league_avg_xg": round(league_avg, 4), "n_teams_with_data": len(by_id)}
 
 
-def fixture_attack_factor_vec(opp_id: pd.Series, baselines: dict, cfg: dict) -> pd.Series:
+# ---------------------------------------------------------------------------
+# Patch 90 (v6.9 Standing Rule #46/#47, market-odds leg) -- confirmed via
+# code read that no odds-fetching or odds-fitting function existed anywhere
+# in this app before this patch, and that fixture_attack_factor_vec() below
+# had no gw-distance input at all (its only caller, compute_all() further
+# down this file, passes none either) -- so the team-strength tier applied
+# the SAME flat strength to every horizon gameweek, contradicting Rule
+# #46(e)'s "s shrinking toward 0 with distance ... beyond GW+5 ... s = 0".
+# Both gaps are fixed together since they're the same doc clause. See
+# test_patch90_market_odds.py for the full disclosed design rationale
+# (written BEFORE this implementation, per manager instruction).
+# ---------------------------------------------------------------------------
+def implied_probs_from_odds(home_odds, draw_odds, away_odds) -> dict | None:
+    """Decimal 1X2 odds -> overround-stripped, normalized implied
+    probabilities. Rule #46(e): overround must be within [1.00, 1.10]
+    (inclusive both ends -- an exactly arb-free book is fine, anything below
+    1.00 signals bad/stale data since no single real bookmaker prices
+    negative margin, and anything above 1.10 is an abnormally fat margin for
+    an EPL 1X2 market, also treated as unusable). Returns None (never
+    raises) for non-positive/missing odds or an out-of-band overround."""
+    try:
+        h, d, a = float(home_odds), float(draw_odds), float(away_odds)
+    except (TypeError, ValueError):
+        return None
+    if h <= 0 or d <= 0 or a <= 0:
+        return None
+    inv_h, inv_d, inv_a = 1.0 / h, 1.0 / d, 1.0 / a
+    overround = inv_h + inv_d + inv_a
+    if not (1.00 <= overround <= 1.10):
+        return None
+    return {"home": inv_h / overround, "draw": inv_d / overround, "away": inv_a / overround,
+            "overround": round(overround, 4)}
+
+
+def fit_fixture_goals_from_probs(p_home: float, p_draw: float, p_away: float,
+                                  max_mu: float = 6.0) -> tuple[float, float] | None:
+    """Solves for (mu_home, mu_away), the two independent-Poisson means whose
+    implied Skellam(mu_home - mu_away) win/draw/loss split best matches the
+    market's (p_home, p_draw, p_away) -- Rule #46(e)'s "Poisson fit". Only
+    p_home and p_draw are used as the fit's 2 residuals (p_away carries no
+    extra information once the other two are fixed, since all three sum to
+    1); p_away is still required as an input so a caller can never pass a
+    plainly-inconsistent triple without at least being asked for it.
+
+    This fit's ABSOLUTE total (mu_home + mu_away) is known to read low --
+    see rescale_goals_to_league_level() for the required correction -- so
+    only the RATIO between the two returned means should be trusted directly
+    out of this function; the caller rescales the total separately.
+
+    Returns None (never raises) if the inputs aren't valid probabilities or
+    the solver fails to converge to a sane, positive pair."""
+    from scipy.optimize import least_squares
+    from scipy.stats import skellam
+
+    try:
+        p_home, p_draw, p_away = float(p_home), float(p_draw), float(p_away)
+    except (TypeError, ValueError):
+        return None
+    if not all(0.0 <= p <= 1.0 for p in (p_home, p_draw, p_away)):
+        return None
+    if not math.isclose(p_home + p_draw + p_away, 1.0, abs_tol=0.05):
+        return None
+    if p_draw <= 0.0 or p_draw >= 1.0:
+        return None
+
+    def residuals(x):
+        mu_h, mu_a = x
+        mu_h, mu_a = max(mu_h, 1e-4), max(mu_a, 1e-4)
+        fit_p_home = 1 - skellam.cdf(0, mu_h, mu_a)
+        fit_p_draw = skellam.pmf(0, mu_h, mu_a)
+        return [fit_p_home - p_home, fit_p_draw - p_draw]
+
+    # Initial guess: a plausible EPL-shaped total (2.6 goals) split by the
+    # market's own home-vs-away lean.
+    lean = 0.5 if (p_home + p_away) == 0 else p_home / (p_home + p_away)
+    x0 = [max(1e-3, 2.6 * lean), max(1e-3, 2.6 * (1 - lean))]
+    try:
+        result = least_squares(residuals, x0, bounds=([1e-4, 1e-4], [max_mu, max_mu]))
+    except Exception:
+        return None
+    if not result.success:
+        return None
+    mu_h, mu_a = float(result.x[0]), float(result.x[1])
+    if mu_h <= 0 or mu_a <= 0 or mu_h > max_mu or mu_a > max_mu:
+        return None
+    # Confirm the fit actually reproduces the market split within a sane
+    # tolerance -- a "successful" least-squares result can still land far
+    # from the target if the problem is degenerate near the boundary.
+    res = residuals([mu_h, mu_a])
+    if max(abs(res[0]), abs(res[1])) > 0.03:
+        return None
+    return (mu_h, mu_a)
+
+
+def rescale_goals_to_league_level(mu_home: float, mu_away: float,
+                                   league_avg_total_goals: float) -> tuple[float, float]:
+    """Rule #46(e): "1X2-only conversions read low and are rescaled to the
+    league xG level". Preserves the fitted home/away RATIO exactly, scales
+    the total up (or down) to match `league_avg_total_goals` (the season's
+    real average total goals per match, i.e. 2 * a
+    compute_team_fixture_baselines() league_avg_xg). Zero-safe: if mu_away
+    is 0 (a degenerate fit), all of the rescaled total is assigned to home
+    rather than dividing by zero."""
+    total = mu_home + mu_away
+    if total <= 0:
+        return (league_avg_total_goals, 0.0)
+    ratio = mu_home / total
+    return (ratio * league_avg_total_goals, (1 - ratio) * league_avg_total_goals)
+
+
+def cross_check_goal_estimates(estimates: list[tuple[float, float]],
+                                tolerance: float = 0.3) -> bool:
+    """Rule #46(e): "cross-checked against a second market-derived source
+    ... sources must agree within 0.3 goals". Requires at least 2 raw
+    (pre-rescale) (mu_home, mu_away) fits -- a single bookmaker can never be
+    cross-checked against anything, so one (or zero) estimates always fails
+    this check rather than being silently accepted. Passes only if EVERY
+    pair of estimates agrees within `tolerance` goals on BOTH the home and
+    away side."""
+    if len(estimates) < 2:
+        return False
+    for i in range(len(estimates)):
+        for j in range(i + 1, len(estimates)):
+            h_i, a_i = estimates[i]
+            h_j, a_j = estimates[j]
+            if abs(h_i - h_j) > tolerance or abs(a_i - a_j) > tolerance:
+                return False
+    return True
+
+
+def is_odds_stale(fetched_at: float, now: float, max_hours: float = 48) -> bool:
+    """Rule #46(e): "when every source is stale (over 48 hours), s = 0".
+    Strictly-greater-than: exactly 48.0 hours old is not yet stale, matching
+    the doc's "over 48 hours" wording (not "48 hours or more")."""
+    age_hours = (now - fetched_at) / 3600.0
+    return age_hours > max_hours
+
+
+def effective_fixture_strength(base_strength: float, gws_ahead: int) -> float:
+    """Rule #46(e): team-strength-tier s "shrinks toward 0 with distance"
+    from GW+2 onward, reaching 0 "beyond GW+5". Disclosed shape (the doc
+    gives the endpoints, not the curve): full `base_strength` through
+    gws_ahead<=1 (the near-term horizon this tier still uses when the market
+    tier isn't available/passing its checks for GW+1 itself), linear decay
+    across gws_ahead 2..5 down to 0, and exactly 0 for gws_ahead>=6."""
+    if gws_ahead <= 1:
+        return base_strength
+    if gws_ahead >= 6:
+        return 0.0
+    # gws_ahead in {2,3,4,5} -> decay fraction 4/5, 3/5, 2/5, 1/5 (strictly
+    # below full strength starting at GW+2, strictly above 0 through GW+5,
+    # matching "shrinking toward 0 with distance ... beyond GW+5 ... s=0").
+    frac = (6 - gws_ahead) / 5.0
+    return base_strength * frac
+
+
+def fixture_attack_factor_vec(opp_id: pd.Series, baselines: dict, cfg: dict,
+                               gws_ahead: pd.Series | int | None = None) -> pd.Series:
     """Rule #46's FF, vectorized: FF = (opponent's shrunk xG-against baseline
     / league average xG) ^ strength, clamped to [min_ff, max_ff] (a disclosed
     safety clamp of this implementation, not a number the doc itself states
@@ -102,15 +261,32 @@ def fixture_attack_factor_vec(opp_id: pd.Series, baselines: dict, cfg: dict) -> 
     opponent, not about the player's own team's absolute output level.
 
     Returns 1.0 (no adjustment) for any opponent with no baseline entry
-    (unmapped/blank fixture) -- never NaN, never a crash."""
+    (unmapped/blank fixture) -- never NaN, never a crash.
+
+    `gws_ahead` (Patch 90, Rule #46(e) distance decay -- optional, defaults
+    to None which preserves the exact pre-Patch-90 flat-strength behavior
+    every existing caller/test relies on): a per-row gameweek distance (0 =
+    this/next GW being projected, per effective_fixture_strength()'s own
+    convention) or a single int applied to every row. When given, each row's
+    exponent is effective_fixture_strength(base_strength, that row's
+    distance) instead of the flat configured strength -- rows at gws_ahead
+    >= 6 collapse to FF = 1.0 (ratio ** 0 == 1) regardless of clamping."""
     fa_cfg = cfg.get("fixture_adjustment", {})
     if not fa_cfg.get("enabled", True) or not baselines.get("by_id"):
         return pd.Series(1.0, index=opp_id.index)
-    strength = fa_cfg.get("strength", 0.6)
+    base_strength = fa_cfg.get("strength", 0.6)
     min_ff = fa_cfg.get("min_ff", 0.7)
     max_ff = fa_cfg.get("max_ff", 1.4)
     league_avg = baselines["league_avg_xg"]
     by_id = baselines["by_id"]
+
+    if gws_ahead is None:
+        strength = base_strength
+    elif isinstance(gws_ahead, pd.Series):
+        strength = gws_ahead.map(lambda g: effective_fixture_strength(base_strength, int(g)))
+        strength = strength.reindex(opp_id.index)
+    else:
+        strength = effective_fixture_strength(base_strength, int(gws_ahead))
 
     opp_against = opp_id.map(lambda i: by_id.get(i, {}).get("xg_against"))
     opp_against = pd.to_numeric(opp_against, errors="coerce")

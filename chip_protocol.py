@@ -876,7 +876,8 @@ def _reachable_bb_tc_tables(squad_df: pd.DataFrame, pool_df: pd.DataFrame | None
 
 def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_gap_table: dict,
                              squad_df: pd.DataFrame, gw_list: list[int], cfg: dict, moe_fn,
-                             pool_df: pd.DataFrame | None = None, free_transfers: int = 0) -> dict:
+                             pool_df: pd.DataFrame | None = None, free_transfers: int = 0,
+                             valid_gws_by_type: dict[str, set[int]] | None = None) -> dict:
     """Rule #49 (Chip Portfolio Scheduling): assigns the still-available
     chips to distinct gameweeks within `gw_list` to maximise their combined
     value, honoring the doc's dependencies:
@@ -913,6 +914,26 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
     `pool_df`/`free_transfers`: optional, enable dependency (d)'s reachable
     pre-Wildcard table (see _reachable_bb_tc_tables()); when `pool_df` is
     None, (d) falls back to the flat/static table, same as before Patch 89.
+
+    `valid_gws_by_type` (Patch 91, correctness fix -- v6.9 Rule #49 read
+    together with chip_status()'s own [start_event, stop_event] calendar
+    windows): confirmed via code read that this function previously
+    considered every GW in `gw_list` as a legal candidate for EVERY chip
+    type, with no awareness that each chip's OWN currently-available
+    window can close (or not yet be open) partway through that list --
+    app.py's `chip_adv_window` scan can reach 8-16 GWs ahead chasing a
+    fixture pattern, well past a half-season chip deadline. Since Patch 87
+    this function's own assignment drives the visible card headline
+    (overriding the isolated per-chip scan, which WAS already correctly
+    window-clipped via app.py's _clip_to_available_windows()) -- so an
+    unclipped joint schedule could recommend playing an already-expired
+    chip. When given, `{chip_type: {valid_gw, ...}}` restricts that type's
+    candidate weeks (Wildcard included) to the intersection with `gw_list`
+    before the search runs, so an out-of-window week is never even a
+    candidate. A type absent from the dict is unrestricted (falls back to
+    the full `gw_list`) -- a caller only needs to name the type(s) it
+    actually has window data for. None (the default) preserves the exact
+    pre-Patch-91 unclipped behavior for every type.
 
     Method: a small brute-force assignment over `gw_list` (bounded by at
     most 4 chip types and a scan window sized in the low tens of GWs, the
@@ -971,13 +992,21 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
             return (bb_post.get(wc_choice, {}) if after_wc else bb_pre).get(gw, 0.0)
         return 0.0
 
-    wc_choices = (list(wc_by_gw.keys()) + [None]) if "wildcard" in types_available else [None]
+    def _valid_for(chip_type: str) -> set:
+        if valid_gws_by_type is None or chip_type not in valid_gws_by_type:
+            return set(gw_list)
+        return set(valid_gws_by_type[chip_type]) & set(gw_list)
+
+    wc_valid = _valid_for("wildcard")
+    wc_choices = ([g for g in wc_by_gw.keys() if g in wc_valid] + [None]) \
+        if "wildcard" in types_available else [None]
     other_types = [t for t in types_available if t != "wildcard"]
+    other_valid = {t: _valid_for(t) for t in other_types}
 
     all_assignments = []
     for wc_choice in wc_choices:
         remaining = [g for g in gw_list if g != wc_choice]
-        slot_options = [remaining + [None] for _ in other_types]
+        slot_options = [[g for g in remaining if g in other_valid[t]] + [None] for t in other_types]
         for combo in itertools.product(*slot_options):
             chosen_weeks = [g for g in combo if g is not None]
             if len(chosen_weeks) != len(set(chosen_weeks)):

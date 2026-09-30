@@ -37,7 +37,39 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 89 (model: v6.9 Standing Rule #50 Chip-Gain Reporting + Rule #51 Cross-Tool "
+PATCH_VERSION = ("Patch 91 (v6.9 Rule #49, chip-expiry correctness fix — manager report, 2026-09-30: "
+                  "\"the chip expiry needs to be considered.\" Confirmed via code read: chip_protocol."
+                  "chip_status() already correctly tracks each chip's own [start_event, stop_event] window "
+                  "from the official chip calendar, and app.py's _clip_to_available_windows() already used "
+                  "it to correctly bound the Wildcard/Free Hit detect window and the Bench Boost/Triple "
+                  "Captain/Free Hit ISOLATED advisor cards' candidate weeks — but chip_portfolio_schedule() "
+                  "(the Rule #49 JOINT scheduler that, since Patch 87, actually drives the four chip cards' "
+                  "headline verdicts whenever >=2 chips are available) received the unclipped scan window "
+                  "with no per-chip-type bound at all, so its brute-force search could recommend playing a "
+                  "chip on a gameweek AFTER that chip's own currently-available window closes — a genuinely "
+                  "illegal recommendation (the chip would already be expired/lost), silently overriding the "
+                  "correctly-clipped isolated verdict Patch 87 made secondary. Fixed with a new optional "
+                  "valid_gws_by_type parameter that restricts every chip type's candidate weeks (Wildcard "
+                  "included) to its own real window before the search runs; the app.py call site now builds "
+                  "this from the exact same _clip_to_available_windows() the isolated cards already use, so "
+                  "there are no longer two different sources of truth for \"is this GW actually legal for "
+                  "this chip.\" Test-first: 6 new tests written and confirmed failing (TypeError, parameter "
+                  "didn't exist) before implementation, all passing after; full 93-test regression suite "
+                  "(including all pre-existing Patch 85/87/89 portfolio tests) passes unmodified, confirming "
+                  "backward compatibility when the parameter is omitted. Live-verified against the running "
+                  "app: Chip Plan tab renders all four cards with sequenced GWs, zero exceptions. Previously, "
+                  "Patch 90 (v6.9 Rule #46/#47, market-odds leg — BACKEND ONLY, not yet wired into the live "
+                  "pipeline, paused pending the manager obtaining a free API key from The Odds API): added "
+                  "chip_protocol.implied_probs_from_odds()/fit_fixture_goals_from_probs()/"
+                  "rescale_goals_to_league_level()/cross_check_goal_estimates()/is_odds_stale()/"
+                  "effective_fixture_strength() and fpl_data.fetch_market_odds_epl(), all built test-first "
+                  "(24 tests, confirmed red before implementation) against fabricated data — no live odds "
+                  "call has been made yet. Also caught and fixed in the same patch: fixture_attack_factor_vec() "
+                  "applied the SAME flat fixture-adjustment strength to every horizon gameweek with no "
+                  "distance decay at all, contradicting Rule #46(e)'s \"s shrinking toward 0 with distance "
+                  "... beyond GW+5 ... s=0\" — extended (backward-compatibly) with an optional gws_ahead "
+                  "parameter and a new effective_fixture_strength() decay curve. Previously, Patch 89 (model: "
+                  "v6.9 Standing Rule #50 Chip-Gain Reporting + Rule #51 Cross-Tool "
                   "Reconciliation, plus partial Rule #49(d)/(f) — confirmed via code read that no quoted chip "
                   "gain anywhere in this app stated its horizon, formula variant, or baseline, and nothing "
                   "decomposed a disagreement with another tool's figure input-by-input. Adds chip_protocol."
@@ -967,7 +999,7 @@ def _picks(entry_id: int, gw: int):
 @st.cache_data(ttl=900, show_spinner=False)
 def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, bank: float,
                           portfolio_gw_list: tuple, window_len: int, available_chip_types: tuple,
-                          fh_gap_table: dict):
+                          fh_gap_table: dict, valid_gws_by_type_items: tuple = ()):
     """Patch 86 (performance fix) -- Patch 85's Rule #48/#49 computation
     (wildcard_window_value_scan: 2 opt.solve_squad() MILP solves per
     candidate GW, times up to ~8 candidate GWs by default; plus
@@ -996,10 +1028,18 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
     # chip_portfolio_schedule() can build the reachable pre-Wildcard Bench
     # Boost/Triple Captain table (_reachable_bb_tc_tables()) instead of the
     # flat, unchanged-squad one it used before this patch.
+    # Patch 91 (Rule #49, chip-expiry correctness) -- valid_gws_by_type_items
+    # is a hashable (cache_data requires it) tuple-of-pairs form of the real
+    # {"wildcard": [...], "bboost": [...], ...} window-clipped GW lists the
+    # call site builds via the SAME _clip_to_available_windows() the
+    # isolated advisor cards already use; reconstructed to a dict-of-sets
+    # here since chip_portfolio_schedule() itself doesn't need to be
+    # cache-friendly.
+    valid_gws_by_type = {k: set(v) for k, v in valid_gws_by_type_items} if valid_gws_by_type_items else None
     chip_portfolio = chip_protocol.chip_portfolio_schedule(
         available_chip_types, wc_window_scan, fh_gap_table, squad_df_adv,
         list(portfolio_gw_list), cfg, lambda total: eng.margin_of_error_threshold(total, cfg),
-        pool_df=pool_df_adv, free_transfers=free_transfers)
+        pool_df=pool_df_adv, free_transfers=free_transfers, valid_gws_by_type=valid_gws_by_type)
     return wc_window_scan, chip_portfolio
 
 
@@ -1829,13 +1869,38 @@ with st.spinner("Fetching live data and computing xPts..."):
         _portfolio_gw_list = chip_adv_window["gw_list"]
         _wc_window_len = cfg.get("chip_portfolio", {}).get("window_value_len", 4)
         _fh_gap_table = {gw: v["gap"] for gw, v in (fh_advisor or {}).get("by_gw", {}).items()}
+        # Patch 91 (v6.9 Rule #49, chip-expiry correctness) -- confirmed via
+        # code read (2026-09-30) that chip_portfolio_schedule() considered
+        # every GW in `_portfolio_gw_list` (which can reach 8-16 GWs ahead,
+        # chip_advisor_gw_window()'s own extend-to-nearest-DGW/BGW logic)
+        # as a legal candidate for EVERY chip type, with no idea that a
+        # chip's OWN currently-available window (chip_status()'s real
+        # [start_event, stop_event] from the official chip calendar) can
+        # close, or not yet be open, partway through that scan -- while the
+        # ISOLATED bb_advisor/tc_advisor/fh_advisor cards just above were
+        # already correctly clipped via the same _clip_to_available_windows()
+        # this reuses. Since Patch 87 this joint schedule's own assignment
+        # overrides those correctly-clipped isolated verdicts as the visible
+        # card headline, so an unclipped joint schedule could recommend
+        # playing a chip on a week it would already be expired/lost. Fixed
+        # by building the same per-type clipped window every isolated card
+        # already has (Wildcard's own clip is new here -- it wasn't in the
+        # isolated-card block above since Wildcard has no isolated advisor
+        # card of that shape) and threading it through as a hashable
+        # tuple-of-pairs (st.cache_data requires hashable args).
+        _valid_gws_by_type = {}
+        for _ctype, _label in chip_protocol.CHIP_LABELS.items():
+            if _ctype in _available_chip_types:
+                _clipped_gws, _, _ = _clip_to_available_windows(_portfolio_gw_list, _label)
+                _valid_gws_by_type[_ctype] = tuple(_clipped_gws)
+        _valid_gws_by_type_items = tuple(sorted(_valid_gws_by_type.items()))
         # Patch 86: cached (see _chip_portfolio_calc above) -- was bare
         # top-level code, re-solving on every rerun regardless of whether
         # any of these inputs actually changed.
         wc_window_scan, chip_portfolio = _chip_portfolio_calc(
             squad_df_adv, pool_df_adv, cfg, ft["free_transfers"], bank,
             tuple(_portfolio_gw_list), _wc_window_len, tuple(sorted(_available_chip_types)),
-            _fh_gap_table)
+            _fh_gap_table, _valid_gws_by_type_items)
 
     # Chip-aware transfer advisory: only from signals already computed
     # mechanically above — never a guess at the manager's intent. Wildcard:

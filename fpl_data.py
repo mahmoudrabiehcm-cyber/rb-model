@@ -447,6 +447,89 @@ def fetch_team_match_xg(season_slug: str, gw_list: list[int]) -> tuple[pd.DataFr
     return result[cols], warning
 
 
+# ---------------------------------------------------------------------------
+# Patch 90 (v6.9 Standing Rule #46(e), market-odds leg) -- confirmed via code
+# read (grep for "odds" across this file) that no odds-fetching function
+# existed anywhere before this patch. Uses The Odds API
+# (the-odds-api.com) -- picked over the two other candidates this session
+# researched live: an earlier session's oddschecker scrape attempt (see
+# data_pipeline.py's Patch 83 comment) could not verify automated-fetch
+# terms of use; SportsGameOdds' free tier documentation never confirms EPL
+# is included (only 8 named leagues, none of them EPL, are listed for its
+# free "Amateur" tier). The Odds API has a dedicated, documented EPL
+# endpoint on every tier including free, and its Terms & Conditions
+# (read in full this session, 2026-09-30) explicitly permit "displaying our
+# data in a UI... including for commercial use" and "using our data to
+# train statistical and machine learning models" -- exactly this use --
+# while only prohibiting reselling the raw odds as a competing data feed,
+# which this app never does.
+# ---------------------------------------------------------------------------
+ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+
+
+def fetch_market_odds_epl(api_key: str, region: str = "uk",
+                           market: str = "h2h") -> tuple[list, Optional[str]]:
+    """Pulls current EPL 1X2 ("h2h") odds from every bookmaker The Odds API
+    returns for `region`. Never raises -- any network failure, non-200
+    status, or malformed payload returns ([], a warning string) rather than
+    crashing the page, mirroring fetch_team_match_xg()'s own contract.
+
+    Returns (events, warning) where each event is:
+        {"home_team": str, "away_team": str, "commence_time": str,
+         "bookmakers": [{"key": str, "home_odds": float, "draw_odds": float,
+                          "away_odds": float}, ...]}
+    A bookmaker whose h2h market can't be parsed into a clean
+    home/draw/away triple (missing outcome, unexpected team name) is
+    silently dropped from that event's bookmaker list rather than failing
+    the whole event -- an event can end up with an empty bookmakers list,
+    which callers must treat as "no usable odds this fixture" (falls back
+    to the team-strength tier), never a crash."""
+    params = {"apiKey": api_key, "regions": region, "markets": market, "oddsFormat": "decimal"}
+    try:
+        r = requests.get(ODDS_API_BASE, params=params, timeout=20)
+    except requests.RequestException as e:
+        return [], f"market odds fetch failed (network error: {e})"
+    if r.status_code != 200:
+        return [], f"market odds fetch failed (HTTP {r.status_code} from The Odds API)"
+    try:
+        payload = r.json()
+    except Exception:
+        return [], "market odds fetch failed (response was not valid JSON)"
+    if not isinstance(payload, list):
+        return [], "market odds fetch failed (unexpected response shape)"
+
+    events = []
+    skipped = 0
+    for raw_ev in payload:
+        try:
+            home_team = raw_ev["home_team"]
+            away_team = raw_ev["away_team"]
+        except (KeyError, TypeError):
+            skipped += 1
+            continue
+        bookmakers = []
+        for bk in raw_ev.get("bookmakers", []) or []:
+            try:
+                h2h = next((m for m in bk.get("markets", []) if m.get("key") == "h2h"), None)
+                if h2h is None:
+                    continue
+                outcomes = {o["name"]: float(o["price"]) for o in h2h.get("outcomes", [])}
+                home_odds = outcomes.get(home_team)
+                away_odds = outcomes.get(away_team)
+                draw_odds = outcomes.get("Draw")
+                if home_odds is None or away_odds is None or draw_odds is None:
+                    continue
+                bookmakers.append({"key": bk.get("key", "unknown"), "home_odds": home_odds,
+                                    "draw_odds": draw_odds, "away_odds": away_odds})
+            except (KeyError, TypeError, ValueError):
+                continue
+        events.append({"home_team": home_team, "away_team": away_team,
+                        "commence_time": raw_ev.get("commence_time"), "bookmakers": bookmakers})
+    warning = f"{skipped} event(s) in the odds response were missing team names and were skipped" \
+        if skipped else None
+    return events, warning
+
+
 if __name__ == "__main__":
     snap = load_snapshot()
     print(f"Source: {snap.source} | last completed GW: {snap.current_gw} | "
