@@ -874,10 +874,112 @@ def _reachable_bb_tc_tables(squad_df: pd.DataFrame, pool_df: pd.DataFrame | None
     return bb_by_gw, tc_by_gw
 
 
+def _fh_post_table_for_squad(rebuild_squad: pd.DataFrame, fh_by_gw: dict, gw_list: list[int]) -> dict:
+    """Rule #50(a) (Chip Timing Harmony, Patch 96) -- Free Hit's POST-Wildcard
+    value table for one candidate Wildcard's rebuild squad. Confirmed via
+    code read of data_pipeline.solve_free_hit_rebuild() (2026-09-30): a Free
+    Hit rebuild is a fresh 15-man squad optimized against total budget for
+    that single target GW, entirely independent of whatever squad is
+    currently held -- so the "rebuild" side of each week's already-computed
+    fh_by_gw entry (from evaluate_free_hit()) is reusable as-is, and does
+    NOT need a second MILP solve per Wildcard candidate. Only the cheap
+    "current" side changes: opt.best_starting_xi() (no MILP, ~24ms/call
+    benchmarked 2026-09-30 vs. ~1.15s/call for a fresh solve_squad()) against
+    the Wildcard's own rebuilt squad instead of the pre-Wildcard one.
+
+    Silently skips (does not raise for) any GW missing from `fh_by_gw` or
+    lacking that GW's xpts column on `rebuild_squad` -- same skip discipline
+    _bb_tc_tables_for_squad() already uses above."""
+    out: dict = {}
+    if rebuild_squad is None or rebuild_squad.empty:
+        return out
+    for gw in gw_list:
+        info = fh_by_gw.get(gw) if fh_by_gw else None
+        if not info:
+            continue
+        col = f"xpts_gw{gw}"
+        if col not in rebuild_squad.columns:
+            continue
+        best = opt.best_starting_xi(rebuild_squad, col)
+        post_current = float(best["total"]) if best and best.get("xi") is not None and not best["xi"].empty else 0.0
+        out[gw] = round(float(info["rebuild"]) - post_current, 2)
+    return out
+
+
+def _apply_squad_health_guardrail(near_ties: list[dict], gw_list: list[int], squad_df: pd.DataFrame,
+                                   wc_by_gw: dict, reachable_ceiling_by_gw: dict | None, moe_fn) -> list[dict]:
+    """Rule #50(b) (Chip Timing Harmony, Patch 96) -- rejects any near-tied
+    assignment (already filtered to within Rule #34's moe_fn tie-band of the
+    best total, at the call site below) that leaves a MEANINGFULLY weaker
+    squad than the healthiest near-tie once every scheduled chip has played,
+    per the manager's requirement (2026-09-30): "we should make sure that
+    the team after the chips will be well maintained and has a high xpts and
+    rate%." Runs ONLY on this already-small near-tie set -- never the full
+    combinatorial search space -- and adds NO new MILP solve: the checkpoint
+    squad's own total uses the cheap opt.best_starting_xi() (already used
+    elsewhere in this file), and the ceiling it's compared against is the
+    CALLER'S already-computed/cached `reachable_ceiling_by_gw` (the same
+    shape data_pipeline.solve_reachable_ceiling_by_gw() already returns),
+    never resolved here.
+
+    Checkpoint week is the scan window's LAST GW (max(gw_list)) -- the
+    furthest-out point any of these candidates' chip choices could still be
+    affecting squad composition. The resulting squad at that checkpoint is
+    the pre-Wildcard `squad_df` if no Wildcard is scheduled in that
+    candidate (or the checkpoint falls before it), else that candidate's own
+    Wildcard rebuild squad (from `wc_by_gw`).
+
+    Tolerance reuses Rule #34's own moe_fn (applied to the checkpoint
+    ceiling total) rather than inventing a new percentage threshold -- a
+    near-tie is only rejected if its checkpoint total falls more than that
+    band below the healthiest near-tie's own checkpoint total.
+
+    `reachable_ceiling_by_gw` is None (the default at the call site) -- a
+    no-op, identical to pre-Patch-96 behavior, since a ceiling to compare
+    against can't be fabricated. Never returns an empty list: if the
+    filtered set would be empty (e.g. no usable ceiling data for the
+    checkpoint GW), falls back to the original unfiltered `near_ties`,
+    disclosed here rather than silently produced."""
+    if not near_ties:
+        return near_ties
+    if not reachable_ceiling_by_gw or not gw_list:
+        return near_ties
+    checkpoint_gw = max(gw_list)
+    ceiling_info = reachable_ceiling_by_gw.get(checkpoint_gw)
+    ceiling_total = ceiling_info.get("total_xpts") if ceiling_info else None
+    if ceiling_total is None:
+        return near_ties
+    col = f"xpts_gw{checkpoint_gw}"
+
+    def _checkpoint_total(candidate: dict) -> float | None:
+        wc_gw = candidate["detail"].get("wildcard", {}).get("gw")
+        if wc_gw is not None and checkpoint_gw >= wc_gw:
+            resulting_squad = wc_by_gw.get(wc_gw, {}).get("rebuild_squad")
+        else:
+            resulting_squad = squad_df
+        if resulting_squad is None or resulting_squad.empty or col not in resulting_squad.columns:
+            return None
+        best = opt.best_starting_xi(resulting_squad, col)
+        if not best or best.get("xi") is None or best["xi"].empty:
+            return None
+        return float(best["total"])
+
+    scored = [(c, _checkpoint_total(c)) for c in near_ties]
+    usable = [(c, t) for c, t in scored if t is not None]
+    if not usable:
+        return near_ties
+    band = moe_fn(ceiling_total)
+    best_checkpoint_total = max(t for _, t in usable)
+    healthy = [c for c, t in usable if t >= best_checkpoint_total - band]
+    return healthy if healthy else near_ties
+
+
 def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_gap_table: dict,
                              squad_df: pd.DataFrame, gw_list: list[int], cfg: dict, moe_fn,
                              pool_df: pd.DataFrame | None = None, free_transfers: int = 0,
-                             valid_gws_by_type: dict[str, set[int]] | None = None) -> dict:
+                             valid_gws_by_type: dict[str, set[int]] | None = None,
+                             fh_by_gw: dict | None = None,
+                             reachable_ceiling_by_gw: dict | None = None) -> dict:
     """Rule #49 (Chip Portfolio Scheduling): assigns the still-available
     chips to distinct gameweeks within `gw_list` to maximise their combined
     value, honoring the doc's dependencies:
@@ -974,18 +1076,22 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
         return empty
 
     bb_pre, tc_pre = _reachable_bb_tc_tables(squad_df, pool_df, cfg, free_transfers, gw_list)
-    bb_post, tc_post = {}, {}
+    bb_post, tc_post, fh_post = {}, {}, {}
     for wc_gw, info in wc_by_gw.items():
         rs = info.get("rebuild_squad")
         if rs is not None and not rs.empty:
             bb_post[wc_gw], tc_post[wc_gw] = _bb_tc_tables_for_squad(rs, [g for g in gw_list if g >= wc_gw])
+            if fh_by_gw:
+                fh_post[wc_gw] = _fh_post_table_for_squad(rs, fh_by_gw, [g for g in gw_list if g >= wc_gw])
 
     def _value_for(chip_type: str, gw: int, wc_choice) -> float:
         if chip_type == "wildcard":
             return wc_by_gw.get(gw, {}).get("gap", 0.0)
-        if chip_type == "freehit":
-            return fh_gap_table.get(gw, 0.0)
         after_wc = wc_choice is not None and gw >= wc_choice
+        if chip_type == "freehit":
+            if after_wc and gw in fh_post.get(wc_choice, {}):
+                return fh_post[wc_choice][gw]
+            return fh_gap_table.get(gw, 0.0)
         if chip_type == "3xc":
             return (tc_post.get(wc_choice, {}) if after_wc else tc_pre).get(gw, 0.0)
         if chip_type == "bboost":
@@ -1034,6 +1140,12 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
     best_total = max(a["total"] for a in all_assignments)
     tie_band = round(moe_fn(best_total), 2) if best_total > 0 else round(moe_fn(0.0), 2)
     near_ties = [a for a in all_assignments if best_total - a["total"] <= tie_band]
+    # Rule #50(b) (Chip Timing Harmony, Patch 96) -- filter the near-tie set
+    # down to only those that leave a healthy squad once the chips are done,
+    # BEFORE the existing Rule #34/#49 tie-break picks among them. No-op
+    # (returns near_ties unchanged) when reachable_ceiling_by_gw isn't given.
+    near_ties = _apply_squad_health_guardrail(near_ties, gw_list, squad_df, wc_by_gw,
+                                               reachable_ceiling_by_gw, moe_fn)
     # Rule #34/#49 tie-break: among near-ties, defer commitment the longest
     # (max of each candidate's earliest scheduled week); an assignment that
     # schedules nothing has no "earliest week" to defer, so it only wins a

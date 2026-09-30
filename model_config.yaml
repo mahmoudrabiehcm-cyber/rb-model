@@ -2950,6 +2950,80 @@ chip_portfolio:
   window_value_len: 4
 
 # -----------------------------------------------------------------------------
+# Patch 96 (2026-09-30, v6.9 Standing Rule #50, Chip Timing Harmony). Manager
+# discussion (2026-09-30, multiple rounds) established: Rule #49's joint
+# scheduler ALREADY runs all 4 chips together maximising their combined
+# total (confirmed via code read before any of this was scoped) -- that part
+# needed no fix. Two real, confirmed-in-code gaps did need one:
+#
+# Rule #50(a) -- Free Hit had no pre/post-Wildcard value split, unlike Bench
+# Boost/Triple Captain (which already valued differently depending on
+# whether their week lands before or after a scheduled Wildcard). Manager:
+# "especially when deciding the chips (FH, BB or TC) GW you need to check if
+# this chip will be used after wildcard proposed GW, is this better or not."
+# Fixed in chip_protocol._fh_post_table_for_squad(): reuses each week's
+# already-computed rebuild total (a Free Hit rebuild is a fresh optimal
+# squad against total budget, independent of whatever's currently held --
+# confirmed via code read of data_pipeline.solve_free_hit_rebuild(), so this
+# needs NO second MILP solve) and only recomputes the cheap "current" side
+# (opt.best_starting_xi(), no MILP) against the Wildcard's rebuild squad.
+#
+# Rule #50(b) -- nothing checked what the squad looks like AFTER the
+# scheduled chips are done; an assignment could pull Wildcard to an
+# individually-weaker week purely to inflate BB/TC/FH's post-Wildcard
+# numbers, with zero check on ongoing squad quality. Manager: "we should
+# make sure that the team after the chips will be well maintained and has a
+# high xpts and rate%." Fixed in chip_protocol._apply_squad_health_
+# guardrail(): runs ONLY on the already-small near-tie set (never the full
+# combinatorial search), rejecting any near-tie whose checkpoint-GW squad
+# total falls more than Rule #34's own moe_fn band below the healthiest
+# near-tie's checkpoint total -- reusing the existing tie-tolerance
+# discipline rather than inventing a new percentage threshold.
+#
+# Both are additive-only (new optional params, default None = pre-Patch-96
+# behavior, byte-for-byte) -- confirmed via the full regression suite
+# (126/126 passing, zero regressions) and test_patch96_chip_timing_harmony.py
+# (10 new tests, written and confirmed RED before implementation, TDD as
+# every prior patch this session).
+#
+# PERFORMANCE (2026-09-30 discussion, benchmarked before building): neither
+# gap adds a new MILP solve inside the combinatorial search. Real numbers
+# measured against a 650-player pool (live FPL scale): a fresh solve_squad()
+# ~1.15s, a retain-pool reachable solve ~0.48s, opt.best_starting_xi() (what
+# both new pieces use) ~24ms -- about 50x cheaper. Existing worst-case
+# runtime (extended 16-GW horizon near a confirmed blank/double) is already
+# ~40-47s from PRE-EXISTING Free Hit rebuild + Wildcard window-scan solves,
+# unrelated to this patch; Patch 96 adds roughly 1-2s on top, all inside the
+# same @st.cache_data(ttl=900) wrapper as before.
+#
+# A naive thread-based parallelization of the existing per-GW solve loops
+# was investigated as a SEPARATE possible fix for that pre-existing ~45s
+# baseline, and explicitly REJECTED: benchmarked in this sandbox, every
+# concurrent solve_squad() call returned None (silent failure, no
+# exception) -- a genuine correctness break, not a speed tradeoff. Not
+# shipped. If the baseline itself needs to be faster later, that needs its
+# own dedicated root-cause investigation (why CBC fails under concurrency
+# here), not a bundled fix.
+#
+# DISCLOSED LIMITATION: Rule #50(b)'s checkpoint ceiling currently reuses
+# the Wildcard trigger's existing ~4-GW `detect_gw_list` reachable-ceiling
+# table (already computed elsewhere, zero added solve) -- when the chip
+# portfolio scan's checkpoint GW (its last GW, which can reach 8-16 GWs
+# ahead) falls beyond that table's range, the guardrail has no ceiling to
+# compare against and safely no-ops for that run (falls back to the
+# unfiltered near-tie set) rather than firing. Full coverage would need one
+# additional bounded reachable-ceiling solve for the scan's own checkpoint
+# GW (not per-candidate, so still cheap) -- not yet built, flagged as a
+# fast-follow, not silently dropped.
+#
+# NOT changed, deliberately, per manager's own scoping correction
+# (2026-09-30, "let's agree on WC1, WC2 will solve itself automatically"):
+# no two-window (WC1+WC2) joint modeling was added -- chip_portfolio_
+# schedule() still only ever solves within whichever single window it's
+# given, exactly as before.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6, wired in Patch 1). A
 # cumulative xPts difference smaller than max(floor_points, pct_of_total *
 # the compared total) is reported as a statistical tie, not a clear winner —

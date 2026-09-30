@@ -37,7 +37,44 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion continued, 2026-09-30, "
+PATCH_VERSION = ("Patch 96 (v6.9 Standing Rule #50, Chip Timing Harmony — manager discussion, 2026-09-30, "
+                  "\"chips can work on harmony if it's applicable and not stand alone chips\"): confirmed via "
+                  "code read BEFORE scoping anything that chip_portfolio_schedule() (Rule #49) already runs all "
+                  "4 chips together maximising their COMBINED total via brute-force search — that part needed "
+                  "no fix. Two real gaps did: (a) Free Hit had no pre/post-Wildcard value split (unlike Bench "
+                  "Boost/Triple Captain, which already value differently before vs. after a scheduled "
+                  "Wildcard) — _value_for(\"freehit\", ...) returned a flat fh_gap_table lookup regardless of "
+                  "wc_choice. Fixed via chip_protocol._fh_post_table_for_squad(): reuses each week's already-"
+                  "computed rebuild total (a Free Hit rebuild is squad-independent — confirmed via code read of "
+                  "data_pipeline.solve_free_hit_rebuild() — so no second MILP solve is needed) and only "
+                  "recomputes the cheap \"current\" side (opt.best_starting_xi(), no MILP) against the "
+                  "Wildcard's rebuild squad. (b) nothing checked squad health AFTER the scheduled chips are "
+                  "done, so a combination could pull Wildcard earlier purely to inflate BB/TC/FH's numbers with "
+                  "zero guardrail. Fixed via chip_protocol._apply_squad_health_guardrail(): runs ONLY on the "
+                  "already-small near-tie set (never the full combinatorial search — confirmed no new MILP "
+                  "solve added there), rejecting any near-tie whose checkpoint-GW squad total falls more than "
+                  "Rule #34's own moe_fn band below the healthiest near-tie's checkpoint total. Both wired as "
+                  "new OPTIONAL chip_portfolio_schedule() params (fh_by_gw, reachable_ceiling_by_gw), default "
+                  "None = byte-for-byte pre-Patch-96 behavior — every existing call site/test keeps passing "
+                  "unmodified. PERFORMANCE (benchmarked 2026-09-30 before building, not guessed): a fresh "
+                  "solve_squad() ~1.15s, a retain-pool reachable solve ~0.48s, opt.best_starting_xi() (what both "
+                  "new pieces use) ~24ms — ~50x cheaper, confirming neither gap adds a new solve to the hot "
+                  "path. A separate naive thread-based parallelization of the PRE-EXISTING ~45s worst-case "
+                  "baseline was investigated and explicitly REJECTED after benchmarking: every concurrent "
+                  "solve_squad() call silently returned None in this sandbox — a correctness break, not shipped. "
+                  "DISCLOSED LIMITATION: the guardrail's checkpoint ceiling reuses the Wildcard trigger's "
+                  "existing ~4-GW detect_gw_list reachable table (zero added solve) — when the scan's checkpoint "
+                  "GW falls beyond that range, the guardrail has no ceiling to compare against and safely "
+                  "no-ops (falls back to the unfiltered near-tie set) rather than firing; full coverage would "
+                  "need one additional bounded solve, not yet built. NOT changed, deliberately, per manager's "
+                  "own scoping correction (\"let's agree on WC1, WC2 will solve itself automatically\"): no "
+                  "two-window (WC1+WC2) joint modeling was added. Test-first: 10 new tests written and "
+                  "confirmed failing (AttributeError/TypeError, functions/params didn't exist) before "
+                  "implementation, all passing after; full 126-test regression suite passes (116 pre-existing + "
+                  "10 new), zero regressions. Live browser verification against the running app was not "
+                  "possible this session (sandbox network still cannot reach the official FPL API) — "
+                  "verification rests on the test suite plus direct code tracing, same as every prior patch "
+                  "this session. Previously, Patch 95 (v6.9 Rule #49 cross-check extension — manager discussion continued, 2026-09-30, "
                   "resolving the \"auto-extend horizon to reach the chip week\" scope chosen for the original "
                   "'cross-check UI' idea): confirmed via code read that the Wildcard cross-check note (just "
                   "fixed for its squad-reconstruction bug in Patch 94) is bounded by TWO separate windows "
@@ -1116,7 +1153,8 @@ def _picks(entry_id: int, gw: int):
 @st.cache_data(ttl=900, show_spinner=False)
 def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, bank: float,
                           portfolio_gw_list: tuple, window_len: int, available_chip_types: tuple,
-                          fh_gap_table: dict, valid_gws_by_type_items: tuple = ()):
+                          fh_gap_table: dict, valid_gws_by_type_items: tuple = (),
+                          fh_by_gw: dict | None = None, reachable_ceiling_by_gw: dict | None = None):
     """Patch 86 (performance fix) -- Patch 85's Rule #48/#49 computation
     (wildcard_window_value_scan: 2 opt.solve_squad() MILP solves per
     candidate GW, times up to ~8 candidate GWs by default; plus
@@ -1153,10 +1191,17 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
     # here since chip_portfolio_schedule() itself doesn't need to be
     # cache-friendly.
     valid_gws_by_type = {k: set(v) for k, v in valid_gws_by_type_items} if valid_gws_by_type_items else None
+    # Patch 96 (v6.9 Rule #50, Chip Timing Harmony) -- fh_by_gw (Gap A) lets
+    # Free Hit value itself differently before/after a scheduled Wildcard,
+    # same as Bench Boost/Triple Captain already do; reachable_ceiling_by_gw
+    # (Gap B) lets the near-tie selection reject a combination that leaves a
+    # meaningfully weaker squad once the chips are done. Both default to
+    # None (no-op, byte-for-byte pre-Patch-96 behavior) when not supplied.
     chip_portfolio = chip_protocol.chip_portfolio_schedule(
         available_chip_types, wc_window_scan, fh_gap_table, squad_df_adv,
         list(portfolio_gw_list), cfg, lambda total: eng.margin_of_error_threshold(total, cfg),
-        pool_df=pool_df_adv, free_transfers=free_transfers, valid_gws_by_type=valid_gws_by_type)
+        pool_df=pool_df_adv, free_transfers=free_transfers, valid_gws_by_type=valid_gws_by_type,
+        fh_by_gw=fh_by_gw, reachable_ceiling_by_gw=reachable_ceiling_by_gw)
     return wc_window_scan, chip_portfolio
 
 
@@ -2037,6 +2082,26 @@ with st.spinner("Fetching live data and computing xPts..."):
         _portfolio_gw_list = chip_adv_window["gw_list"]
         _wc_window_len = cfg.get("chip_portfolio", {}).get("window_value_len", 4)
         _fh_gap_table = {gw: v["gap"] for gw, v in (fh_advisor or {}).get("by_gw", {}).items()}
+        # Patch 96 (Rule #50a) -- the fuller {gw: {"current","rebuild","gap"}}
+        # structure, needed so chip_portfolio_schedule() can recompute Free
+        # Hit's "current" side against a scheduled Wildcard's rebuild squad
+        # (reusing "rebuild", never a second MILP solve -- see chip_protocol.
+        # _fh_post_table_for_squad()'s docstring).
+        _fh_by_gw = (fh_advisor or {}).get("by_gw", {})
+        # Patch 96 (Rule #50b) -- reuses the Wildcard trigger's ALREADY-
+        # COMPUTED reachable-ceiling table (data_pipeline.solve_reachable_
+        # ceiling_by_gw() over detect_gw_list, ~line 1880) rather than
+        # solving a new one -- zero added MILP cost, per the 2026-09-30
+        # performance discussion. DISCLOSED LIMITATION: detect_gw_list is a
+        # ~4-GW window, while this scan (`_portfolio_gw_list`) can reach
+        # 8-16 GWs -- when the guardrail's checkpoint GW (the scan's last
+        # GW) falls beyond detect_gw_list's range, `reachable_by_gw` simply
+        # won't have an entry for it, and _apply_squad_health_guardrail()
+        # safely no-ops for that run (falls back to the unfiltered near-tie
+        # set) rather than firing. Extending real coverage to the full
+        # scan's checkpoint GW would need one additional bounded solve (not
+        # per-candidate) -- not yet built, flagged as a fast-follow.
+        _reachable_ceiling_for_guardrail = locals().get("reachable_by_gw")
         # Patch 91 (v6.9 Rule #49, chip-expiry correctness) -- confirmed via
         # code read (2026-09-30) that chip_portfolio_schedule() considered
         # every GW in `_portfolio_gw_list` (which can reach 8-16 GWs ahead,
@@ -2068,7 +2133,8 @@ with st.spinner("Fetching live data and computing xPts..."):
         wc_window_scan, chip_portfolio = _chip_portfolio_calc(
             squad_df_adv, pool_df_adv, cfg, ft["free_transfers"], bank,
             tuple(_portfolio_gw_list), _wc_window_len, tuple(sorted(_available_chip_types)),
-            _fh_gap_table, _valid_gws_by_type_items)
+            _fh_gap_table, _valid_gws_by_type_items,
+            fh_by_gw=_fh_by_gw, reachable_ceiling_by_gw=_reachable_ceiling_for_guardrail)
 
     # Chip-aware transfer advisory: only from signals already computed
     # mechanically above — never a guess at the manager's intent. Wildcard:
