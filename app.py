@@ -37,7 +37,41 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 91 (v6.9 Rule #49, chip-expiry correctness fix — manager report, 2026-09-30: "
+PATCH_VERSION = ("Patch 92 (v6.9 Rules #44/#48/#49 read together, chip-aware weekly transfer plan — manager "
+                  "discussion, 2026-09-30: \"is the wildcard considered... maybe the wildcard week will give us "
+                  "another transfer plan\" caught, before building, that the originally-scoped simpler fix "
+                  "(auto-extending the chained transfer plan's horizon for a cross-check note) would have been "
+                  "unsafe, since recommend.plan_transfer_schedule() — confirmed via code read — had ZERO "
+                  "Wildcard awareness: it would keep chaining transfers on the CURRENT squad straight through a "
+                  "scheduled Wildcard week and beyond, recommending moves whose value only existed on a squad "
+                  "path the Wildcard was about to wipe out. Manager confirmed \"let's go\" on the deeper fix. "
+                  "plan_transfer_schedule() gains an optional chip_schedule={'wildcard_gw','wildcard_rebuild_"
+                  "squad'} parameter (Wildcard-only in scope — Free Hit reverts after one week per Rule #44/#49c "
+                  "so it never changes the persisted squad path this planner tracks, and Bench Boost/Triple "
+                  "Captain never change squad composition at all): (a) every week strictly before wildcard_gw "
+                  "values its transfer decision against a horizon truncated at wildcard_gw, so a transfer whose "
+                  "payoff only exists at/after the rebuild is correctly rejected; (b) at wildcard_gw itself the "
+                  "ordinary k=1..k_upper search is skipped and the squad is replaced wholesale by the pre-"
+                  "computed rebuild squad, drawing NO free transfer (Rule #44) while still accruing its own +1 "
+                  "FT exactly as an unused week would; (c) every week after continues the normal chained search "
+                  "from the rebuilt squad. Omitting the parameter (default None) reproduces exact pre-Patch-92 "
+                  "behavior. app.py's suggest_transfers() call site now builds this dict from the SAME "
+                  "chip_portfolio/wc_window_scan the Rule #49 joint scheduler above it already computes this "
+                  "run (chip_portfolio['assignment']['wildcard'] for the GW, wc_window_scan['by_gw'][gw]"
+                  "['rebuild_squad'] for the rebuild squad) — no second, independent Wildcard-detection path. "
+                  "Test-first: 5 new tests written and confirmed failing (TypeError, parameter didn't exist) "
+                  "before implementation, all passing after; full 98-test regression suite passes unmodified "
+                  "(93 pre-existing + 5 new), confirming backward compatibility when the parameter is omitted. "
+                  "DISCLOSED GAP, not yet fixed: suggest_transfers()'s separate single-decision path (used at "
+                  "horizon=1 or \"Force\") still has its own older, MANUAL chip_capped_gw_list mechanism (driven "
+                  "by the sidebar's \"Next planned full-rebuild chip GW\" dropdown), which is still NOT connected "
+                  "to the app's own auto-computed Rule #49 sequence — that is a separate, smaller gap from this "
+                  "one and hasn't been scoped yet. DISCLOSED LIMITATION: live browser verification against the "
+                  "running app was not possible this session — this sandbox's network cannot reach the live "
+                  "official FPL API (fantasy.premierleague.com), confirmed via a direct curl connection-failure "
+                  "test, not a code issue; verification here rests on the full test suite plus a direct code "
+                  "trace of the app.py wiring instead. Previously, Patch 91 (v6.9 Rule #49, chip-expiry "
+                  "correctness fix — manager report, 2026-09-30: "
                   "\"the chip expiry needs to be considered.\" Confirmed via code read: chip_protocol."
                   "chip_status() already correctly tracks each chip's own [start_event, stop_event] window "
                   "from the official chip calendar, and app.py's _clip_to_available_windows() already used "
@@ -1965,13 +1999,29 @@ with st.spinner("Fetching live data and computing xPts..."):
     free_fix = eng.free_lineup_fix_check(squad_df, _disrupted_codes, opt_col) if _disrupted_codes else \
         {"entries": []}
 
+    # Patch 92 (v6.9 Rules #44/#48/#49 read together, manager: "let's go" on
+    # wiring the Rule #49 joint chip schedule's OWN chosen Wildcard week into
+    # the chained transfer planner, rather than leaving them as two
+    # disconnected sources of truth) — built from data the Rule #49 scheduler
+    # above (`chip_portfolio`, `wc_window_scan`) already computed this run;
+    # None/absent whenever no Wildcard is actually scheduled, which
+    # reproduces exact pre-Patch-92 behavior (see plan_transfer_schedule()'s
+    # own docstring for the omitted-parameter contract).
+    _chip_schedule = None
+    if chip_portfolio is not None and chip_portfolio.get("assignment", {}).get("wildcard") is not None \
+            and wc_window_scan is not None:
+        _wc_gw = chip_portfolio["assignment"]["wildcard"]
+        _wc_rebuild = (wc_window_scan.get("by_gw", {}) or {}).get(_wc_gw, {}).get("rebuild_squad")
+        if _wc_rebuild is not None and not _wc_rebuild.empty:
+            _chip_schedule = {"wildcard_gw": _wc_gw, "wildcard_rebuild_squad": _wc_rebuild}
+
     transfer_error = None
     try:
         rec = recommend.suggest_transfers(squad_df, pool_df, cfg, style_name, hit_stance,
                                            ft["free_transfers"], bank, planning_gw, transfer_gw_list, forced_count,
                                            meaningful_bar_override, set(bench_df["code"]), chip_advisory,
                                            bb_play_gw=_bb_play_gw, chip_capped_gw_list=_chip_capped_gw_list,
-                                           disrupted_codes=_disrupted_codes)
+                                           disrupted_codes=_disrupted_codes, chip_schedule=_chip_schedule)
     except Exception as e:
         transfer_error = str(e)
         rec = {"moves": [], "plan": [], "summary": [], "net_gain": 0.0, "profile_used": style_name,

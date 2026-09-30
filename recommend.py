@@ -533,7 +533,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             chip_advisory: str | None = None,
                             bb_play_gw: int | None = None,
                             disrupted_codes: set | None = None,
-                            hit_stance: str = "No hits") -> dict:
+                            hit_stance: str = "No hits",
+                            chip_schedule: dict | None = None) -> dict:
     """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
@@ -568,12 +569,41 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
       simplification `suggest_transfers()` already carries (see this
       module's top-of-file docstring).
 
+    Patch 92 (v6.9 Rules #44/#48/#49 read together, chip-aware weekly
+    transfer plan — manager, 2026-09-30: "let's go" on the deeper
+    Wildcard-aware fix over the simpler cross-check-note UI, after catching
+    that the planner had zero Wildcard awareness): optional
+    `chip_schedule: {"wildcard_gw": int|None, "wildcard_rebuild_squad":
+    pd.DataFrame|None}`, deliberately Wildcard-ONLY in scope — Free Hit
+    reverts after one week (Rule #44/#49c) so it never changes the
+    persisted squad path this chained plan tracks, and Bench Boost/Triple
+    Captain never change squad composition at all. When given:
+      (a) every week strictly BEFORE `wildcard_gw` values its transfer
+          decision against a horizon TRUNCATED at `wildcard_gw` (exclusive)
+          — a candidate whose value only exists at/after the Wildcard week
+          is never counted, mirroring `suggest_transfers()`'s own
+          `chip_capped_gw_list` concept but automatic and inside the chain;
+      (b) AT `wildcard_gw`, the ordinary k=1..k_upper search is skipped
+          entirely and `sim_squad` is replaced wholesale by
+          `wildcard_rebuild_squad` — this draws NO free transfer (Rule #44:
+          a chip's transfers are free and never touch the real FT balance)
+          while still accruing its own +1 FT (capped at
+          `transfers.MAX_BANK`) exactly as an unused week would;
+      (c) every week AFTER `wildcard_gw` continues the normal chained
+          k-search, but starting from the rebuilt squad.
+    Omitting `chip_schedule` (None, the default) reproduces exact
+    pre-Patch-92 behavior — verified by the full existing test suite
+    passing unmodified.
+
     Returns the same top-level keys `suggest_transfers()` returns (so
     existing callers/UI code work unchanged), plus `weekly_plan`: a list of
     one dict per GW — {gw, moves, net_gain, ft_available, ft_used,
-    ft_banked_after, summary, data_gap_note} — and `is_weekly_schedule`:
-    True, so a caller can distinguish this shape from the single-decision
-    return if it wants to render it differently."""
+    ft_banked_after, summary, data_gap_note, chip_played (Patch 92; absent
+    or None for a normal week, "wildcard" for the substitution week)} —
+    and `is_weekly_schedule`: True, so a caller can distinguish this shape
+    from the single-decision return if it wants to render it differently."""
+    wildcard_gw = chip_schedule.get("wildcard_gw") if chip_schedule else None
+    wildcard_rebuild_squad = chip_schedule.get("wildcard_rebuild_squad") if chip_schedule else None
     profile = style_profiles.get_profile(profile_name)
     hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
     threshold = profile["hit_cost_threshold"]
@@ -615,6 +645,47 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     for wi, gw in enumerate(gw_list):
         remaining_gws = gw_list[wi:]
         this_gw_col = f"xpts_gw{gw}"
+
+        # Patch 92 (a): weeks strictly before a scheduled Wildcard must not
+        # be able to "see" value that only exists at/after the Wildcard
+        # rebuild — that value is illusory since the Wildcard wipes the
+        # squad clean regardless of what this week's transfer decision was.
+        if wildcard_gw is not None and gw < wildcard_gw:
+            remaining_gws = [g for g in remaining_gws if g < wildcard_gw]
+
+        # Patch 92 (b): at the scheduled Wildcard week itself, bypass the
+        # ordinary k=1..k_upper search entirely — the whole squad is
+        # replaced wholesale by the pre-computed rebuild squad, for free
+        # (Rule #44), and the week still accrues its own +1 FT exactly as
+        # an unused week would (no ft_used).
+        if wildcard_gw is not None and gw == wildcard_gw and wildcard_rebuild_squad is not None:
+            new_squad = wildcard_rebuild_squad.copy()
+            bench_w_wc = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+            wc_remaining = gw_list[wi:]
+            old_total_wc = opt.realized_horizon_value(sim_squad, wc_remaining, cfg,
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+            new_total_wc = opt.realized_horizon_value(new_squad, wc_remaining, cfg,
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+            net_gain_wc = round(new_total_wc - old_total_wc, 2)
+            pairs_wc = _pair_moves(sim_squad, new_squad, this_gw_col)
+            week_moves = [{**_move_row(p, 0.0, net_gain_wc, True), "gw": gw} for p in pairs_wc]
+            ft_used = 0
+            ft_after = min(transfers.MAX_BANK, ft_bank + 1)
+            week_summary = (f"GW{gw}: WILDCARD — full squad rebuild ({len(pairs_wc)} changes) — "
+                             f"net {net_gain_wc:+.1f} xPts over the remaining horizon.")
+            plan.append(f"GW{gw}: Wildcard played — squad rebuilt wholesale, no free transfer drawn "
+                        f"(Rule #44), {ft_bank} FT banked → {ft_after} for GW{gw + 1} (unused-week accrual).")
+            weekly_plan.append({
+                "gw": gw, "moves": week_moves, "net_gain": net_gain_wc,
+                "ft_available": ft_bank, "ft_used": ft_used, "ft_banked_after": ft_after,
+                "summary": week_summary, "data_gap_note": None, "chip_played": "wildcard",
+            })
+            summary.append(week_summary)
+            total_net_gain += net_gain_wc
+            sim_squad = new_squad
+            ft_bank = ft_after
+            continue
+
         current_codes = list(sim_squad["code"])
         out_codes_all = set(current_codes)
         team_value = round(bank + (sim_squad["price"].sum(skipna=True) or 0.0), 1)
@@ -821,7 +892,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        chip_advisory: str | None = None,
                        bb_play_gw: int | None = None,
                        chip_capped_gw_list: list[int] | None = None,
-                       disrupted_codes: set | None = None) -> dict:
+                       disrupted_codes: set | None = None,
+                       chip_schedule: dict | None = None) -> dict:
     """Patch 3 — joint multi-transfer optimization (Standing Rules #28/#30/
     #34/#35/#36), replacing the old pairwise best-single-swap-per-slot
     heuristic entirely:
@@ -858,6 +930,13 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     directly — the realized-value calculation re-derives who's actually
     bench per GW from each candidate squad's own best-XI solve, since bench
     membership can shift week to week even for a fixed 15).
+
+    Patch 92: `chip_schedule` (see `plan_transfer_schedule()`'s own docstring
+    for the full design) is passed straight through when this function
+    dispatches to the chained weekly planner (horizon>1, "No hits"/"Hit if
+    worth it") — it has no effect on the single-GW/"Force" path below, which
+    doesn't chain across weeks so a scheduled Wildcard's squad-rebuild has
+    nothing to be chained through in the first place.
 
     Note on scope: the MILP inside `optimizer.solve_squad()` still searches
     for candidate 15-man squads using the raw `xpts_horizon_sum` objective —
@@ -928,7 +1007,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         return plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank,
                                        current_gw, gw_list, meaningful_bar, chip_advisory,
                                        bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes,
-                                       hit_stance=hit_stance)
+                                       hit_stance=hit_stance, chip_schedule=chip_schedule)
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
     # anywhere in these columns turns a pandas comparison into a TypeError
