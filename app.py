@@ -37,7 +37,26 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 102 (2026-10-01, manager: re-timed at 1m20s after Patch 101 — well under the 2-minute "
+PATCH_VERSION = ("Patch 103 (2026-10-01, manager screenshot annotation: the extend-button's own text read "
+                  "\"based on just GW6-GW6\" — \"why only till GW8, i need it to 6GWs from the current one\" / "
+                  "\"this not we agreed about!!\"): confirmed a real bug, not a misreading — `_wc_current_max_gw` "
+                  "(feeds both the opt-in extension's reach decision AND the extend-button's own \"normal reach\" "
+                  "display text) was still computed independently as min(transfer_gw_list[-1], detect_gw_list[-1]), "
+                  "degenerating to a single GW at the manager's Horizon=1 setting — while Patch 102 had already "
+                  "fixed the ACTUAL cross-check calculation (`_wc_check_gw_source`) to use whichever window is "
+                  "LONGER via recommend.resolve_wildcard_check_gw_window(). The two had drifted apart: the real "
+                  "number was computed over the wider window, but the button still described the old, narrower "
+                  "one. Fixed by deriving `_wc_current_max_gw` from that SAME resolver's own result, so the two "
+                  "can never disagree again. Also, per manager confirmation this round: chip_shape_test."
+                  "detection_window_gws (the Wildcard trigger's own detection window — separate from "
+                  "chip_advisor_horizon, which Patch 101 already set to 5) goes 4 → 5, matching that same figure. "
+                  "DISCLOSED COST: one more GW in the detection window means one more reachable-ceiling solve and "
+                  "one more shape-test solve per run (~2 extra solves, well under 1s combined per the Patch 101 "
+                  "benchmark) — not re-measured live, but small relative to the ~1m20s baseline. NEW test file "
+                  "test_patch103_crosscheck_reach_consistency.py (3 tests): the config value, the app.py wiring "
+                  "(confirms the old independent min() computation is gone), and a behavioral proof the resolver "
+                  "no longer degenerates to a 1-GW window at Horizon=1 with a 5-GW detection window. Full "
+                  "regression suite: 163 passed (160 prior + 3 new), zero regressions. Previously, Patch 102 (2026-10-01, manager: re-timed at 1m20s after Patch 101 — well under the 2-minute "
                   "target — then reported two live issues from a fresh screenshot): (1) the extended Wildcard "
                   "cross-check button (Patch 101) was a plain, unexplained st.button() — \"needs to be more visual "
                   "and self explained.\" Fixed: now a prominent, dynamic call-to-action naming the actual target "
@@ -2726,8 +2745,17 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # feeds the Wildcard card's tooltip, which renders before tab_chips'
     # later widgets would otherwise be defined.
     _wc_extend_requested_flag = bool(st.session_state.get("wc_extend_run", False))
-    _wc_current_max_gw = min(transfer_gw_list[-1], detect_gw_list[-1]) if transfer_gw_list and detect_gw_list \
-        else (transfer_gw_list[-1] if transfer_gw_list else (detect_gw_list[-1] if detect_gw_list else planning_gw))
+    # Patch 103 (2026-10-01, manager screenshot: the extend-button's own text
+    # read "based on just GW6-GW6" -- confirmed a real bug, not a rendering
+    # glitch: this used to be computed independently as min(transfer_gw_list,
+    # detect_gw_list), degenerating to a single GW at Horizon=1, while Patch
+    # 102 had already fixed the ACTUAL cross-check calculation
+    # (_wc_check_gw_source, below) to use whichever window is LONGER via
+    # recommend.resolve_wildcard_check_gw_window(). The two could disagree --
+    # this derives _wc_current_max_gw from that SAME resolver so the
+    # displayed "normal reach" and the real one can never drift apart again.
+    _wc_check_window = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
+    _wc_current_max_gw = _wc_check_window[-1] if _wc_check_window else planning_gw
     _wc_extend_info = recommend.resolve_cross_check_horizon(
         planning_gw, _wc_current_max_gw, _auto_wildcard_gw, max_extension=8) \
         if recommend.wc_extend_requested(_wc_extend_requested_flag, _auto_wildcard_gw) else None

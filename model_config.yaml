@@ -3229,7 +3229,20 @@ solver:
 # into the shape-test.
 # -----------------------------------------------------------------------------
 chip_shape_test:
-  detection_window_gws: 4
+  detection_window_gws: 5
+
+# Patch 103 (2026-10-01, manager screenshot annotation + confirmation this
+# round): detection_window_gws 4 -> 5, matching the chip_advisor_horizon
+# figure already set in Patch 101. Separate code path from
+# chip_advisor_horizon (below) -- this one drives the Wildcard trigger's own
+# avg_rating_pct and the shape-test, chip_advisor_horizon drives the
+# Wildcard window-value scan and the BB/TC/FH advisors. Also fixed the same
+# round: app.py's `_wc_current_max_gw` (the cross-check extend-button's own
+# "normal reach" display) now derives from the SAME resolver Patch 102 uses
+# for the real calculation (recommend.resolve_wildcard_check_gw_window()) --
+# it had drifted out of sync, showing a stale "GW6-GW6" window while the
+# real number was already computed over the wider, correct one. See
+# PATCH_VERSION in app.py for the full narrative.
 
 # -----------------------------------------------------------------------------
 # Chip Advisor search window (Patch 32, 2026-09-14 manager report: the Bench
