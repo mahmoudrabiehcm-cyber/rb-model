@@ -37,7 +37,32 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 103 (2026-10-01, manager screenshot annotation: the extend-button's own text read "
+PATCH_VERSION = ("Patch 104 (2026-10-01, manager screenshot: the \"Run extended Wildcard cross-check\" button "
+                  "went correctly-but-confusingly disabled once Patch 103's wider normal reach (GW10) already "
+                  "covered the one scheduled Wildcard on screen (GW8) — \"why it's grayed , it should give an "
+                  "option for another 5 GWs beyond the one maximum used for the current run\", then \"i didn't get "
+                  "it!!\" mid-explanation): investigated in code first — confirmed the disabled state was correct "
+                  "per the Patch 101/102 design (a conditional gate: only relevant when a scheduled chip falls "
+                  "beyond the normal reach), but that design itself was wrong for how the manager wants to use the "
+                  "button. Asked directly (AskUserQuestion) rather than guessing: confirmed the manager wants an "
+                  "ALWAYS-AVAILABLE manual control — clicking it should push the cross-check a further fixed +5 "
+                  "GWs beyond the normal reach every time, whether or not a chip is currently scheduled in that "
+                  "range. Redesigned: new recommend.resolve_wildcard_extend_target(current_max_gw, "
+                  "auto_wildcard_gw, fixed_increment=5) always returns current_max_gw+5, extended further only if "
+                  "a real scheduled chip sits even beyond that — so the button never falls short of a known "
+                  "decision point. recommend.wc_extend_requested() no longer requires a scheduled Wildcard to "
+                  "return True (supersedes Patch 101's test of the opposite behavior — updated, not silently left "
+                  "to rot, in test_patch101_scan_window_and_optin_crosscheck.py). The button itself is never "
+                  "disabled now; its message text still adapts — chip-driven framing when a scheduled chip is the "
+                  "reason this run's extension matters, plain \"Exploratory\" framing otherwise, so the manager "
+                  "always knows which situation they're in without the button hiding itself. NEW test file "
+                  "test_patch104_always_on_extend_button.py (12 tests): the target resolver's 5 cases (fixed "
+                  "increment, chip within it, chip beyond it, custom increment, exact-boundary), "
+                  "wc_extend_requested()'s updated 3 cases, and 4 app.py wiring checks (target resolver called, "
+                  "disabled branch gone, button key still defined, exploratory messaging present). DISCLOSED "
+                  "COST: unchanged from Patch 101 — the extension still only runs its extra solves when clicked; "
+                  "the no-click path (now the only difference is this button never renders disabled) is free. "
+                  "Full regression suite: 175 passed (163 prior + 12 new), zero regressions. Previously, Patch 103 (2026-10-01, manager screenshot annotation: the extend-button's own text read "
                   "\"based on just GW6-GW6\" — \"why only till GW8, i need it to 6GWs from the current one\" / "
                   "\"this not we agreed about!!\"): confirmed a real bug, not a misreading — `_wc_current_max_gw` "
                   "(feeds both the opt-in extension's reach decision AND the extend-button's own \"normal reach\" "
@@ -2756,8 +2781,16 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # displayed "normal reach" and the real one can never drift apart again.
     _wc_check_window = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
     _wc_current_max_gw = _wc_check_window[-1] if _wc_check_window else planning_gw
+    # Patch 104 (2026-10-01, manager: "why it's grayed , it should give an
+    # option for another 5 GWs beyond the one maximum used for the current
+    # run" -- confirmed via AskUserQuestion the button should be an always-
+    # available manual control, not conditional on a scheduled chip falling
+    # beyond the normal reach). The target is now always computed -- a
+    # fixed +5 GWs beyond _wc_current_max_gw, extended further only if an
+    # actual scheduled Wildcard sits even beyond that.
+    _wc_extend_target_gw = recommend.resolve_wildcard_extend_target(_wc_current_max_gw, _auto_wildcard_gw)
     _wc_extend_info = recommend.resolve_cross_check_horizon(
-        planning_gw, _wc_current_max_gw, _auto_wildcard_gw, max_extension=8) \
+        planning_gw, _wc_current_max_gw, _wc_extend_target_gw, max_extension=8) \
         if recommend.wc_extend_requested(_wc_extend_requested_flag, _auto_wildcard_gw) else None
     _wc_extended_active = False
     _wc_extended_reached_target = True
@@ -3702,27 +3735,34 @@ with tab_chips:
     # reach) are both already available here, unchanged, from earlier in
     # this same script run -- enough to make this self-explanatory without
     # any new computation.
-    _wc_extend_relevant = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
-    if _wc_extend_relevant:
-        with st.container(border=True):
+    # Patch 104 (2026-10-01, manager screenshot + "i didn't get it!!" after
+    # this button went correctly-but-confusingly disabled once Patch 103's
+    # wider normal reach already covered the one scheduled Wildcard on
+    # screen). Confirmed via AskUserQuestion: redesigned from a conditional
+    # "only relevant if a scheduled chip needs it" gate into an ALWAYS-ON
+    # manual control -- clicking it pushes the cross-check a further fixed
+    # +5 GWs beyond the normal reach regardless of whether anything is
+    # currently scheduled out there (recommend.resolve_wildcard_extend_target()
+    # above already extends the target further still if a real scheduled
+    # chip sits beyond even that). The messaging below just changes framing
+    # depending on whether a scheduled chip happens to be the reason this
+    # run's extension matters, or whether it's purely exploratory.
+    _wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
+    with st.container(border=True):
+        if _wc_extend_chip_driven:
             st.markdown(f"🔎 **Your scheduled Wildcard is GW{_auto_wildcard_gw}, beyond this check's normal "
                         f"GW{_wc_current_max_gw} reach.** The cross-check above is based on just GW"
-                        f"{planning_gw}-GW{_wc_current_max_gw} by default — click below to re-run it all the way "
-                        f"out to GW{_auto_wildcard_gw}, the GW that actually matters for this decision.")
-            st.button(f"Run the extended cross-check — reach GW{_auto_wildcard_gw}", key="wc_extend_run",
-                      type="primary")
-            st.caption("Off by default to keep routine runs fast (Patch 101: a full extra transfer-plan solve plus "
-                       "a full extra reachable-ceiling scan, every time it ran automatically). A later, unrelated "
-                       "click reverts to the fast check until you run this again.")
-    else:
-        # Nothing for this button to extend TO this run (no active Wildcard
-        # target, or it's already within the normal check's own reach) --
-        # still define the widget (so `st.session_state["wc_extend_run"]`
-        # always exists for the gate above to read) but as a quiet, muted
-        # no-op rather than a prompt with nothing behind it.
-        st.button("Run extended Wildcard cross-check", key="wc_extend_run", disabled=True,
-                   help="Nothing to extend to right now — there's no scheduled Wildcard beyond this check's own "
-                        f"GW{planning_gw}-GW{_wc_current_max_gw} reach.")
+                        f"{planning_gw}-GW{_wc_current_max_gw} by default — click below to re-run it out to "
+                        f"GW{_wc_extend_target_gw}, covering the GW that actually matters for this decision.")
+        else:
+            st.markdown(f"🔎 **Exploratory:** no scheduled chip currently falls beyond this check's normal "
+                        f"GW{planning_gw}-GW{_wc_current_max_gw} reach. Click below to push the check a further "
+                        f"5 GWs out to GW{_wc_extend_target_gw} anyway, in case it's worth seeing further ahead.")
+        st.button(f"Run the extended cross-check — reach GW{_wc_extend_target_gw}", key="wc_extend_run",
+                  type="primary")
+        st.caption("Off by default to keep routine runs fast (Patch 101: a full extra transfer-plan solve plus "
+                   "a full extra reachable-ceiling scan, every time it ran automatically). A later, unrelated "
+                   "click reverts to the fast check until you run this again.")
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now

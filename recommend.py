@@ -569,13 +569,46 @@ def wc_extend_requested(session_state_flag: bool, auto_wildcard_gw: int | None) 
     matter, the manager revisited that call and asked to make it opt-in,
     the same button-gated pattern Cross-Tool Reconciliation already uses.
 
-    This is the pure decision function app.py wires a new
-    st.button(key="wc_extend_run")'s session-state flag through: the
-    extension only ever runs when the manager has explicitly asked for it
-    on THIS run (`session_state_flag`) AND there's actually an active
-    Wildcard target to extend the check towards (`auto_wildcard_gw`) --
-    requesting it with no scheduled Wildcard is a no-op, same as before."""
-    return bool(session_state_flag) and auto_wildcard_gw is not None
+    Patch 104 (2026-10-01, manager screenshot: the button this gates had
+    gone correctly-but-unhelpfully disabled once Patch 103 widened the
+    normal check's own reach far enough to already cover the one scheduled
+    Wildcard on screen -- "why it's grayed , it should give an option for
+    another 5 GWs beyond the one maximum used for the current run" /
+    "i didn't get it!!"). Confirmed with the manager directly (AskUserQuestion)
+    that the button was built on the wrong philosophy: a conditional
+    "only matters if a scheduled chip needs it" gate, when what's wanted is
+    an always-available manual "push this check further out" control,
+    useful on its own merits even with nothing currently scheduled beyond
+    the normal reach. `auto_wildcard_gw` is therefore no longer part of the
+    gate at all -- kept as a parameter (ignored) only so existing call
+    sites/tests that pass it don't need to change shape. The only real gate
+    now is the manager's own explicit click this run."""
+    return bool(session_state_flag)
+
+
+def resolve_wildcard_extend_target(current_max_gw: int, auto_wildcard_gw: int | None,
+                                    fixed_increment: int = 5) -> int:
+    """Patch 104 (2026-10-01, manager screenshot + AskUserQuestion confirmation):
+    the extend button's target GW, now computed unconditionally every run
+    (the button itself is always clickable -- see wc_extend_requested()
+    above). Always reaches at least `current_max_gw + fixed_increment`
+    ("another 5 GWs beyond the one maximum used for the current run", the
+    manager's own words) regardless of whether any chip is scheduled in
+    that range. If a chip IS scheduled further out than the fixed
+    increment would reach, the target extends to cover it too -- the
+    button should never show a target that's short of a real, known
+    decision point just because the fixed increment alone would stop
+    earlier.
+
+    `current_max_gw`: the normal (unextended) cross-check's own reach
+    (recommend.resolve_wildcard_check_gw_window(...)[-1] in app.py).
+    `auto_wildcard_gw`: the chip portfolio's scheduled Wildcard GW, or
+    None if none is scheduled.
+    """
+    target = current_max_gw + fixed_increment
+    if auto_wildcard_gw is not None and auto_wildcard_gw > target:
+        target = auto_wildcard_gw
+    return target
 
 
 def resolve_wildcard_check_gw_window(transfer_gw_list: list[int], detect_gw_list: list[int] | None) -> list[int]:
