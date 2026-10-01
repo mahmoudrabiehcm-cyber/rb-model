@@ -37,7 +37,37 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 100 (2026-09-30, manager: \"dig deep on the performance\" — after choosing to keep the "
+PATCH_VERSION = ("Patch 101 (2026-10-01, manager: \"it's 4 minutes 46 seconds now ,, i need it below 2 minutes\"): "
+                  "instrumented opt.solve_squad() directly (call counter + timer) and drove the real app functions "
+                  "through a cold run matching the manager's own config/state — measured, not guessed: 55 total "
+                  "solve_squad() calls, 17.4s in this sandbox. wildcard_window_value_scan() was the single biggest "
+                  "piece (16 calls, 38% of the total), evaluate_free_hit()'s Chip Advisor scan next (8 calls) — both "
+                  "driven by the SAME chip_advisor_horizon.default_gws window (8 GWs). Confirmed via this "
+                  "measurement that caching (Patches 97/99/100) was structurally capped in how much it could ever "
+                  "help: every one of these solves still runs once on a genuinely cold run regardless of caching, "
+                  "so the only remaining lever was cutting solve COUNT. Two changes, both manager-confirmed before "
+                  "building: (1) model_config.yaml chip_advisor_horizon.default_gws: 8 → 5 — cuts the two biggest "
+                  "line items roughly in half at once; max_extend_gws (16) and the auto-extend-to-nearest-DGW/BGW "
+                  "logic are UNCHANGED, so a known Double/Blank gameweek still pulls the window out to meet it, "
+                  "only the routine every-run scan length shrinks. (2) the Patch 95 extended Wildcard cross-check "
+                  "(a full second plan_transfer_schedule() + a full second solve_reachable_ceiling_by_gw() over +8 "
+                  "GWs — the manager's own explicit choice last session to keep auto-running) is now opt-in: a new "
+                  "st.button(key=\"wc_extend_run\") on the Chip Plan tab, gated through a new pure function "
+                  "recommend.wc_extend_requested(session_state_flag, auto_wildcard_gw), same button-gated pattern "
+                  "Cross-Tool Reconciliation already uses — a normal run no longer pays for it at all unless "
+                  "clicked. Re-measured post-patch with the SAME instrumentation: 32 calls, 10.8s in this sandbox "
+                  "on a normal run (extended cross-check not clicked) — a confirmed 42% fewer solves, 38% less "
+                  "sandbox time, not an estimate. NEW test file test_patch101_scan_window_and_optin_crosscheck.py "
+                  "(8 tests) covers the config change (default_gws=5, max_extend_gws/auto-extend unchanged) and the "
+                  "new wc_extend_requested() gate (both conditions required; app.py wiring confirmed, old "
+                  "unconditional gate confirmed gone). Full regression suite: 152 passed (144 prior + 8 new), zero "
+                  "regressions. DISCLOSED TRADEOFF: outside an auto-extension to a confirmed DGW/BGW, the Wildcard "
+                  "window-value scan and the Bench Boost/Triple Captain/Free Hit advisors now look 5 GWs ahead by "
+                  "default instead of 8 — manager-confirmed acceptable given the 2-minute target. DISCLOSED, NOT "
+                  "OVERCLAIMED: live re-verification of the deployed app's wall-clock time was not possible from "
+                  "this sandbox — the sandbox-measured 42%/38% reduction is real and reproducible, but whether it "
+                  "reaches the 2-minute target on Streamlit Community Cloud's own hardware can only be confirmed by "
+                  "the manager's own re-timed run after deploying this patch. Previously, Patch 100 (2026-09-30, manager: \"dig deep on the performance\" — after choosing to keep the "
                   "extended cross-check running with every run rather than gate it behind a button): a further "
                   "call-site audit beyond Patch 99's five found SIX MORE uncached MILP-class calls, verified in "
                   "code, not inferred from shape. Three fire completely unconditionally on every single script "
@@ -2654,11 +2684,28 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # never touching `rec`/`reachable_by_gw` themselves, so the Transfer
     # Recommendations tab and the Wildcard trigger's own headline % stay
     # exactly as they are today.
+    # Patch 101 (2026-10-01, manager: "it's 4 minutes 46 seconds now ,, i
+    # need it below 2 minutes" -- after choosing, last session, to keep this
+    # extension running automatically every run) -- this duplicates a full
+    # plan_transfer_schedule() solve plus a full solve_reachable_ceiling_by_
+    # gw() scan over +8 GWs, real measured cost. Now gated behind an
+    # explicit opt-in button (st.button(key="wc_extend_run") below, inside
+    # tab_chips) via recommend.wc_extend_requested() -- same button-gated
+    # pattern Cross-Tool Reconciliation already uses. st.session_state's
+    # value for a widget key is available from the top of the script on
+    # every rerun (Streamlit restores it before executing script code), so
+    # this read is safe even though the actual st.button(...) call that
+    # defines "wc_extend_run" doesn't appear until later in the script, same
+    # as the Reconcile button's own key is only ever referenced at its own
+    # call site, not read early -- this one is read early BECAUSE the result
+    # feeds the Wildcard card's tooltip, which renders before tab_chips'
+    # later widgets would otherwise be defined.
+    _wc_extend_requested_flag = bool(st.session_state.get("wc_extend_run", False))
     _wc_current_max_gw = min(transfer_gw_list[-1], detect_gw_list[-1]) if transfer_gw_list and detect_gw_list \
         else (transfer_gw_list[-1] if transfer_gw_list else (detect_gw_list[-1] if detect_gw_list else planning_gw))
     _wc_extend_info = recommend.resolve_cross_check_horizon(
-        planning_gw, _wc_current_max_gw, _auto_wildcard_gw, max_extension=8) if _auto_wildcard_gw is not None \
-        else None
+        planning_gw, _wc_current_max_gw, _auto_wildcard_gw, max_extension=8) \
+        if recommend.wc_extend_requested(_wc_extend_requested_flag, _auto_wildcard_gw) else None
     _wc_extended_active = False
     _wc_extended_reached_target = True
     _squad_after_by_gw = None
@@ -3580,6 +3627,22 @@ with tab_chips:
         _advisor_card("Triple Captain", tc_advisor, tc_used_state, _seq_for("3xc")) + \
         _advisor_card("Free Hit", fh_advisor, fh_used_state, _seq_for("freehit")) + '</div>'
     st.markdown(signal_html, unsafe_allow_html=True)
+
+    # Patch 101 (2026-10-01, manager: "it's 4 minutes 46 seconds now ,, i
+    # need it below 2 minutes") -- the Patch 95 extended Wildcard cross-check
+    # (reaches a scheduled Wildcard's actual GW when it falls beyond the
+    # normal transfer-plan/reachable-ceiling windows) used to run
+    # automatically every time that condition was met. It's real cost (a
+    # full extra transfer-plan solve plus a full extra reachable-ceiling
+    # scan over +8 GWs), so it's opt-in now -- same button-gated pattern as
+    # Cross-Tool Reconciliation below. Clicking it recomputes the Wildcard
+    # card's own tooltip/sub-line above with the deeper check folded in; a
+    # later, unrelated widget interaction reverts to the normal (faster)
+    # check until clicked again -- identical behavior to how Reconcile's own
+    # result only shows for the run right after it's clicked.
+    st.button("Run extended Wildcard cross-check (reaches the scheduled chip's actual GW)", key="wc_extend_run")
+    st.caption("Off by default to keep routine runs fast (Patch 101) — click to re-check the Wildcard card above "
+               "against its actual scheduled GW when that falls beyond the normal detection window.")
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now

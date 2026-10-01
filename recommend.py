@@ -556,6 +556,28 @@ def resolve_cross_check_horizon(planning_gw: int, current_max_gw: int, target_gw
             "reached_target": capped_target >= target_gw}
 
 
+def wc_extend_requested(session_state_flag: bool, auto_wildcard_gw: int | None) -> bool:
+    """Patch 101 (2026-10-01, manager: "it's 4 minutes 46 seconds now ,, i
+    need it below 2 minutes"). The Patch 95 extended Wildcard cross-check
+    (resolve_cross_check_horizon() above, run via app.py's
+    _extended_wc_cross_check_calc()) used to fire automatically whenever a
+    Wildcard was scheduled beyond the normal window -- a real, measured cost
+    (a full extra plan_transfer_schedule() solve plus a full extra
+    solve_reachable_ceiling_by_gw() scan over +8 GWs) the manager had
+    explicitly chosen to keep running every time ("i want to be with the
+    run" -- prior session). With the new 2-minute target making every solve
+    matter, the manager revisited that call and asked to make it opt-in,
+    the same button-gated pattern Cross-Tool Reconciliation already uses.
+
+    This is the pure decision function app.py wires a new
+    st.button(key="wc_extend_run")'s session-state flag through: the
+    extension only ever runs when the manager has explicitly asked for it
+    on THIS run (`session_state_flag`) AND there's actually an active
+    Wildcard target to extend the check towards (`auto_wildcard_gw`) --
+    requesting it with no scheduled Wildcard is a no-op, same as before."""
+    return bool(session_state_flag) and auto_wildcard_gw is not None
+
+
 def build_squad_after_by_gw(squad_df: pd.DataFrame, weekly_plan: list[dict],
                              pool_df: pd.DataFrame) -> dict[int, pd.DataFrame]:
     """Patch 94 (v6.9 Rule #49 cross-check correctness fix — discussion,

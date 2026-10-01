@@ -3252,7 +3252,32 @@ chip_shape_test:
 #     rebuild solve per candidate GW in the window.
 # -----------------------------------------------------------------------------
 chip_advisor_horizon:
-  default_gws: 8
+  default_gws: 5
   max_extend_gws: 16
   structural_overlap_ceiling: 0.7
   spike_overlap_floor: 0.85
+
+# Patch 101 (2026-10-01, manager: "it's 4 minutes 46 seconds now ,, i need it
+# below 2 minutes" -- a real-count instrumentation of one cold run, done in
+# this sandbox before this change, confirmed default_gws=8 was the single
+# largest cost driver: wildcard_window_value_scan() (chip_protocol.py)
+# re-solves 2 MILP squads PER candidate GW in this exact window (16 solves
+# at 8 GWs -- 38% of all 55 solve_squad() calls measured in one full cold
+# run), and evaluate_free_hit() (the Chip Advisor's Free Hit verdict) solves
+# one more full rebuild per GW in the SAME window (8 more solves) -- the two
+# single biggest line items in that measurement, both driven by this one
+# number. Manager chose (2026-10-01 discussion) to cut default_gws 8 -> 5,
+# roughly halving both at once -- the single highest-leverage change
+# measured, versus a smaller cut to 4 (more aggressive, matches the
+# Wildcard trigger's own 4-GW chip_shape_test window) or leaving it at 8 and
+# cutting elsewhere instead. max_extend_gws stays 16 and the auto-extend-to-
+# nearest-DGW/BGW logic (chip_advisor_gw_window()) is UNCHANGED -- a known
+# Double/Blank gameweek just past the (now shorter) default window still
+# pulls the scan out to meet it, so this narrows the routine every-run scan
+# length, not the model's ability to ever see a confirmed DGW/BGW coming.
+# DISCLOSED TRADEOFF: outside an auto-extension, the Wildcard window-value
+# scan and the Bench Boost/Triple Captain/Free Hit advisors now look 5 GWs
+# ahead by default instead of 8 -- less routine lead time on a chip decision
+# that isn't yet near a known DGW/BGW. Manager-confirmed acceptable given
+# the 2-minute runtime target.
+# -----------------------------------------------------------------------------
