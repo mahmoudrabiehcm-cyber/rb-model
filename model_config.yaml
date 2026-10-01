@@ -2950,6 +2950,21 @@ chip_portfolio:
   window_value_len: 4
 
 # -----------------------------------------------------------------------------
+# Patch 100 (2026-09-30, manager: "dig deep on the performance", after
+# explicitly choosing to keep the extended Wildcard cross-check (Patch 95)
+# running automatically every run rather than gate it behind a button -- "i
+# want to be with the run"). Config-side note only; the actual fix is all in
+# app.py (six new @st.cache_data wrappers around previously-bare MILP-class
+# calls -- see PATCH_VERSION for the full list and line references). No
+# config KEYS changed by this patch -- chip_shape_test.detection_window_gws
+# (below) is READ by one of the newly-cached calls (_shape_test_calc) but its
+# value (4) is unchanged; documenting here only because that config key is
+# now indirectly load-bearing for cache-key stability too (a value change
+# there naturally invalidates the cache, same as any other cached input,
+# nothing new required).
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
 # Patch 96 (2026-09-30, v6.9 Standing Rule #50, Chip Timing Harmony). Manager
 # discussion (2026-09-30, multiple rounds) established: Rule #49's joint
 # scheduler ALREADY runs all 4 chips together maximising their combined

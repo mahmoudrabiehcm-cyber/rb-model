@@ -37,7 +37,41 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 99 (2026-09-30, manager re-timed the run AFTER deploying Patch 97 and got ~6m10s — "
+PATCH_VERSION = ("Patch 100 (2026-09-30, manager: \"dig deep on the performance\" — after choosing to keep the "
+                  "extended cross-check running with every run rather than gate it behind a button): a further "
+                  "call-site audit beyond Patch 99's five found SIX MORE uncached MILP-class calls, verified in "
+                  "code, not inferred from shape. Three fire completely unconditionally on every single script "
+                  "rerun: data_pipeline.solve_reachable_ceiling() (line ~1860, the Team Rating % headline's "
+                  "single-total reachable solve — distinct from the by-GW version Patch 99 already cached), "
+                  "data_pipeline.solve_ceiling() (line ~1861, the \"theoretical ceiling\" full-pool solve), and "
+                  "data_pipeline.solve_free_hit_optimal_squad() (line ~1949 — this file's OWN Patch 22 comment "
+                  "already said \"computed automatically every run ... not gated\"). A fourth, chip_protocol."
+                  "wildcard_freehit_shape_test() (line ~2157), runs 4 separate opt.solve_squad() calls internally "
+                  "(one per GW in the 4-GW chip_shape_test.detection_window_gws window) whenever the Wildcard or "
+                  "Free Hit signal is active — true in both of the manager's own screenshots this session. The "
+                  "last two live in the \"Team Recommendation — active signals, auto-built\" block (lines "
+                  "~3608-3693), explicitly commented as NOT button-gated: chip_protocol.evaluate_wildcard_whatif() "
+                  "and a second solve_free_hit_optimal_squad() call, both firing whenever their respective chip "
+                  "signal is active. All six now route through new @st.cache_data(ttl=900, show_spinner=False) "
+                  "wrappers (_reachable_ceiling_single_calc, _theoretical_ceiling_calc, _fh_optimal_calc — shared "
+                  "by both its call sites, _shape_test_calc, _wc_whatif_calc — also reused for the pre-existing "
+                  "manual \"Evaluate your own scenario\" picker's own call, adding caching there too with zero "
+                  "behavior change), same proven pattern as every prior _xxx_calc wrapper since Patch 86. NEW "
+                  "test file test_patch100_remaining_uncached_solves.py (11 tests) verifies (a) each old bare call "
+                  "no longer appears as live code, only as historical comment text, and (b) each new wrapper is a "
+                  "byte-for-byte pure pass-through to the real underlying function (no behavior change). TWO more "
+                  "pre-existing golden-slice tests (test_patch73_compliant_rating_diagnostic_golden_slice.py, "
+                  "test_patch73_fh_rating_diagnostic_golden_slice.py) broke on this refactor the same way "
+                  "test_patch73/74 did in Patch 99 — fixed the same way, with uncached pass-through stand-ins for "
+                  "the new wrapper names in their exec namespaces. Full regression suite: 144 passed (133 prior + "
+                  "11 new), zero regressions, same 6 pre-existing unrelated AppTest-driver failures excluded as "
+                  "every prior patch. DISCLOSED, NOT OVERCLAIMED: live re-verification of wall-clock time on the "
+                  "deployed app was not possible from this sandbox — this closes a confirmed, real, previously-"
+                  "missed gap (six more uncached expensive computations, now cached), on top of Patch 99's five, "
+                  "but whether it further moves the ~5m10s figure can only be confirmed by the manager's own "
+                  "re-timed run after deploying this patch. The extended cross-check (Patch 95) remains "
+                  "intentionally un-gated per the manager's explicit \"i want to be with the run\" — its own two "
+                  "solves are NOT part of this patch's fix, by design. Previously, Patch 99 (2026-09-30, manager re-timed the run AFTER deploying Patch 97 and got ~6m10s — "
                   "essentially unchanged from the original ~6m45s, confirming Patch 97's fix targeted the wrong "
                   "bottleneck; manager: \"i need this to be rechecked\"): found the REAL cause by systematically "
                   "auditing every call site in app.py against which computations were/weren't wrapped in "
@@ -1396,6 +1430,69 @@ def _suggest_transfers_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: 
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _reachable_ceiling_single_calc(cfg: dict, proj: pd.DataFrame, squad_codes_items: tuple, free_transfers: int):
+    """Patch 100 (2026-09-30, manager: "dig deep on the performance") --
+    further audit beyond Patch 99's five found data_pipeline.
+    solve_reachable_ceiling() (the SINGLE-total counterpart to the already-
+    cached by-GW version -- this one feeds the Team Rating % headline, not
+    the Wildcard trigger) called bare at the app.py top level, unconditional
+    on every single script rerun, with no caching at all. Pure pass-through
+    wrapper, same pattern as _reachable_ceiling_calc (Patch 99)."""
+    return data_pipeline.solve_reachable_ceiling(cfg, proj, list(squad_codes_items), free_transfers)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _theoretical_ceiling_calc(cfg: dict, proj: pd.DataFrame):
+    """Patch 100 -- data_pipeline.solve_ceiling() (the unconstrained full-
+    pool "theoretical ceiling" solve) was called bare at the app.py top
+    level, unconditional on every single script rerun. Pure pass-through."""
+    return data_pipeline.solve_ceiling(cfg, proj)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _fh_optimal_calc(cfg: dict, proj: pd.DataFrame, team_value: float, gw: int):
+    """Patch 100 -- data_pipeline.solve_free_hit_optimal_squad() (the "what's
+    the actual best Free Hit squad this GW" display feature) had TWO bare,
+    uncached call sites: (1) the header's auto Team Rating card, confirmed
+    via this file's own pre-existing Patch 22 comment as "computed
+    automatically every run ... not gated behind the manual picker any
+    more"; (2) the "Team Recommendation -- active signals, auto-built"
+    block's Free Hit expander, which fires whenever the Free Hit advisor's
+    verdict is play_gwN (not button-gated, per that section's own explicit
+    comment). Both now route through this single shared cached wrapper --
+    same function signature, same pass-through, one fix covers both sites."""
+    return data_pipeline.solve_free_hit_optimal_squad(cfg, proj, team_value, gw)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _shape_test_calc(squad_df: pd.DataFrame, shape_proj: pd.DataFrame, cfg: dict,
+                      detect_gw_list_items: tuple, team_value: float):
+    """Patch 100 -- chip_protocol.wildcard_freehit_shape_test() runs FOUR
+    separate opt.solve_squad() calls internally (one per GW in the 4-GW
+    chip_shape_test.detection_window_gws detection window), gated only by
+    `wc_flag or _fh_available_now` -- true on essentially every run once
+    either chip's signal is active, which is the manager's own team's
+    observed state in both screenshots this session. Was called bare, no
+    caching. Pure pass-through."""
+    return chip_protocol.wildcard_freehit_shape_test(squad_df, shape_proj, cfg, list(detect_gw_list_items), team_value)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _wc_whatif_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+                     team_value: float, future_gw_list_items: tuple):
+    """Patch 100 -- chip_protocol.evaluate_wildcard_whatif() (one full
+    horizon-sum MILP rebuild solve) had a bare, uncached call site inside
+    the "Team Recommendation -- active signals, auto-built" block, which
+    that section's own comment confirms is NOT button-gated -- it fires
+    whenever the Wildcard trigger is active. Reused here (same signature)
+    for BOTH that auto call site and the manual "Evaluate your own
+    scenario" picker's call site -- the manual one was already only
+    user-triggered so this adds no new gating requirement there, just
+    caching if the manager re-checks the same candidate date twice."""
+    return chip_protocol.evaluate_wildcard_whatif(squad_df, pool_df, cfg, team_value, list(future_gw_list_items))
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def _extended_wc_cross_check_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_proj: pd.DataFrame,
                                    cfg: dict, style_name: str, free_transfers: int, bank: float,
                                    planning_gw: int, ext_gw_list: tuple, meaningful_bar: float,
@@ -1857,8 +1954,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     # demonstrated weekly noise reads as "at ceiling," not a misleadingly
     # precise decimal.
     team_value = round(bank + (squad_df["price"].sum() if not squad_df.empty else 0.0), 1)
-    reachable = data_pipeline.solve_reachable_ceiling(cfg, proj, squad_codes, ft["free_transfers"])
-    theoretical_ceiling = data_pipeline.solve_ceiling(cfg, proj)
+    reachable = _reachable_ceiling_single_calc(cfg, proj, tuple(squad_codes), ft["free_transfers"])
+    theoretical_ceiling = _theoretical_ceiling_calc(cfg, proj)
     # Patch 20 (2026-09-07 discussion) — §1a's own formula requires
     # Squad_xPts/Ceiling_xPts to include "captaincy applied per Step 7's
     # joint per-week XI+captain evaluation," not a flat 15-man raw sum
@@ -1946,7 +2043,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     # earlier this session on why that makes this number move more
     # meaningfully than the main headline can.
     fh_auto_col = f"xpts_gw{planning_gw}"
-    fh_auto_result = data_pipeline.solve_free_hit_optimal_squad(cfg, proj, team_value, planning_gw)
+    fh_auto_result = _fh_optimal_calc(cfg, proj, team_value, planning_gw)
     fh_auto_current_val = opt.rating_gw_value(squad_df, fh_auto_col, cfg)["total_realized"] \
         if not squad_df.empty else 0.0
     fh_auto_optimal_val = opt.rating_gw_value(fh_auto_result["squad"], fh_auto_col, cfg)["total_realized"] \
@@ -2154,8 +2251,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     # Wildcard evidence (or vice versa). Reuses the same detect_gw_list/
     # shape_proj the trigger above already computed.
     if (wc_flag or _fh_available_now) and shape_proj is not None:
-        shape_test = chip_protocol.wildcard_freehit_shape_test(
-            squad_df, shape_proj, cfg, detect_gw_list, team_value)
+        shape_test = _shape_test_calc(
+            squad_df, shape_proj, cfg, tuple(detect_gw_list) if detect_gw_list else (), team_value)
 
     # Chip Advisor (v5.0 / Patch 1) — quantified play/hold verdicts within the
     # chosen horizon for the three chips that actually have a "which GW"
@@ -3627,8 +3724,8 @@ with tab_transfers:
             _full_pool_now = pd.concat([squad_df, pool_df], ignore_index=True, sort=False)
             if "code" in _full_pool_now.columns:
                 _full_pool_now = _full_pool_now.drop_duplicates(subset=["code"], keep="first")
-            wc_eval_auto = chip_protocol.evaluate_wildcard_whatif(
-                squad_df, pool_df, cfg, team_value, detect_gw_list or gw_list)
+            wc_eval_auto = _wc_whatif_calc(
+                squad_df, pool_df, cfg, team_value, tuple(detect_gw_list or gw_list))
             with st.expander(f"🃏 Wildcard rebuild — trigger active, shown for GW{wc_rebuild_gw} onward", expanded=False):
                 if not wc_eval_auto["feasible"]:
                     st.info("Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
@@ -3669,7 +3766,7 @@ with tab_transfers:
             _fh_gw = int(fh_advisor["verdict"].split("gw")[1])
             _fh_col = f"xpts_gw{_fh_gw}"
             _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw], fixture_baselines)
-            fh_res_auto = data_pipeline.solve_free_hit_optimal_squad(cfg, _fh_proj_auto, team_value, _fh_gw)
+            fh_res_auto = _fh_optimal_calc(cfg, _fh_proj_auto, team_value, _fh_gw)
             with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=False):
                 if fh_res_auto is None:
                     st.info("Couldn't solve an optimal Free Hit squad this run.")
@@ -3819,8 +3916,8 @@ def _compute_scenario_evaluations():
         future_proj = _project(snap, hist_df, overrides, cfg, future_gw_list, fixture_baselines)
         future_squad_proj = future_proj[future_proj["code"].isin(squad_codes)].copy()
         future_pool_proj = future_proj[~future_proj["code"].isin(squad_codes)].copy()
-        wc_eval = chip_protocol.evaluate_wildcard_whatif(future_squad_proj, future_pool_proj, cfg,
-                                                          team_value, future_gw_list)
+        wc_eval = _wc_whatif_calc(future_squad_proj, future_pool_proj, cfg,
+                                   team_value, tuple(future_gw_list))
         if not wc_eval["feasible"]:
             st.session_state["scenario_wc_cache"] = {
                 "wc_gw_choice": wc_gw_choice, "feasible": False}
