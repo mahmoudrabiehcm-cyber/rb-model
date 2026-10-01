@@ -578,6 +578,36 @@ def wc_extend_requested(session_state_flag: bool, auto_wildcard_gw: int | None) 
     return bool(session_state_flag) and auto_wildcard_gw is not None
 
 
+def resolve_wildcard_check_gw_window(transfer_gw_list: list[int], detect_gw_list: list[int] | None) -> list[int]:
+    """Patch 102 (2026-10-01, manager report: Chip Plan tab showed "Wildcard
+    trigger ACTIVE (93.6%)" right next to "Wildcard may not be needed --
+    plan reaches 96.6%" on a week Transfer Recommendations said "Roll" (no
+    transfer made) -- looked contradictory. Traced in code: the 93.6%
+    (fpl_engine.wildcard_trigger_check()) is averaged over `detect_gw_list`
+    (chip_shape_test.detection_window_gws, 4 GWs). The "may not be needed"
+    line's own average was computed over a DIFFERENT, shorter window --
+    `transfer_gw_list`, which at Horizon=1 is just ONE GW -- whenever the
+    Patch 101 extended cross-check isn't active (the default since Patch 101
+    made that extension opt-in). With zero transfers made, the 93.6-vs-96.6
+    gap was fixture-variance noise from comparing a 4-GW average against a
+    1-GW snapshot, not evidence a transfer had closed anything.
+
+    This resolver picks whichever of the two windows is LONGER -- never
+    shorter than the trigger's own `detect_gw_list` window, so the two
+    numbers are always computed over at least the same span and stop being
+    spuriously comparable-looking while actually measuring different
+    things. A tie keeps `transfer_gw_list` (the plan's own real window,
+    nothing to gain by switching). Costs nothing extra to compute: the
+    caller's `reachable_by_gw` is already solved over every GW in
+    `detect_gw_list` (that's what feeds the trigger itself), so widening to
+    it needs no new solve, cached or otherwise."""
+    if not detect_gw_list:
+        return transfer_gw_list
+    if not transfer_gw_list:
+        return list(detect_gw_list)
+    return list(detect_gw_list) if len(detect_gw_list) > len(transfer_gw_list) else transfer_gw_list
+
+
 def build_squad_after_by_gw(squad_df: pd.DataFrame, weekly_plan: list[dict],
                              pool_df: pd.DataFrame) -> dict[int, pd.DataFrame]:
     """Patch 94 (v6.9 Rule #49 cross-check correctness fix — discussion,

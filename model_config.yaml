@@ -3281,3 +3281,19 @@ chip_advisor_horizon:
 # that isn't yet near a known DGW/BGW. Manager-confirmed acceptable given
 # the 2-minute runtime target.
 # -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# Patch 102 (2026-10-01, manager report from a live screenshot after Patch
+# 101 brought the run to 1m20s): no config KEYS changed here. Two app.py/
+# recommend.py fixes, both logic/UI, not config: (1) the extended Wildcard
+# cross-check button made self-explanatory (names its actual target GW,
+# disabled when irrelevant); (2) the "Wildcard may not be needed" cross-
+# check line was comparing a different, often much shorter window
+# (transfer_gw_list, just 1 GW at Horizon=1) against the trigger's own
+# detect_gw_list (4 GWs, chip_shape_test.detection_window_gws above) --
+# fixed via recommend.resolve_wildcard_check_gw_window(), which now always
+# uses whichever window is longer. detection_window_gws itself (4) is
+# UNCHANGED -- it's referenced here only because it's now also the floor
+# that resolver widens up to. See PATCH_VERSION in app.py for the full
+# narrative and manager quotes.
+# -----------------------------------------------------------------------------

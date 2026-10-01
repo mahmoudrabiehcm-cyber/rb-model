@@ -37,7 +37,32 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 101 (2026-10-01, manager: \"it's 4 minutes 46 seconds now ,, i need it below 2 minutes\"): "
+PATCH_VERSION = ("Patch 102 (2026-10-01, manager: re-timed at 1m20s after Patch 101 — well under the 2-minute "
+                  "target — then reported two live issues from a fresh screenshot): (1) the extended Wildcard "
+                  "cross-check button (Patch 101) was a plain, unexplained st.button() — \"needs to be more visual "
+                  "and self explained.\" Fixed: now a prominent, dynamic call-to-action naming the actual target "
+                  "GW (\"Your scheduled Wildcard is GW{n}, beyond this check's normal GW{x}-GW{y} reach... reach "
+                  "GW{n}\") when `_auto_wildcard_gw > _wc_current_max_gw` makes it relevant, or a disabled no-op "
+                  "with a one-line reason otherwise — both states reuse variables already computed earlier in the "
+                  "same script run, no new cost. (2) the Chip Plan tab showed \"Wildcard trigger ACTIVE (93.6%)\" "
+                  "beside \"Wildcard may not be needed — plan reaches 96.6%\" on a week Transfer Recommendations "
+                  "said \"Roll\" (no transfer made) — looked contradictory. Traced in code, not guessed: the 93.6% "
+                  "(fpl_engine.wildcard_trigger_check()) averages over detect_gw_list (4 GWs, chip_shape_test."
+                  "detection_window_gws); the \"may not be needed\" line averaged over a DIFFERENT, shorter window "
+                  "— transfer_gw_list, just ONE GW at the manager's Horizon=1 setting — whenever the Patch 101 "
+                  "extension isn't active (now the default). With zero transfers made, the 93.6-vs-96.6 gap was "
+                  "fixture-variance noise from a 4-GW average vs. a 1-GW snapshot, not a transfer actually closing "
+                  "anything — a mismatch that predates this session but was rarely visible before Patch 101, since "
+                  "the extension used to auto-fire almost every run and incidentally widened this same window. "
+                  "Fixed via new pure function recommend.resolve_wildcard_check_gw_window(transfer_gw_list, "
+                  "detect_gw_list): picks whichever window is LONGER (ties keep transfer_gw_list), wired into all "
+                  "three non-extended fallback branches for `_wc_check_gw_source`. Zero added solve cost — "
+                  "`reachable_by_gw` already covers every GW in detect_gw_list (that's what feeds the trigger "
+                  "itself), so widening to it needs no new solve. NEW test file "
+                  "test_patch102_crosscheck_window_match_and_button_ux.py (8 tests): the resolver's window-length "
+                  "logic (5 tests) and app.py wiring for both fixes (3 tests, including confirming the old direct "
+                  "`_wc_check_gw_source = transfer_gw_list` assignment is gone from all three branches). Full "
+                  "regression suite: 160 passed (152 prior + 8 new), zero regressions. Previously, Patch 101 (2026-10-01, manager: \"it's 4 minutes 46 seconds now ,, i need it below 2 minutes\"): "
                   "instrumented opt.solve_squad() directly (call counter + timer) and drove the real app functions "
                   "through a cold run matching the manager's own config/state — measured, not guessed: 55 total "
                   "solve_squad() calls, 17.4s in this sandbox. wildcard_window_value_scan() was the single biggest "
@@ -2740,7 +2765,7 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     if not _wc_extended_active and rec.get("is_weekly_schedule"):
         _squad_after_by_gw = recommend.build_squad_after_by_gw(squad_df, rec.get("weekly_plan") or [], proj)
         _wc_check_reachable_by_gw = reachable_by_gw
-        _wc_check_gw_source = transfer_gw_list
+        _wc_check_gw_source = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
     elif not _wc_extended_active and _moves_all:
         _out_codes = {m["out_code"] for m in _moves_all}
         _in_codes = {m["in_code"] for m in _moves_all}
@@ -2748,11 +2773,11 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             [squad_df[~squad_df["code"].isin(_out_codes)], proj[proj["code"].isin(_in_codes)]],
             ignore_index=True, sort=False)}
         _wc_check_reachable_by_gw = reachable_by_gw
-        _wc_check_gw_source = transfer_gw_list
+        _wc_check_gw_source = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
     elif not _wc_extended_active:
         _squad_after_by_gw = {}
         _wc_check_reachable_by_gw = reachable_by_gw
-        _wc_check_gw_source = transfer_gw_list
+        _wc_check_gw_source = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
 
     def _squad_as_of(gw: int) -> pd.DataFrame:
         """The squad as it would stand at gameweek `gw` if the plan were
@@ -3640,9 +3665,36 @@ with tab_chips:
     # later, unrelated widget interaction reverts to the normal (faster)
     # check until clicked again -- identical behavior to how Reconcile's own
     # result only shows for the run right after it's clicked.
-    st.button("Run extended Wildcard cross-check (reaches the scheduled chip's actual GW)", key="wc_extend_run")
-    st.caption("Off by default to keep routine runs fast (Patch 101) — click to re-check the Wildcard card above "
-               "against its actual scheduled GW when that falls beyond the normal detection window.")
+    # Patch 102 (2026-10-01, manager: "the button for extended wildcard needs
+    # to be more visual and self explained") -- the plain st.button above
+    # gave no indication of WHY you'd click it or WHAT GW it would actually
+    # reach, and showed identically whether or not it had anything to do --
+    # confirmed via code read that `_auto_wildcard_gw` (chip_portfolio's own
+    # scheduled Wildcard GW) and `_wc_current_max_gw` (the normal check's own
+    # reach) are both already available here, unchanged, from earlier in
+    # this same script run -- enough to make this self-explanatory without
+    # any new computation.
+    _wc_extend_relevant = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
+    if _wc_extend_relevant:
+        with st.container(border=True):
+            st.markdown(f"🔎 **Your scheduled Wildcard is GW{_auto_wildcard_gw}, beyond this check's normal "
+                        f"GW{_wc_current_max_gw} reach.** The cross-check above is based on just GW"
+                        f"{planning_gw}-GW{_wc_current_max_gw} by default — click below to re-run it all the way "
+                        f"out to GW{_auto_wildcard_gw}, the GW that actually matters for this decision.")
+            st.button(f"Run the extended cross-check — reach GW{_auto_wildcard_gw}", key="wc_extend_run",
+                      type="primary")
+            st.caption("Off by default to keep routine runs fast (Patch 101: a full extra transfer-plan solve plus "
+                       "a full extra reachable-ceiling scan, every time it ran automatically). A later, unrelated "
+                       "click reverts to the fast check until you run this again.")
+    else:
+        # Nothing for this button to extend TO this run (no active Wildcard
+        # target, or it's already within the normal check's own reach) --
+        # still define the widget (so `st.session_state["wc_extend_run"]`
+        # always exists for the gate above to read) but as a quiet, muted
+        # no-op rather than a prompt with nothing behind it.
+        st.button("Run extended Wildcard cross-check", key="wc_extend_run", disabled=True,
+                   help="Nothing to extend to right now — there's no scheduled Wildcard beyond this check's own "
+                        f"GW{planning_gw}-GW{_wc_current_max_gw} reach.")
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now
