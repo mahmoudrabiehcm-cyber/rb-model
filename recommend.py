@@ -611,6 +611,172 @@ def resolve_wildcard_extend_target(current_max_gw: int, auto_wildcard_gw: int | 
     return target
 
 
+def wildcard_verdict(trigger_active: bool, seq_scheduled, seq_gw, seq_value, closes, gap_pct) -> dict | None:
+    """Patch 108 (2026-10-04, manager: "if my team for this week is 90% do you
+    think that triggering the chip is the right call ... is this the best way
+    to present it"). The 6% trigger (Standing Rule #45) is UNCHANGED and still
+    decides `trigger_active`; this only decides how the card presents the
+    decision, using values the model already computes -- no new thresholds:
+
+      closes is True                      -> MONITOR (your recommended transfers
+                                             already close the gap)
+      scheduled by the joint sequence     -> PLAY GWn, headline = net xPts vs
+                                             the best no-chip transfer path
+      sequence found no positive slot     -> HOLD (chip worth more later)
+      no joint sequence (<2 chips left)   -> TRIGGER ACTIVE + gap %, as before
+
+    Returns None when the trigger isn't active (card keeps its existing path)."""
+    if not trigger_active:
+        return None
+    gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
+    if closes is True:
+        return {"badge": "MONITOR", "badge_cls": "hold", "card_cls": "",
+                "stat": f"{gap_txt} gap", "sub": f"transfers close the {gap_txt} gap — no chip needed yet",
+                "note": "Your recommended transfers already close this", "note_cls": "good"}
+    if seq_scheduled is True and seq_gw is not None:
+        stat = f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap"
+        return {"badge": f"PLAY GW{seq_gw}", "badge_cls": "play", "card_cls": "is-play",
+                "stat": stat, "sub": f"vs best transfers · need gap {gap_txt}",
+                "note": "Transfers alone don't close it", "note_cls": "warn"}
+    if seq_scheduled is False:
+        return {"badge": "HOLD", "badge_cls": "hold", "card_cls": "",
+                "stat": f"{gap_txt} gap", "sub": f"no positive slot — chip worth more later · gap {gap_txt}",
+                "note": None, "note_cls": ""}
+    return {"badge": "TRIGGER ACTIVE", "badge_cls": "active", "card_cls": "is-active",
+            "stat": f"{gap_txt} gap", "sub": "structural gap detected — date is your call",
+            "note": None, "note_cls": ""}
+
+
+_CAL_COLUMNS = ["logged_at", "team_id", "team_name", "planning_gw", "style", "gap_pct", "rating_pct",
+                "cumulative_gap", "fired", "verdict", "wc_value_xpts", "wc_gw", "transfers_close_gap", "patch"]
+
+
+def calibration_log_row(team_id, team_name, planning_gw, patch, style, gap_pct, rating_pct, cumulative_gap,
+                         active, verdict, wc_value, wc_gw, closes) -> dict:
+    """Patch 108: one row of the Wildcard calibration log -- the data needed
+    to validate the (document-flagged "unvalidated") 6% threshold from the
+    manager's own weeks."""
+    import datetime as _dt
+    return {"logged_at": _dt.datetime.now().replace(microsecond=0).isoformat(), "team_id": team_id,
+            "team_name": team_name, "planning_gw": planning_gw, "style": style, "gap_pct": gap_pct,
+            "rating_pct": rating_pct, "cumulative_gap": cumulative_gap, "fired": bool(active),
+            "verdict": verdict, "wc_value_xpts": wc_value, "wc_gw": wc_gw,
+            "transfers_close_gap": closes, "patch": patch}
+
+
+def append_calibration_row(path: str, row: dict) -> bool:
+    """Append `row` to the CSV at `path` (header written on first use).
+    Skips a repeat of the SAME run (same team, GW, style, gap, verdict and
+    value as the most recent row for that team/GW) so reruns don't spam the
+    log. Never raises -- logging must never take the page down. Returns True
+    only if a row was written."""
+    import csv as _csv
+    import os as _os
+    try:
+        key = ("team_id", "planning_gw", "style", "gap_pct", "verdict", "wc_value_xpts")
+        if _os.path.exists(path):
+            with open(path, newline="", encoding="utf-8") as fh:
+                for existing in _csv.DictReader(fh):
+                    if all(str(existing.get(k)) == str(row.get(k)) for k in key):
+                        return False
+        new_file = not _os.path.exists(path)
+        with open(path, "a", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=_CAL_COLUMNS)
+            if new_file:
+                w.writeheader()
+            w.writerow({c: row.get(c) for c in _CAL_COLUMNS})
+        return True
+    except Exception:
+        return False
+
+
+def extended_window_target(planning_gw: int, span: int = 10) -> int:
+    """Patch 107 (2026-10-04): the extended check always covers
+    Current..Current+(span-1) -- "Current GW + 9" at the default span of 10."""
+    return planning_gw + span - 1
+
+
+def extended_proj_gws(planning_gw: int, span: int = 10, window_len: int = 4) -> list[int]:
+    """GWs that must be projected for extended mode: the span itself plus
+    (window_len - 1) trailing GWs, so a Wildcard candidate at the LAST GW of
+    the span is still scored over a full window_len-GW window rather than a
+    truncated one (a truncated window would systematically understate late
+    candidates' window value and bias the "best GW" verdict toward early GWs)."""
+    return list(range(planning_gw, planning_gw + span + max(0, window_len - 1)))
+
+
+def extended_scan_full_gw_list(candidate_gws: list[int], window_len: int = 4) -> list[int]:
+    """The full_gw_list wildcard_window_value_scan should be handed in
+    extended mode: the candidate GWs plus trailing GWs for the last
+    candidates' windows. Empty in, empty out."""
+    if not candidate_gws:
+        return []
+    last = max(candidate_gws)
+    return list(range(min(candidate_gws), last + max(0, window_len - 1) + 1))
+
+
+def extended_button_label(planning_gw: int, target_gw: int, span: int = 10) -> str:
+    """Patch 107: a button name that is dynamic, never a hard-coded GW --
+    "Current GW + 9 (GW6 -> GW15)"."""
+    return f"Run extended check — Current GW + {span - 1} (GW{planning_gw} → GW{target_gw})"
+
+
+_CHIP_KEY_LABELS = {"wildcard": "Wildcard", "bboost": "Bench Boost", "3xc": "Triple Captain",
+                    "freehit": "Free Hit"}
+
+
+def chip_change_tags(baseline: dict | None, now: dict) -> dict:
+    """Patch 107: compares each chip's scheduled GW from the user's previous
+    NORMAL run (`baseline`, {chip_key: gw|None}) against this extended run
+    (`now`) and returns {chip_key: tag_text} for ONLY the chips that moved.
+    No baseline (extended clicked before any normal run) -> {} -- never
+    invents a "was" value. Chips absent from the baseline are ignored."""
+    if not baseline:
+        return {}
+    tags = {}
+    for key, new_gw in (now or {}).items():
+        if key not in baseline:
+            continue
+        old_gw = baseline[key]
+        if old_gw == new_gw:
+            continue
+        if old_gw is not None and new_gw is not None:
+            tags[key] = f"updated by extended check (was GW{old_gw})"
+        elif old_gw is not None and new_gw is None:
+            tags[key] = f"updated by extended check (was GW{old_gw}; now no slot in the 10-GW sequence)"
+        else:
+            tags[key] = "updated by extended check (was not scheduled)"
+    return tags
+
+
+def build_best_gw_table(planning_gw: int, gws: list[int], wc_by_gw: dict | None,
+                         rating_by_gw: dict, chips_by_gw: dict) -> dict:
+    """Patch 107: the "best GW between Current and Current+9" answer.
+    rows: one per GW with the Wildcard window-value gap (xPts, from the
+    Rule #48 scan), the cross-check rating % (if computed for that GW) and
+    whichever chips the joint sequence placed there. verdict: names the best
+    Wildcard GW and compares it with playing it at the current GW."""
+    wc_by_gw = wc_by_gw or {}
+    rows = []
+    for g in gws:
+        gap = wc_by_gw.get(g, {}).get("gap") if isinstance(wc_by_gw.get(g), dict) else None
+        rows.append({"gw": g, "wc_gap": gap, "rating_pct": rating_by_gw.get(g),
+                     "chips": ", ".join(chips_by_gw.get(g, []))})
+    scored = {g: v["gap"] for g, v in wc_by_gw.items() if isinstance(v, dict) and v.get("gap") is not None}
+    if not scored:
+        return {"rows": rows, "best_wc_gw": None,
+                "verdict": "No Wildcard window-value scan available this run, so no best Wildcard GW can be named."}
+    best = max(scored, key=lambda g: scored[g])
+    if best == planning_gw:
+        verdict = (f"Best Wildcard GW in the span: GW{best} (the current GW, {scored[best]:+.1f} xPts window "
+                   f"value) — no later GW beats playing it now.")
+    else:
+        now_val = scored.get(planning_gw)
+        vs = f" vs {now_val:+.1f} at GW{planning_gw}" if now_val is not None else ""
+        verdict = f"Best Wildcard GW in the span: GW{best} ({scored[best]:+.1f} xPts window value{vs})."
+    return {"rows": rows, "best_wc_gw": best, "verdict": verdict}
+
+
 def extend_reach_status(target_gw: int, reached_gw: int) -> tuple[bool, str]:
     """Patch 106 (2026-10-04): compares the GW the extend button promised
     against the GW the cross-check actually reached, so a shortfall is never

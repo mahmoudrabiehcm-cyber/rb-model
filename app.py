@@ -10,6 +10,7 @@ Run locally:  streamlit run app.py
 from __future__ import annotations
 import datetime as dt
 import html
+import os
 import re
 
 # Patch 69 — altair, used only for the Season Rank chart's reversed y-axis
@@ -37,7 +38,9 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 106 (2026-10-04, manager screenshot: button said \"reach GW15\" but the result said \"reached GW10\" — \"We need it to reach Current GW + 9\"): root cause confirmed in code — the shared projection only carried xpts columns through GW10, so the extended solves for GW11-15 were silently dropped by the `_check_gws` filter. Fixed by projecting the extension GWs when the button is clicked, and by comparing requested vs reached GW (recommend.extend_reach_status) so any shortfall shows as a warning instead of a quiet success. 6 new tests in test_patch106_extend_actually_reaches_target.py. Previously, Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
+PATCH_VERSION = ("Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
+                  "Patch 107 (2026-10-04, manager decisions after discussion: button must be dynamic \"Current GW + 9\"; the extended run must confirm the best GW between Current and Current+9 and re-evaluate ALL chips, not only the Wildcard text; performance must be optimized): (1) PERFORMANCE — profiled (cProfile) and found ~93% of every optimizer.solve_squad() call was Python-side MILP construction (a pandas .loc lookup per player per constraint), not CBC; solve_squad() and solve_xi_first_squad() now read each column once into lists. Lossless: golden results captured from the OLD code (26 solves) match exactly (golden_solver_parity.json + test). Sandbox timing, chip stages only: 5-GW window 12.8s -> 3.1s, 10-GW window 23.4s -> 6.2s; Free Hit solver 31s -> 2.9s for 8 calls; full test suite ~55s -> ~28s. Threading was tested and gave no gain, so not used. NOT live-measured. (2) EXTENDED MODE — clicking the button now re-runs the whole Chip Plan over Current..Current+9 (chip advisor window and Wildcard detection window widened to chip_extended_check.span_gws=10; 3 trailing GWs projected so late Wildcard candidates get a full 4-GW window instead of a truncated 1-3 GW one), so all four cards update; any card that moves versus your previous normal run gets an \"updated by extended check (was GWx)\" tag (no tag, and a note, if there is no earlier normal run in the session); a per-GW table and verdict name the best Wildcard GW in the span. Button label is dynamic (recommend.extended_button_label). Superseded tests from Patches 102/104/105 updated in place. 36 new tests; full suite 215 passed. Previously, "
+                  "Patch 106 (2026-10-04, manager screenshot: button said \"reach GW15\" but the result said \"reached GW10\" — \"We need it to reach Current GW + 9\"): root cause confirmed in code — the shared projection only carried xpts columns through GW10, so the extended solves for GW11-15 were silently dropped by the `_check_gws` filter. Fixed by projecting the extension GWs when the button is clicked, and by comparing requested vs reached GW (recommend.extend_reach_status) so any shortfall shows as a warning instead of a quiet success. 6 new tests in test_patch106_extend_actually_reaches_target.py. Previously, Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
                   "red annotation \"i need a confirmation here after the run finishes that it's already done and "
                   "what is on the chips is the final\" + \"already clicked but i don't have a confirmation!!!!\"): "
                   "confirmed in code — the extended check's result (`_wc_check_note`) WAS already computed "
@@ -1396,7 +1399,8 @@ def _picks(entry_id: int, gw: int):
 def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, bank: float,
                           portfolio_gw_list: tuple, window_len: int, available_chip_types: tuple,
                           fh_gap_table: dict, valid_gws_by_type_items: tuple = (),
-                          fh_by_gw: dict | None = None, reachable_ceiling_by_gw: dict | None = None):
+                          fh_by_gw: dict | None = None, reachable_ceiling_by_gw: dict | None = None,
+                          scan_full_gw_list: tuple | None = None):
     """Patch 86 (performance fix) -- Patch 85's Rule #48/#49 computation
     (wildcard_window_value_scan: 2 opt.solve_squad() MILP solves per
     candidate GW, times up to ~8 candidate GWs by default; plus
@@ -1419,7 +1423,8 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
     available_chip_types = set(available_chip_types)
     wc_window_scan = (chip_protocol.wildcard_window_value_scan(
         squad_df_adv, pool_df_adv, cfg, free_transfers, bank,
-        list(portfolio_gw_list), list(portfolio_gw_list), window_len=window_len)
+        list(portfolio_gw_list), list(scan_full_gw_list) if scan_full_gw_list else list(portfolio_gw_list),
+        window_len=window_len)
         if "wildcard" in available_chip_types else {"by_gw": {}, "best_gw": None, "best_gap": None})
     # Patch 89 (Rule #49d) -- pool_df_adv/free_transfers passed through so
     # chip_portfolio_schedule() can build the reachable pre-Wildcard Bench
@@ -1938,7 +1943,16 @@ with st.spinner("Fetching live data and computing xPts..."):
 
     available_chip_names = {r["chip"] for r in chip_rows if r["status"] == "available"}
 
-    _detect_window_size = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
+    # Patch 107 (2026-10-04, manager: the extended check must be "Current GW +
+    # 9" and re-evaluate ALL chips). `_extended_mode` is the opt-in button's
+    # session-state flag, read here (before anything is projected or solved)
+    # so the chip window, the Wildcard detection window and the projection
+    # itself can all be widened together for this one run. Normal runs keep
+    # exactly the configured windows.
+    _extended_mode = bool(st.session_state.get("wc_extend_run", False))
+    _ext_span = int(cfg.get("chip_extended_check", {}).get("span_gws", 10))
+    _detect_window_size_base = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
+    _detect_window_size = max(_detect_window_size_base, _ext_span) if _extended_mode else _detect_window_size_base
     _detect_candidate_gws = list(range(planning_gw, planning_gw + _detect_window_size))
     _wc_clipped_gws, _wc_last_used, _wc_next_open = _clip_to_available_windows(_detect_candidate_gws, "Wildcard")
     _fh_clipped_detect_gws, _fh_last_used_detect, _fh_next_open_detect = _clip_to_available_windows(
@@ -1953,7 +1967,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     chip_adv_window = None
     chip_adv_gw_list = None
     if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names):
-        chip_adv_window = chip_protocol.chip_advisor_gw_window(planning_gw, snap.fixtures, all_team_ids, cfg)
+        chip_adv_window = chip_protocol.chip_advisor_gw_window(
+            planning_gw, snap.fixtures, all_team_ids, cfg, min_gws=_ext_span if _extended_mode else None)
         chip_adv_gw_list = chip_adv_window["gw_list"]
 
     # Patch 44 (2026-09-15, manager report: Damsgaard-vs-Tavernier tie-break
@@ -1990,14 +2005,14 @@ with st.spinner("Fetching live data and computing xPts..."):
     _compliant_window = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
     compliant_gw_list = list(range(planning_gw, planning_gw + _compliant_window))
 
-    # Patch 106 (2026-10-04, manager: button said "reach GW15", result said
-    # "reached GW10"): the extension GWs have to exist in `proj` or the
-    # cross-check's `_check_gws` filter silently drops them. When the extend
-    # button was clicked this run, project through the +8 cap now.
+    # Patch 106/107: the extension GWs have to exist in `proj` or the
+    # cross-check's `_check_gws` filter silently drops them (Patch 106 root
+    # cause). In extended mode project Current..Current+9 PLUS the trailing
+    # GWs a 4-GW Wildcard window needs for the last candidates.
     _extend_proj_gws = set()
-    if bool(st.session_state.get("wc_extend_run", False)):
-        _early_max = max([gw_list[-1]] + ([detect_gw_list[-1]] if detect_gw_list else []))
-        _extend_proj_gws = set(range(_early_max + 1, _early_max + 9))
+    if _extended_mode:
+        _extend_proj_gws = set(recommend.extended_proj_gws(
+            planning_gw, _ext_span, cfg.get("chip_portfolio", {}).get("window_value_len", 4)))
     _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
                         | set(compliant_gw_list) | {_tie_break_lookahead_gw} | _extend_proj_gws)
     proj = _project(snap, hist_df, overrides, cfg, _gw_union, fixture_baselines)
@@ -2585,7 +2600,11 @@ with st.spinner("Fetching live data and computing xPts..."):
             squad_df_adv, pool_df_adv, cfg, ft["free_transfers"], bank,
             tuple(_portfolio_gw_list), _wc_window_len, tuple(sorted(_available_chip_types)),
             _fh_gap_table, _valid_gws_by_type_items,
-            fh_by_gw=_fh_by_gw, reachable_ceiling_by_gw=_reachable_ceiling_for_guardrail)
+            fh_by_gw=_fh_by_gw, reachable_ceiling_by_gw=_reachable_ceiling_for_guardrail,
+            # Patch 107: extended mode scores late Wildcard candidates over a
+            # FULL window (trailing GWs projected), not a truncated one.
+            scan_full_gw_list=(tuple(recommend.extended_scan_full_gw_list(_portfolio_gw_list, _wc_window_len))
+                               if _extended_mode else None))
 
     # Chip-aware transfer advisory: only from signals already computed
     # mechanically above — never a guess at the manager's intent. Wildcard:
@@ -2756,6 +2775,24 @@ with st.spinner("Fetching live data and computing xPts..."):
 # already computed for the trigger itself this run, just reused here per GW
 # instead of once.
 _wc_check_note = None
+_rating_by_gw = {}
+# Patch 108 (2026-10-04, LIVE CRASH, team 4984023 "Spurs", Wildcard already
+# used: "NameError: name '_wc_extend_chip_driven' is not defined"). Everything
+# the always-visible extend-button section reads is bound HERE, before the
+# conditional block, so a team whose Wildcard trigger isn't evaluated (block
+# skipped) can never hit an undefined name. The block below only RE-assigns
+# the cross-check-specific ones when it actually runs.
+_closes = None
+_wc_extend_requested_flag = _extended_mode
+_detect_gw_list_base = detect_gw_list[:_detect_window_size_base] if detect_gw_list else detect_gw_list
+_wc_check_window = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, _detect_gw_list_base)
+_wc_current_max_gw = _wc_check_window[-1] if _wc_check_window else planning_gw
+_wc_extend_target_gw = recommend.extended_window_target(planning_gw, _ext_span)
+_wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
+_wc_extend_info = None
+_wc_extended_active = False
+_wc_extended_reached_target = True
+_check_gws = []
 if wc_flag and reachable_by_gw and not squad_df.empty:
     # Patch 94 (v6.9 Rule #49 cross-check correctness fix — discussion,
     # 2026-09-30: before extending this cross-check, confirmed via code read
@@ -2802,7 +2839,6 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # call site, not read early -- this one is read early BECAUSE the result
     # feeds the Wildcard card's tooltip, which renders before tab_chips'
     # later widgets would otherwise be defined.
-    _wc_extend_requested_flag = bool(st.session_state.get("wc_extend_run", False))
     # Patch 103 (2026-10-01, manager screenshot: the extend-button's own text
     # read "based on just GW6-GW6" -- confirmed a real bug, not a rendering
     # glitch: this used to be computed independently as min(transfer_gw_list,
@@ -2812,8 +2848,11 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # recommend.resolve_wildcard_check_gw_window(). The two could disagree --
     # this derives _wc_current_max_gw from that SAME resolver so the
     # displayed "normal reach" and the real one can never drift apart again.
-    _wc_check_window = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, detect_gw_list)
-    _wc_current_max_gw = _wc_check_window[-1] if _wc_check_window else planning_gw
+    # Patch 107: "normal reach" is always computed from the BASE detection
+    # window, even in extended mode (where detect_gw_list itself is widened),
+    # so the Patch 95 chained-plan extension still has a real gap to extend.
+    # (Patch 108: _detect_gw_list_base / _wc_check_window / _wc_current_max_gw
+    # are now bound above the block -- see the Patch 108 note there.)
     # Patch 104 (2026-10-01, manager: "why it's grayed , it should give an
     # option for another 5 GWs beyond the one maximum used for the current
     # run" -- confirmed via AskUserQuestion the button should be an always-
@@ -2821,7 +2860,8 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # beyond the normal reach). The target is now always computed -- a
     # fixed +5 GWs beyond _wc_current_max_gw, extended further only if an
     # actual scheduled Wildcard sits even beyond that.
-    _wc_extend_target_gw = recommend.resolve_wildcard_extend_target(_wc_current_max_gw, _auto_wildcard_gw)
+    # Patch 107 (2026-10-04): fixed Current+9 (replaces Patch 104's "normal
+    # reach + 5", which could drift away from Current+9).
     # Patch 105 (2026-10-01, manager screenshot: "already clicked but i don't
     # have a confirmation!!!!"). While building that confirmation, found that
     # the note text below (and the button's own framing further down) each
@@ -2830,7 +2870,6 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # call sites, rather than letting a second independent copy at the
     # button site drift out of sync the way `_wc_current_max_gw` did across
     # Patch 102/103.
-    _wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
     _wc_extend_info = recommend.resolve_cross_check_horizon(
         planning_gw, _wc_current_max_gw, _wc_extend_target_gw, max_extension=8) \
         if recommend.wc_extend_requested(_wc_extend_requested_flag, _auto_wildcard_gw) else None
@@ -2905,6 +2944,7 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             _rp = eng.team_rating_pct(_sv, _rv, "")["rating_pct"]
             if _rp is not None:
                 _ratings.append(_rp)
+                _rating_by_gw[_g] = _rp
         if _ratings:
             _avg_after = round(sum(_ratings) / len(_ratings), 1)
             _wc_gap_threshold = cfg.get("wildcard_trigger", {}).get("gap_pct_threshold", 6.0)
@@ -2970,8 +3010,8 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             # (not just the tooltip) so it never reads as the same stat as
             # the pitch navigator's own Team Rating % at a glance.
             _wc_check_headline = (
-                f"Wildcard may not be needed — plan reaches {_avg_after}% of reachable ceiling" if _closes else
-                f"CAUTION: Wildcard likely needed — only {_avg_after}% of reachable ceiling")
+                "Wildcard not needed yet — your transfers close the gap" if _closes else
+                "Wildcard looks warranted — your transfers don't close the gap")
 
 # ---------------------------------------------------------------------------
 # Patch 66 — top-tab section navigation, matching the project's 5 standing
@@ -3537,6 +3577,25 @@ with tab_chips:
                 # when Bench Boost is also scheduled at/after it.
                 "bench_term": (info or {}).get("bench_term")}
 
+    # Patch 107 (2026-10-04): compare THIS run's chip schedule with the
+    # previous NORMAL run's (saved below), so an extended-check run can tag
+    # any card it moved ("updated by extended check (was GWx)"). A normal run
+    # just refreshes the saved baseline; an extended run never overwrites it.
+    _CARD_CHIP_KEY = {"Bench Boost": "bboost", "Triple Captain": "3xc", "Free Hit": "freehit"}
+    _chip_now = {k: (_seq_detail.get(k) or {}).get("gw") for k in ("wildcard", "bboost", "3xc", "freehit")}
+    _chip_tags = {}
+    try:
+        if _extended_mode:
+            _chip_tags = recommend.chip_change_tags(st.session_state.get("_chip_baseline"), _chip_now)
+        else:
+            st.session_state["_chip_baseline"] = dict(_chip_now)
+    except Exception:
+        _chip_tags = {}
+
+    def _card_tag(label: str) -> str:
+        t = _chip_tags.get(_CARD_CHIP_KEY.get(label, ""), "")
+        return f" · {t}" if t else ""
+
     def _seq_combined_note(seq: dict) -> str:
         """Patch 87b (manager: cards and a separate sequence summary read as
         two things — only one should exist). The combined total/tie-band/
@@ -3598,7 +3657,7 @@ with tab_chips:
             if seq is not None and seq["scheduled"]:
                 return _signal_card(
                     label, f"PLAY GW{seq['gw']}", "play", f"GW{seq['gw']}",
-                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts",
+                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts" + _card_tag(label),
                     f"No isolated single-chip scan data for this chip this run, but the joint Rule #48/49 sequence "
                     f"(which accounts for your other available chips) schedules it GW{seq['gw']} "
                     f"({seq['value']:+.1f} xPts vs. the best no-chip transfer path)." + _seq_combined_note(seq),
@@ -3626,11 +3685,11 @@ with tab_chips:
             if seq["scheduled"]:
                 return _signal_card(
                     label, f"PLAY GW{seq['gw']}", "play", f"GW{seq['gw']}",
-                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts",
+                    f"{_ordinal(seq['order'])} of {seq['n_scheduled']} in sequence · {seq['value']:+.1f} xPts" + _card_tag(label),
                     f"{_isolated_note} Value against the best no-chip transfer path: {seq['value']:+.1f} xPts "
                     f"(Rule #48/#50)." + _seq_combined_note(seq), "is-play", by_gw=by_gw, best_gw=seq["gw"])
             return _signal_card(
-                label, "HOLD", "hold", f"GW{_isolated_gw}", "no slot in the current joint sequence — held",
+                label, "HOLD", "hold", f"GW{_isolated_gw}", "no slot in the current joint sequence — held" + _card_tag(label),
                 f"{_isolated_note} Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32).",
                 by_gw=by_gw, best_gw=adv.get("best_gw"))
         if adv["verdict"].startswith("play_gw"):
@@ -3670,7 +3729,8 @@ with tab_chips:
                             f"Bench Boost planned soon after (Rule #49f)."
                             if _wc_seq.get("bench_term") is not None else "")
             _wc_seq_sub_suffix = (f" · sequenced GW{_wc_seq['gw']} ({_ordinal(_wc_seq['order'])} of "
-                                   f"{_wc_seq['n_scheduled']}, {_wc_seq['value']:+.1f} xPts)")
+                                   f"{_wc_seq['n_scheduled']}, {_wc_seq['value']:+.1f} xPts)"
+                                   + (f" · {_chip_tags['wildcard']}" if "wildcard" in _chip_tags else ""))
             _wc_seq_tooltip_suffix = (f" Rule #48/#49's joint sequence recommends playing it GW{_wc_seq['gw']} "
                                        f"({_wc_seq['value']:+.1f} xPts vs. the best no-chip transfer path) as part "
                                        f"of a {_wc_seq['n_scheduled']}-chip sequence — the exact date remains your "
@@ -3696,6 +3756,7 @@ with tab_chips:
         wc_card_tooltip += f" ⚠ Diagnostic (Patch 73): {wc_diag_reason}"
     if wc_flag and _wc_check_note:
         wc_card_tooltip += " " + _wc_check_note
+    _wc_verdict = None
     if wc_flag:
         wc_stat = f'{wc_trigger["avg_rating_pct"]}%' if wc_trigger and wc_trigger.get("avg_rating_pct") is not None else "ACTIVE"
         # Patch 49 — the "may not be needed if you take the recommended
@@ -3709,9 +3770,33 @@ with tab_chips:
                               if _closes else
                               "Recommended transfers alone don't close this — Wildcard still looks warranted")
             _wc_note_cls = "good" if _closes else "warn"
-        wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
-                                f"structural gap detected — date is your call{_wc_seq_sub_suffix}", wc_card_tooltip,
-                                "is-active", note=_wc_note_html, note_cls=_wc_note_cls)
+        # Patch 108 (2026-10-04, manager: "if my team for this week is 90% do
+        # you think that triggering the chip is the right call ... is this the
+        # best way to present it"): the 6% trigger (Rule #45) is unchanged and
+        # still decides that this branch runs; the card now leads with the
+        # DECISION (PLAY GWn / MONITOR / HOLD) and the net xPts gain instead
+        # of a bare alarm percentage. Falls back to the old card when no gap
+        # figure exists.
+        _wc_verdict = None
+        if wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
+            _wc_verdict = recommend.wildcard_verdict(
+                True, seq_scheduled=(_wc_seq["scheduled"] if _wc_seq is not None else None),
+                seq_gw=(_wc_seq["gw"] if _wc_seq is not None else None),
+                seq_value=(_wc_seq["value"] if _wc_seq is not None else None),
+                closes=(_closes if _wc_check_note else None), gap_pct=wc_trigger["avg_gap_pct"])
+        if _wc_verdict is not None:
+            _wc_tag = f" · {_chip_tags['wildcard']}" if "wildcard" in _chip_tags else ""
+            wc_card = _signal_card(
+                "Wildcard", _wc_verdict["badge"], _wc_verdict["badge_cls"], _wc_verdict["stat"],
+                _wc_verdict["sub"] + _wc_tag,
+                f"Verdict rules (no new thresholds): MONITOR when your recommended transfers already close the "
+                f"gap; PLAY GWn when they don't and the Rule #48/#49 sequence schedules the chip; HOLD when the "
+                f"sequence finds no positive slot. The 6% trigger (Standing Rule #45) is unchanged. " + wc_card_tooltip,
+                _wc_verdict["card_cls"], note=_wc_verdict["note"], note_cls=_wc_verdict["note_cls"])
+        else:
+            wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
+                                    f"structural gap detected — date is your call{_wc_seq_sub_suffix}",
+                                    wc_card_tooltip, "is-active", note=_wc_note_html, note_cls=_wc_note_cls)
     elif not _wc_available_now and _wc_last_used is not None:
         # Patch 55 (manager report, team 1301651: Wildcard played GW4, closing
         # window 1 — window 2 (a real, separate calendar window) isn't reachable
@@ -3791,40 +3876,104 @@ with tab_chips:
     # early (see above), and reused here rather than recomputed — no second
     # copy of the same condition to drift out of sync.
     with st.container(border=True):
-        if _wc_extend_chip_driven:
-            st.markdown(f"🔎 **Your scheduled Wildcard is GW{_auto_wildcard_gw}, beyond this check's normal "
-                        f"GW{_wc_current_max_gw} reach.** The cross-check above is based on just GW"
-                        f"{planning_gw}-GW{_wc_current_max_gw} by default — click below to re-run it out to "
-                        f"GW{_wc_extend_target_gw}, covering the GW that actually matters for this decision.")
-        else:
-            st.markdown(f"🔎 **Exploratory:** no scheduled chip currently falls beyond this check's normal "
-                        f"GW{planning_gw}-GW{_wc_current_max_gw} reach. Click below to push the check a further "
-                        f"5 GWs out to GW{_wc_extend_target_gw} anyway, in case it's worth seeing further ahead.")
-        st.button(f"Run the extended cross-check — reach GW{_wc_extend_target_gw}", key="wc_extend_run",
-                  type="primary")
-        st.caption("Off by default to keep routine runs fast (Patch 101: a full extra transfer-plan solve plus "
-                   "a full extra reachable-ceiling scan, every time it ran automatically). A later, unrelated "
-                   "click reverts to the fast check until you run this again.")
-        # Patch 105 (2026-10-01, manager: "already clicked but i don't have a
-        # confirmation!!!!" — the extended check's result WAS already being
-        # computed (`_wc_check_note` above) but only ever surfaced in the
-        # Wildcard card's tooltip near the TOP of the tab, nowhere near where
-        # the manager actually clicked and was looking. This shows the real
-        # outcome right here, immediately — same one-run-only lifetime as
-        # the button click itself (`_wc_extend_requested_flag`), since that's
-        # exactly the run this confirms.
+        _span_n = _ext_span - 1
+        st.markdown(f"🔎 **Look further ahead:** re-run all four chips over GW{planning_gw}–GW{_wc_extend_target_gw} "
+                    f"(normal check stops at GW{_wc_current_max_gw}) and find the best GW."
+                    + (f" Your Wildcard is scheduled GW{_auto_wildcard_gw}." if _wc_extend_chip_driven else ""))
+        st.button(recommend.extended_button_label(planning_gw, _wc_extend_target_gw, _ext_span),
+                  key="wc_extend_run", type="primary")
+        st.caption("Off by default to keep routine runs fast. A later, unrelated click reverts to the normal "
+                   "check until you run this again. Cards that move get an \"updated by extended check (was GWx)\" "
+                   "tag, compared with your previous normal run.")
+        # Patch 105/107: explicit confirmation right where the button is.
         if _wc_extend_requested_flag:
-            if _wc_extended_active:
+            if _wc_extend_info is None:
+                # Patch 108: no Wildcard cross-check to run for this team
+                # (e.g. Wildcard already used) -- the chips themselves were
+                # still re-evaluated over the wider window.
+                st.success(f"✅ Done — all chips re-evaluated over GW{planning_gw}–GW{_wc_extend_target_gw}.")
+            elif _wc_extended_active:
                 _reach_ok, _reach_msg = recommend.extend_reach_status(_wc_extend_target_gw, _check_gws[-1])
                 if _reach_ok:
-                    st.success(f"✅ Extended cross-check complete — reached GW{_check_gws[-1]}.")
+                    st.success(f"✅ Done — all chips re-evaluated over GW{planning_gw}–GW{_wc_extend_target_gw}.")
                 else:
-                    st.warning(f"⚠️ Extended cross-check finished short. {_reach_msg}")
-                if _wc_check_note:
-                    st.markdown(_wc_check_note)
+                    st.warning(f"⚠️ Finished short. {_reach_msg}")
             else:
-                st.warning("The extended cross-check didn't complete this run (an underlying solve failed) — "
-                           "showing the normal, unextended check above instead.")
+                st.warning("The transfer-plan cross-check didn't complete (a solve failed) — the chip cards are "
+                           "still re-evaluated over the wider window.")
+            # Patch 107/108: best-GW answer + what changed, visual first.
+            _span_gws = list(range(planning_gw, _wc_extend_target_gw + 1))
+            _wc_in_play = "wildcard" in _available_chip_types
+            _chips_by_gw = {}
+            for _ck, _cinfo in (_seq_detail or {}).items():
+                _chips_by_gw.setdefault(_cinfo["gw"], []).append(chip_protocol.CHIP_LABELS.get(_ck, _ck))
+            _best_tbl = recommend.build_best_gw_table(
+                planning_gw, _span_gws, ((wc_window_scan or {}).get("by_gw") if _wc_in_play else None),
+                _rating_by_gw, _chips_by_gw)
+            if _wc_in_play and _best_tbl["best_wc_gw"] is not None:
+                st.markdown(f"🏆 **{_best_tbl['verdict']}**")
+            elif _chips_by_gw:
+                st.markdown("🏆 **Chip plan: " + " · ".join(
+                    f"{', '.join(v)} GW{g}" for g, v in sorted(_chips_by_gw.items())) + "**")
+            _rows = []
+            for r in _best_tbl["rows"]:
+                row = {"GW": f"GW{r['gw']}", "Chips": r["chips"] or "—"}
+                if _wc_in_play:
+                    row["Wildcard value (xPts)"] = r["wc_gap"]
+                if r["rating_pct"] is not None:
+                    row["Rating %"] = r["rating_pct"]
+                _rows.append(row)
+            _tbl_df = pd.DataFrame(_rows)
+            _cfgs = {}
+            if "Wildcard value (xPts)" in _tbl_df.columns and _tbl_df["Wildcard value (xPts)"].notna().any():
+                _cfgs["Wildcard value (xPts)"] = st.column_config.ProgressColumn(
+                    "Wildcard value (xPts)", format="%.1f", min_value=0.0,
+                    max_value=float(max(1.0, _tbl_df["Wildcard value (xPts)"].max())))
+            if "Rating %" in _tbl_df.columns:
+                _cfgs["Rating %"] = st.column_config.NumberColumn("Rating %", format="%.1f%%")
+            st.dataframe(_tbl_df, hide_index=True, use_container_width=True, column_config=_cfgs)
+            if _chip_tags:
+                st.markdown("🔁 **Moved vs your last normal run:** " + " · ".join(
+                    f"{chip_protocol.CHIP_LABELS.get(k, k)} — {v}" for k, v in _chip_tags.items()))
+            elif st.session_state.get("_chip_baseline") is None:
+                st.caption("Run the model normally once, then extend, to see which cards moved.")
+            else:
+                st.caption("No chip moved vs your last normal run.")
+            if _wc_check_note:
+                with st.expander("Cross-check details"):
+                    st.markdown(_wc_check_note)
+
+    # Patch 108 (2026-10-04): Wildcard calibration log. The 6% trigger
+    # (Standing Rule #45) is flagged "unvalidated" by the model document
+    # itself; one row per NORMAL run (extended runs use a wider window, so
+    # they are not logged) lets the threshold be judged from real weeks.
+    # DISCLOSED: on Streamlit Cloud the file lives on an ephemeral disk
+    # (it resets on reboot/redeploy) -- download it regularly.
+    _cal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wildcard_calibration_log.csv")
+    try:
+        if (not _extended_mode) and wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
+            recommend.append_calibration_row(_cal_path, recommend.calibration_log_row(
+                team_id=entry_id, team_name=st.session_state.get("team_name", ""), planning_gw=planning_gw,
+                patch=PATCH_VERSION.split(" (")[0], style=style_name, gap_pct=wc_trigger.get("avg_gap_pct"),
+                rating_pct=wc_trigger.get("avg_rating_pct"), cumulative_gap=wc_trigger.get("cumulative_gap"),
+                active=bool(wc_flag),
+                verdict=(_wc_verdict["badge"] if (wc_flag and _wc_verdict) else ("TRIGGER ACTIVE" if wc_flag else "NOT ACTIVE")),
+                wc_value=(_wc_seq["value"] if (_wc_seq and _wc_seq.get("scheduled")) else None),
+                wc_gw=(_wc_seq["gw"] if (_wc_seq and _wc_seq.get("scheduled")) else None),
+                closes=(_closes if _wc_check_note else None)))
+    except Exception:
+        pass
+    if os.path.exists(_cal_path):
+        try:
+            with open(_cal_path, "rb") as _fh:
+                _cal_bytes = _fh.read()
+            with st.expander("📈 Wildcard calibration log (for validating the 6% trigger)"):
+                st.caption("One row per normal run. Download it regularly — the server disk is temporary.")
+                st.download_button("Download log (CSV)", data=_cal_bytes,
+                                   file_name="wildcard_calibration_log.csv", mime="text/csv",
+                                   key="wc_cal_download")
+        except Exception:
+            pass
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now

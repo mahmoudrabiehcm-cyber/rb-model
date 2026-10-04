@@ -162,7 +162,7 @@ def dgw_bgw_flags(fixture_counts: dict, all_team_ids: list[int]) -> dict:
 
 
 def chip_advisor_gw_window(planning_gw: int, fixtures: pd.DataFrame, all_team_ids: list[int],
-                            cfg: dict) -> dict:
+                            cfg: dict, min_gws: int | None = None) -> dict:
     """Patch 32 (2026-09-14 manager report). The Bench Boost/Triple Captain/
     Free Hit "which GW" verdicts (evaluate_bench_boost/evaluate_triple_captain/
     evaluate_free_hit below) need their OWN independent scan window — reusing
@@ -187,6 +187,11 @@ def chip_advisor_gw_window(planning_gw: int, fixtures: pd.DataFrame, all_team_id
     "extended": bool, "nearest_event_gw": gw|None}."""
     cah_cfg = cfg.get("chip_advisor_horizon", {})
     default_gws = max(1, cah_cfg.get("default_gws", 8))
+    # Patch 107 (2026-10-04): the opt-in extended mode (Current..Current+9)
+    # passes min_gws so the whole chip advisor re-evaluates over at least
+    # that span for that one run. None => unchanged behavior.
+    if min_gws:
+        default_gws = max(default_gws, int(min_gws))
     max_gws = max(default_gws, cah_cfg.get("max_extend_gws", 16))
     base_end = planning_gw + default_gws - 1
     max_end = planning_gw + max_gws - 1

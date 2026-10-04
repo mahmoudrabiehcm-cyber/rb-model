@@ -3310,3 +3310,12 @@ chip_advisor_horizon:
 # that resolver widens up to. See PATCH_VERSION in app.py for the full
 # narrative and manager quotes.
 # -----------------------------------------------------------------------------
+
+# Patch 107 (2026-10-04, manager: the extended check button should be dynamic
+# "Current GW + 9" and should re-evaluate ALL chips, not only the Wildcard
+# cross-check text). span_gws = how many GWs from the planning GW the opt-in
+# extended mode covers (10 => Current..Current+9). Extended mode widens
+# chip_advisor_horizon and chip_shape_test.detection_window_gws to at least
+# this span for that one run; normal runs are unchanged.
+chip_extended_check:
+  span_gws: 10

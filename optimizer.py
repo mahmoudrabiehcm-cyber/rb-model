@@ -449,18 +449,30 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
         prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
         x = {i: _binary_var(prob, f"x_{i}") for i in df.index}
 
-        prob += pulp.lpSum(x[i] * df.loc[i, objective_col] for i in df.index)
+        # Performance (measured, lossless): ~93% of this function's wall
+        # time was Python-side model construction doing a pandas
+        # `df.loc[i, col]` scalar lookup per player per constraint (tens of
+        # thousands of lookups per solve), not CBC itself. The columns are
+        # read ONCE into plain Python lists here; the model built is
+        # mathematically identical (same coefficients, same constraints).
+        _idx = list(df.index)
+        _obj_vals = df[objective_col].tolist()
+        _price_vals = df["price"].tolist()
+        _pos_vals = df["position"].tolist()
+        _team_vals = df["team"].tolist()
 
-        prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= budget
-        prob += pulp.lpSum(x[i] for i in df.index) == cfg["squad_rules"]["squad_size"]
+        prob += pulp.lpSum(x[i] * v for i, v in zip(_idx, _obj_vals))
+
+        prob += pulp.lpSum(x[i] * v for i, v in zip(_idx, _price_vals)) <= budget
+        prob += pulp.lpSum(x[i] for i in _idx) == cfg["squad_rules"]["squad_size"]
 
         formation = cfg["squad_rules"]["formation"]
         for pos, count in formation.items():
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == pos) == count
+            prob += pulp.lpSum(x[i] for i, p in zip(_idx, _pos_vals) if p == pos) == count
 
         max_per_club = cfg["squad_rules"]["max_per_club"]
         for team in df["team"].unique():
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
+            prob += pulp.lpSum(x[i] for i, t in zip(_idx, _team_vals) if t == team) <= max_per_club
 
         for code in must_include_codes:
             idxs = df[df["code"] == code].index
@@ -624,6 +636,16 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
     _shape_failures: list[str] = []
     _bench_failures: list[str] = []
 
+    # Performance (measured, lossless -- same fix as solve_squad() above):
+    # read the columns once into plain lists instead of a pandas
+    # `df.loc[i, col]` scalar lookup per player per constraint per shape
+    # (this builds up to 8 shape models per call). Identical model.
+    _xi_idx = list(df.index)
+    _xi_gw_vals = df[gw_col].tolist()
+    _xi_price_vals = df["price"].tolist()
+    _xi_pos_vals = df["position"].tolist()
+    _xi_team_vals = df["team"].tolist()
+
     def _solve_xi_for_shape(d: int, m: int, f: int) -> dict | None:
         # Patch 71 — same try/except hardening as solve_squad() (Patch 70):
         # every OTHER failure path in this module already returns None on a
@@ -636,14 +658,14 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         try:
             prob = pulp.LpProblem("fh_xi", pulp.LpMaximize)
             x = {i: _binary_var(prob, f"xi_{i}") for i in df.index}
-            prob += pulp.lpSum(x[i] * df.loc[i, gw_col] for i in df.index)
-            prob += pulp.lpSum(x[i] * df.loc[i, "price"] for i in df.index) <= xi_budget_cap
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "GK") == 1
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "DEF") == d
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "MID") == m
-            prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "position"] == "FWD") == f
+            prob += pulp.lpSum(x[i] * v for i, v in zip(_xi_idx, _xi_gw_vals))
+            prob += pulp.lpSum(x[i] * v for i, v in zip(_xi_idx, _xi_price_vals)) <= xi_budget_cap
+            prob += pulp.lpSum(x[i] for i, p in zip(_xi_idx, _xi_pos_vals) if p == "GK") == 1
+            prob += pulp.lpSum(x[i] for i, p in zip(_xi_idx, _xi_pos_vals) if p == "DEF") == d
+            prob += pulp.lpSum(x[i] for i, p in zip(_xi_idx, _xi_pos_vals) if p == "MID") == m
+            prob += pulp.lpSum(x[i] for i, p in zip(_xi_idx, _xi_pos_vals) if p == "FWD") == f
             for team in df["team"].unique():
-                prob += pulp.lpSum(x[i] for i in df.index if df.loc[i, "team"] == team) <= max_per_club
+                prob += pulp.lpSum(x[i] for i, t in zip(_xi_idx, _xi_team_vals) if t == team) <= max_per_club
             _status = _solve_and_get_status(prob, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
             if _status != "Optimal":
                 _shape_failures.append(f"shape {(d, m, f)}: CBC status={_status} "
@@ -682,13 +704,17 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
         try:
             prob2 = pulp.LpProblem("fh_bench", pulp.LpMinimize)
             y = {i: _binary_var(prob2, f"bn_{i}") for i in bench_pool.index}
-            prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index)
-            prob2 += pulp.lpSum(y[i] * bench_pool.loc[i, "price"] for i in bench_pool.index) <= remaining_budget
+            _b_idx = list(bench_pool.index)
+            _b_price = bench_pool["price"].tolist()
+            _b_pos = bench_pool["position"].tolist()
+            _b_team = bench_pool["team"].tolist()
+            prob2 += pulp.lpSum(y[i] * v for i, v in zip(_b_idx, _b_price))
+            prob2 += pulp.lpSum(y[i] * v for i, v in zip(_b_idx, _b_price)) <= remaining_budget
             for pos, n in need.items():
-                prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "position"] == pos) == n
+                prob2 += pulp.lpSum(y[i] for i, p in zip(_b_idx, _b_pos) if p == pos) == n
             for team in bench_pool["team"].unique():
                 already = xi_club_counts.get(team, 0)
-                prob2 += pulp.lpSum(y[i] for i in bench_pool.index if bench_pool.loc[i, "team"] == team) \
+                prob2 += pulp.lpSum(y[i] for i, t in zip(_b_idx, _b_team) if t == team) \
                     <= max(0, max_per_club - already)
             _status = _solve_and_get_status(prob2, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
             if _status != "Optimal":
