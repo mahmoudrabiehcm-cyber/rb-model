@@ -38,7 +38,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
+PATCH_VERSION = ("Patch 109 (2026-10-04): Extended check ran >6 minutes live. Measured: ~93% of the weekly-plan cost was pandas re-sorting inside optimizer.best_starting_xi and the bench-autosub loop (via recommend._position_tie_break), not the solver; both rewritten losslessly (parity-tested vs the Patch 108 code). UI: the extend button is now just \"Extended Check GW{n}\"; the intro/caption text and the calibration-log expander are removed (the log still records silently). "
+                  "Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
                   "Patch 107 (2026-10-04, manager decisions after discussion: button must be dynamic \"Current GW + 9\"; the extended run must confirm the best GW between Current and Current+9 and re-evaluate ALL chips, not only the Wildcard text; performance must be optimized): (1) PERFORMANCE — profiled (cProfile) and found ~93% of every optimizer.solve_squad() call was Python-side MILP construction (a pandas .loc lookup per player per constraint), not CBC; solve_squad() and solve_xi_first_squad() now read each column once into lists. Lossless: golden results captured from the OLD code (26 solves) match exactly (golden_solver_parity.json + test). Sandbox timing, chip stages only: 5-GW window 12.8s -> 3.1s, 10-GW window 23.4s -> 6.2s; Free Hit solver 31s -> 2.9s for 8 calls; full test suite ~55s -> ~28s. Threading was tested and gave no gain, so not used. NOT live-measured. (2) EXTENDED MODE — clicking the button now re-runs the whole Chip Plan over Current..Current+9 (chip advisor window and Wildcard detection window widened to chip_extended_check.span_gws=10; 3 trailing GWs projected so late Wildcard candidates get a full 4-GW window instead of a truncated 1-3 GW one), so all four cards update; any card that moves versus your previous normal run gets an \"updated by extended check (was GWx)\" tag (no tag, and a note, if there is no earlier normal run in the session); a per-GW table and verdict name the best Wildcard GW in the span. Button label is dynamic (recommend.extended_button_label). Superseded tests from Patches 102/104/105 updated in place. 36 new tests; full suite 215 passed. Previously, "
                   "Patch 106 (2026-10-04, manager screenshot: button said \"reach GW15\" but the result said \"reached GW10\" — \"We need it to reach Current GW + 9\"): root cause confirmed in code — the shared projection only carried xpts columns through GW10, so the extended solves for GW11-15 were silently dropped by the `_check_gws` filter. Fixed by projecting the extension GWs when the button is clicked, and by comparing requested vs reached GW (recommend.extend_reach_status) so any shortfall shows as a warning instead of a quiet success. 6 new tests in test_patch106_extend_actually_reaches_target.py. Previously, Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
                   "red annotation \"i need a confirmation here after the run finishes that it's already done and "
@@ -3877,14 +3878,8 @@ with tab_chips:
     # copy of the same condition to drift out of sync.
     with st.container(border=True):
         _span_n = _ext_span - 1
-        st.markdown(f"🔎 **Look further ahead:** re-run all four chips over GW{planning_gw}–GW{_wc_extend_target_gw} "
-                    f"(normal check stops at GW{_wc_current_max_gw}) and find the best GW."
-                    + (f" Your Wildcard is scheduled GW{_auto_wildcard_gw}." if _wc_extend_chip_driven else ""))
         st.button(recommend.extended_button_label(planning_gw, _wc_extend_target_gw, _ext_span),
                   key="wc_extend_run", type="primary")
-        st.caption("Off by default to keep routine runs fast. A later, unrelated click reverts to the normal "
-                   "check until you run this again. Cards that move get an \"updated by extended check (was GWx)\" "
-                   "tag, compared with your previous normal run.")
         # Patch 105/107: explicit confirmation right where the button is.
         if _wc_extend_requested_flag:
             if _wc_extend_info is None:
@@ -3963,18 +3958,6 @@ with tab_chips:
                 closes=(_closes if _wc_check_note else None)))
     except Exception:
         pass
-    if os.path.exists(_cal_path):
-        try:
-            with open(_cal_path, "rb") as _fh:
-                _cal_bytes = _fh.read()
-            with st.expander("📈 Wildcard calibration log (for validating the 6% trigger)"):
-                st.caption("One row per normal run. Download it regularly — the server disk is temporary.")
-                st.download_button("Download log (CSV)", data=_cal_bytes,
-                                   file_name="wildcard_calibration_log.csv", mime="text/csv",
-                                   key="wc_cal_download")
-        except Exception:
-            pass
-
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now
     # that the cards above carry the at-a-glance read (2026-09-14 redesign).

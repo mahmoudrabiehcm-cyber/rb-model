@@ -718,7 +718,7 @@ def extended_scan_full_gw_list(candidate_gws: list[int], window_len: int = 4) ->
 def extended_button_label(planning_gw: int, target_gw: int, span: int = 10) -> str:
     """Patch 107: a button name that is dynamic, never a hard-coded GW --
     "Current GW + 9 (GW6 -> GW15)"."""
-    return f"Run extended check — Current GW + {span - 1} (GW{planning_gw} → GW{target_gw})"
+    return f"Extended Check GW{target_gw}"
 
 
 _CHIP_KEY_LABELS = {"wildcard": "Wildcard", "bboost": "Bench Boost", "3xc": "Triple Captain",

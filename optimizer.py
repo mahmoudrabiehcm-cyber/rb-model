@@ -11,6 +11,7 @@ Free & open-source: PuLP with its bundled CBC solver, no license, no cost.
 """
 from __future__ import annotations
 import sys
+import numpy as np
 import pandas as pd
 
 try:
@@ -815,6 +816,37 @@ def bench_autosub_prob(position: str, bench_rank: int, starters_xi: pd.DataFrame
     return round(exposure * decay, 3)
 
 
+def _bench_autosub_total(squad: pd.DataFrame, xi: pd.DataFrame, gw_col: str, xm_col: str, cfg: dict) -> float:
+    """Patch 109 (performance, lossless): the bench-autosub loop shared by
+    realized_gw_value() and rating_gw_value(). Same per-player maths as before
+    (`bench_autosub_prob(pos, rank, xi, xm_col, cfg)` x the player's GW points,
+    summed in the same position/rank order); the XI's average `xm` -- which
+    does not depend on which bench player is being priced -- is computed once
+    here instead of once per bench player, and rows are read as arrays instead
+    of via iterrows(). bench_autosub_prob() itself is unchanged."""
+    bench = squad[~squad.index.isin(xi.index)]
+    if bench.empty:
+        return 0.0
+    tcfg = cfg.get("transfer", {}) if cfg else {}
+    gk_prob = float(tcfg.get("bench_gk_autosub_prob", 0.05))
+    curve = tcfg.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15])
+    xm_vals = xi[xm_col].dropna() if (xm_col in xi.columns) else pd.Series(dtype=float)
+    avg_xm = float(xm_vals.mean()) if not xm_vals.empty else 0.8
+    exposure = max(0.03, min(0.6, 1.0 - avg_xm))
+    pos_arr = bench["position"].to_numpy()
+    total = 0.0
+    for pos in ["GK", "DEF", "MID", "FWD"]:
+        pos_bench = bench[pos_arr == pos].sort_values(gw_col, ascending=False)
+        for rank, pts in enumerate(pos_bench[gw_col].to_numpy()):
+            pts = 0.0 if pd.isna(pts) else float(pts)
+            if pos == "GK":
+                prob = gk_prob
+            else:
+                prob = round(exposure * curve[min(rank, len(curve) - 1)], 3)
+            total += prob * pts
+    return total
+
+
 def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
                        bench_weight_scale: float = 1.0) -> dict:
     """Standing Rule #12 (Bench Value Rule): "a bench player's value in any
@@ -845,15 +877,7 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
         return empty
     xi = xi_result["xi"]
     xi_total = float(xi_result["total"])
-    bench = squad[~squad.index.isin(xi.index)]
-    bench_total = 0.0
-    for pos in ["GK", "DEF", "MID", "FWD"]:
-        pos_bench = bench[bench["position"] == pos].sort_values(gw_col, ascending=False)
-        for rank, (_, row) in enumerate(pos_bench.iterrows()):
-            pts = row.get(gw_col, 0.0)
-            pts = 0.0 if pd.isna(pts) else float(pts)
-            prob = bench_autosub_prob(pos, rank, xi, xm_col, cfg)
-            bench_total += prob * pts
+    bench_total = _bench_autosub_total(squad, xi, gw_col, xm_col, cfg)
     bench_total *= bench_weight_scale
     return {"xi_total": round(xi_total, 2), "bench_total": round(bench_total, 2),
             "total_realized": round(xi_total + bench_total, 2)}
@@ -935,15 +959,7 @@ def rating_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "
     xi = xi_result["xi"]
     xi_total = float(xi_result["total"])
     captain_bonus = float(xi[gw_col].max()) if not xi.empty else 0.0
-    bench = squad[~squad.index.isin(xi.index)]
-    bench_total = 0.0
-    for pos in ["GK", "DEF", "MID", "FWD"]:
-        pos_bench = bench[bench["position"] == pos].sort_values(gw_col, ascending=False)
-        for rank, (_, row) in enumerate(pos_bench.iterrows()):
-            pts = row.get(gw_col, 0.0)
-            pts = 0.0 if pd.isna(pts) else float(pts)
-            prob = bench_autosub_prob(pos, rank, xi, xm_col, cfg)
-            bench_total += prob * pts
+    bench_total = _bench_autosub_total(squad, xi, gw_col, xm_col, cfg)
     total = xi_total + captain_bonus + bench_total
     return {"xi_total": round(xi_total, 2), "captain_bonus": round(captain_bonus, 2),
             "bench_total": round(bench_total, 2), "total_realized": round(total, 2)}
@@ -963,20 +979,33 @@ def rating_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, xm_
 def best_starting_xi(squad: pd.DataFrame, gw_col: str) -> dict:
     """Pick the highest-scoring valid formation (1 GK + valid outfield shape)
     for a single gameweek from a fixed 15-man squad — Horizon-Matching Rule:
-    always uses that week's single-GW column, never a multi-week average."""
+    always uses that week's single-GW column, never a multi-week average.
+
+    Patch 109 (performance, lossless): each position is sorted ONCE and every
+    formation takes a prefix (`.head(n)`) of that same sorted frame, instead
+    of re-sorting identical data 24 times. A prefix of one sort is exactly
+    what repeated sort + head returned, so selection, tie-breaking and totals
+    are unchanged (parity-tested in test_patch109)."""
     VALID_SHAPES = [  # (DEF, MID, FWD)
         (3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3),
     ]
-    gk = squad[squad["position"] == "GK"].sort_values(gw_col, ascending=False).head(1)
-    best = None
+    pos_arr = squad["position"].to_numpy()
+    gk = squad[pos_arr == "GK"].sort_values(gw_col, ascending=False).head(1)
+    def_all = squad[pos_arr == "DEF"].sort_values(gw_col, ascending=False)
+    mid_all = squad[pos_arr == "MID"].sort_values(gw_col, ascending=False)
+    fwd_all = squad[pos_arr == "FWD"].sort_values(gw_col, ascending=False)
+    gk_v = gk[gw_col].to_numpy()
+    def_v, mid_v, fwd_v = def_all[gw_col].to_numpy(), mid_all[gw_col].to_numpy(), fwd_all[gw_col].to_numpy()
+    best_shape, best_total = None, None
     for d, m, f in VALID_SHAPES:
-        defs = squad[squad["position"] == "DEF"].sort_values(gw_col, ascending=False).head(d)
-        mids = squad[squad["position"] == "MID"].sort_values(gw_col, ascending=False).head(m)
-        fwds = squad[squad["position"] == "FWD"].sort_values(gw_col, ascending=False).head(f)
-        if len(defs) < d or len(mids) < m or len(fwds) < f:
+        if len(def_v) < d or len(mid_v) < m or len(fwd_v) < f:
             continue
-        xi = pd.concat([gk, defs, mids, fwds])
-        total = xi[gw_col].sum()
-        if best is None or total > best["total"]:
-            best = {"xi": xi, "total": total, "shape": (d, m, f)}
-    return best
+        # same element order as the concat [gk, defs, mids, fwds] -> identical float sum
+        total = pd.Series(np.concatenate([gk_v, def_v[:d], mid_v[:m], fwd_v[:f]])).sum()
+        if best_total is None or total > best_total:
+            best_shape, best_total = (d, m, f), total
+    if best_shape is None:
+        return None
+    d, m, f = best_shape
+    xi = pd.concat([gk, def_all.head(d), mid_all.head(m), fwd_all.head(f)])
+    return {"xi": xi, "total": best_total, "shape": best_shape}
