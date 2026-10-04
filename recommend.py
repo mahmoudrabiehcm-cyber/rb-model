@@ -848,22 +848,30 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
 
 
 def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = None) -> list[str]:
-    """Patch 111: GW-by-GW lines ("GW7: Roll", "GW8: Palmer → Saka, Isak → Haaland",
-    "GW9: WILDCARD (11 changes)") from a chained weekly_plan. `first_week` = (gw, [move texts]) is the
-    manager's own recommended move for the current GW, shown first (the chain starts after it)."""
+    """Patch 111/112: GW-by-GW lines from a chained weekly_plan -- "GW7: Roll (4 FT banked)",
+    "GW8: Palmer → Saka, Isak → Haaland (2 FT left)", "GW9: WILDCARD (11 changes)". A move forced by the
+    5-transfer cap says so. `first_week` = (gw, [move texts][, ft_after]) is the manager's own recommended
+    move for the current GW, shown first (the chain starts after it)."""
     lines: list[str] = []
     if first_week is not None:
-        gw0, moves0 = first_week
-        lines.append(f"GW{gw0}: " + (", ".join(moves0) if moves0 else "Roll"))
+        gw0, moves0 = first_week[0], first_week[1]
+        ft0 = first_week[2] if len(first_week) > 2 else None
+        txt = (", ".join(moves0) if moves0 else "Roll")
+        lines.append(f"GW{gw0}: {txt}" + (f" ({ft0} FT left)" if ft0 is not None and moves0 else
+                                          (f" ({ft0} FT banked)" if ft0 is not None else "")))
     for wk in weekly_plan or []:
         gw = wk.get("gw")
         moves = wk.get("moves") or []
+        ft = wk.get("ft_banked_after")
         if wk.get("chip_played") == "wildcard":
             lines.append(f"GW{gw}: WILDCARD ({len(moves)} changes)")
         elif moves:
-            lines.append(f"GW{gw}: " + ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in moves))
+            tail = f" ({ft} FT left)" if ft is not None else ""
+            if wk.get("cap_forced"):
+                tail += " · uses banked FT at the 5-FT cap"
+            lines.append(f"GW{gw}: " + ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in moves) + tail)
         else:
-            lines.append(f"GW{gw}: Roll")
+            lines.append(f"GW{gw}: Roll" + (f" ({ft} FT banked)" if ft is not None else ""))
     return lines
 
 
@@ -1175,6 +1183,46 @@ def resolve_bb_play_gw(isolated_bb_play_gw: int | None, harmonized_bb_gw: int | 
     return harmonized_bb_gw if harmonized_bb_gw is not None else isolated_bb_play_gw
 
 
+_PLAN_SOLVE_MEMO: dict = {}
+_PLAN_SOLVE_MEMO_MAX = 600
+
+
+def _frame_fingerprint(df: pd.DataFrame):
+    """Patch 112 (performance, lossless): a content hash of the WHOLE frame (every column, so it also covers
+    the columns that only flow into the returned squad rows). None when a column holds unhashable cells --
+    callers then skip the memo and behave exactly as before."""
+    try:
+        import hashlib
+        h = pd.util.hash_pandas_object(df.reset_index(drop=True), index=False).to_numpy().tobytes()
+        return (len(df), tuple(map(str, df.columns)), hashlib.blake2b(h, digest_size=16).hexdigest())
+    except Exception:
+        return None
+
+
+def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain):
+    """Patch 112: opt.solve_squad(...) for the planner's k-loop, memoised on (pool fingerprint, owned codes,
+    min_retain, budget). The solve is deterministic in those inputs (objective column fixed), and
+    Streamlit's own cache re-hashed the entire player table on every call. Falls back to a plain call."""
+    if pool_fp is None:
+        return opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
+                               min_retain=min_retain, objective_col="xpts_horizon_sum")
+    key = (pool_fp, cfg_fp, tuple(sorted(current_codes)), int(min_retain), round(float(team_value), 3))
+    if key in _PLAN_SOLVE_MEMO:
+        res = _PLAN_SOLVE_MEMO[key]
+    else:
+        res = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
+                              min_retain=min_retain, objective_col="xpts_horizon_sum")
+        if len(_PLAN_SOLVE_MEMO) >= _PLAN_SOLVE_MEMO_MAX:
+            _PLAN_SOLVE_MEMO.clear()
+        _PLAN_SOLVE_MEMO[key] = res
+    if res is None:
+        return None
+    out = dict(res)
+    if isinstance(out.get("squad"), pd.DataFrame):
+        out["squad"] = out["squad"].copy()
+    return out
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
@@ -1184,7 +1232,9 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             disrupted_codes: set | None = None,
                             hit_stance: str = "No hits",
                             chip_schedule: dict | None = None,
-                            use_tie_break: bool = True) -> dict:
+                            use_tie_break: bool = True,
+                            cap_use_bar: float | None = None,
+                            value_tail: list | None = None) -> dict:
     """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
@@ -1296,7 +1346,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
 
     squad_df = squad_df.copy()
     pool_df = pool_df.copy() if pool_df is not None else pd.DataFrame(columns=squad_df.columns)
-    numeric_cols = {"price", "xpts_horizon_sum"} | {f"xpts_gw{g}" for g in gw_list}
+    value_tail = [g for g in (value_tail or []) if g not in gw_list]
+    numeric_cols = {"price", "xpts_horizon_sum"} | {f"xpts_gw{g}" for g in list(gw_list) + value_tail}
     for df in (squad_df, pool_df):
         for col in numeric_cols:
             if col in df.columns:
@@ -1314,8 +1365,12 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     summary = []
     total_net_gain = 0.0
 
+    full_pool_fp = _frame_fingerprint(full_pool)  # Patch 112: one cheap content hash per plan, reused by every solve
+    cfg_fp = repr(sorted((cfg.get("squad_rules") or {}).items())) if isinstance(cfg.get("squad_rules"), dict) else ""
     for wi, gw in enumerate(gw_list):
-        remaining_gws = gw_list[wi:]
+        # Patch 112: `value_tail` = extra GWs AFTER the planned span that are used only to VALUE a move (so late
+        # weeks are not judged on 1-2 remaining GWs); they are never planned or displayed.
+        remaining_gws = list(gw_list[wi:]) + value_tail
         this_gw_col = f"xpts_gw{gw}"
 
         # Patch 92 (a): weeks strictly before a scheduled Wildcard must not
@@ -1399,8 +1454,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         k_upper = max(ft_bank, 5) if allow_hits else ft_bank
         for k in range(1, k_upper + 1):
             min_retain = max(0, 15 - k)
-            result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                      min_retain=min_retain, objective_col="xpts_horizon_sum")
+            result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain)
             if result is None:
                 continue
             new_squad = result["squad"]
@@ -1437,6 +1491,18 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # free move only needs the lower meaningful_bar.
         viable = [k for k in tied_ks if k == 0
                   or candidates[k]["net_gain"] >= (threshold if candidates[k]["hit_cost"] > 0 else meaningful_bar)]
+        # Patch 112 (chain only; `cap_use_bar=None` keeps the old behaviour): with the FT bank AT THE CAP a Roll
+        # throws a transfer away (ft_after is capped at transfers.MAX_BANK), so any free move with a real gain
+        # >= cap_use_bar is preferred over Rolling. It still has to pass the Starting-XI impact check below, and
+        # a hit is never taken to do this.
+        cap_forced = False
+        if cap_use_bar is not None and ft_bank >= transfers.MAX_BANK:
+            _free_ks = [k for k, c in candidates.items()
+                        if k != 0 and c["hit_cost"] == 0 and c["net_gain"] >= cap_use_bar]
+            if _free_ks:
+                _best_free = max(candidates[k]["net_gain"] for k in _free_ks)
+                viable = sorted(k for k in _free_ks if (_best_free - candidates[k]["net_gain"]) < moe)
+                cap_forced = True
 
         # Patch 34 — same Starting-XI Impact Check as suggest_transfers(),
         # applied per week ("everywhere", per manager request): a candidate
@@ -1548,6 +1614,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             "gw": gw, "moves": week_moves, "net_gain": chosen["net_gain"],
             "ft_available": ft_bank, "ft_used": ft_used, "ft_banked_after": ft_after,
             "summary": week_summary, "data_gap_note": data_gap_note,
+            "cap_forced": bool(cap_forced and chosen["actual_k"] > 0),
         })
         summary.append(week_summary)
         plan.append(f"GW{gw}: {chosen['actual_k']} transfer(s) this week (chained pacing plan) — "
@@ -2610,3 +2677,44 @@ def season_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) -
         if k == key:
             return {"headline": headline, "body": body, "key": key}
     return {"headline": "Finding Your XI", "body": "Too soon for a verdict, not too soon for a plan.", "key": "flat_early_season"}
+
+
+def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,
+                     fh_ref_score: float | None, types: tuple) -> dict:
+    """Patch 112 (manager: Triple Captain / Bench Boost / Free Hit must count in the Wildcard decision).
+    Chip value for ONE squad path (`squads_by_gw` = the squad fielded each GW). DEVIATION from Standing Rule #31
+    (captaincy is disclosure, never a scoring input) -- explicit manager instruction, flagged for the model chat.
+      Bench Boost   = that week's bench xPts (best XI recomputed per week); best week not hosting the Wildcard/Free Hit.
+      Triple Captain= the best-XI top scorer's xPts (the extra x1 on top of the captain doubling already counted),
+                      best week not hosting the Wildcard/Free Hit/Bench Boost.
+      Free Hit      = (fh_ref_score - squad's best-XI value) at `fh_gw`, floored at 0 (it reverts, so only the gap counts).
+    `types` uses the chip keys '3xc', 'bboost', 'freehit'. Returns {'tc','bb','fh': (gw, value)|None, 'total'}."""
+    blocked = {g for g in (wc_gw, fh_gw) if g is not None}
+    per = {}
+    for g in gws:
+        sq = squads_by_gw.get(g)
+        col = f"xpts_gw{g}"
+        if sq is None or col not in sq.columns:
+            continue
+        best = opt.best_starting_xi(sq, col)
+        if not best or best.get("xi") is None or best["xi"].empty:
+            continue
+        xi_codes = set(best["xi"]["code"])
+        bench = sq[~sq["code"].isin(xi_codes)]
+        per[g] = (round(float(pd.to_numeric(best["xi"][col], errors="coerce").max()), 2),
+                  round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0)
+    out = {"tc": None, "bb": None, "fh": None}
+    if "bboost" in types:
+        cand = {g: v[1] for g, v in per.items() if g not in blocked}
+        if cand:
+            g = max(cand, key=lambda k: (cand[k], -k)); out["bb"] = (g, cand[g])
+    if "3xc" in types:
+        taken = blocked | ({out["bb"][0]} if out["bb"] else set())
+        cand = {g: v[0] for g, v in per.items() if g not in taken}
+        if cand:
+            g = max(cand, key=lambda k: (cand[k], -k)); out["tc"] = (g, cand[g])
+    if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
+        cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
+        out["fh"] = (fh_gw, round(max(0.0, float(fh_ref_score) - float(cur)), 2))
+    out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
+    return out

@@ -38,7 +38,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 111 (2026-10-04, manager decisions after Patch 110): (1) WILDCARD CHAIN COMPARISON replaces the Patch 110 94% bridge rule — the table's % was the NO-CHIP path (verified: _wc_bridge_calc ran with chip_schedule=None); it now shows No chip % beside With Wildcard GWn %, and the Wildcard week is the candidate (current GW, sequence GW, top Rule #48 weeks) with the biggest summed xPts gain over the whole checked span (free transfers only, no hits, chains start from your recommended GW move, Wildcard team rebuilt for 8 GWs); earliest week within the 2.0 margin of error of the best wins, best gain below the 2.0 materiality bar = HOLD. Thresholds borrowed, NOT validated; Rule #48's own 4-GW window value stays visible as \"if played alone\". Free Hit/Bench Boost/Triple Captain are not modelled inside the chain. SYNTHETIC-squad tested only. (2) GW-by-GW plan timeline + gain-per-candidate bars. (3) PERFORMANCE — chain plans skip the tie-break scan (93% of planner time); optimizer.realized_gw_value is memoised (89% of calls were exact repeats; lossless, golden-parity tested vs Patch 108); the hit-inclusive 10-GW cross-check no longer runs in the Extended Check. Sandbox: extended chain (10 GWs, 4 Wildcard candidates) 7s, normal 3.4s; NOT live-measured. (4) Fixes: \"Done\" message named GW15 while the button said GW17; latent KeyError in recommend._position_tie_break when the model's own pick sat outside the tied set. "
+PATCH_VERSION = ("Patch 112 (2026-10-04, manager decisions after Patch 111; chain comparison only, planner defaults unchanged): (1) at the 5-FT cap the chain now USES a transfer when its gain clears cap_use_bar 0.25 xPts instead of letting it be lost; (2) late-week moves are valued 3 GWs past the shown span (value_tail_gws); (3) the Free Hit week is excluded from the chain gain sum; (4) timeline shows banked FTs per week; (5) GW reconciliation line under the table (current squad vs after-move vs reference xPts) because the Pitch Rating and the table % use different bases. CHIPS IN THE WILDCARD DECISION (manager instruction; DEVIATES from Standing Rule #31 -> model chat must approve; switch: chip_extended_check.include_chip_value): each Wildcard candidate's gain = chain xPts gain + (Triple Captain + Bench Boost + Free Hit value on that chain's squads minus the same on the no-chip chain); TC = best-XI top scorer xPts (extra x1), BB = bench xPts, FH = gap to the GW-only optimum at the sequence's FH week; a chip cannot share the Wildcard/FH week. LINKS: Transfer page Free Hit/Bench Boost/Triple Captain now read the Chip Plan's joint sequence (they read standalone advisors before: Free Hit GW9 vs GW13); the Wildcard rebuild expander shows the chain's own squad for the decision week (HOLD = best candidate as reference); chips are re-picked on the chosen Wildcard week's squad. cap_use_bar and value_tail_gws are NOT validated. Speed: lossless caches (best_starting_xi rewrite 24ms to 1.2ms per call, plan-solve memo), golden-parity tested vs Patch 108; sandbox extended chain ~7s, normal ~3.9s, synthetic data, NOT live-measured. " "Patch 111 (2026-10-04, manager decisions after Patch 110): (1) WILDCARD CHAIN COMPARISON replaces the Patch 110 94% bridge rule — the table's % was the NO-CHIP path (verified: _wc_bridge_calc ran with chip_schedule=None); it now shows No chip % beside With Wildcard GWn %, and the Wildcard week is the candidate (current GW, sequence GW, top Rule #48 weeks) with the biggest summed xPts gain over the whole checked span (free transfers only, no hits, chains start from your recommended GW move, Wildcard team rebuilt for 8 GWs); earliest week within the 2.0 margin of error of the best wins, best gain below the 2.0 materiality bar = HOLD. Thresholds borrowed, NOT validated; Rule #48's own 4-GW window value stays visible as \"if played alone\". Free Hit/Bench Boost/Triple Captain are not modelled inside the chain. SYNTHETIC-squad tested only. (2) GW-by-GW plan timeline + gain-per-candidate bars. (3) PERFORMANCE — chain plans skip the tie-break scan (93% of planner time); optimizer.realized_gw_value is memoised (89% of calls were exact repeats; lossless, golden-parity tested vs Patch 108); the hit-inclusive 10-GW cross-check no longer runs in the Extended Check. Sandbox: extended chain (10 GWs, 4 Wildcard candidates) 7s, normal 3.4s; NOT live-measured. (4) Fixes: \"Done\" message named GW15 while the button said GW17; latent KeyError in recommend._position_tie_break when the model's own pick sat outside the tied set. "
                   "Patch 110 (2026-10-04, manager decisions after Patch 109): (1) ONE LINKED WILDCARD DECISION — the card, the top pill and the best-GW table now read the same object (recommend.wildcard_final_decision); verified cause of the old mismatch: the card badge came from the hit-inclusive \"transfers close the gap\" check, the table's Chips column from the joint sequence, and the \"Best Wildcard GW\" headline from the isolated Rule #48 window scan. (2) BRIDGE TEST — free transfers only (no hits), flagged players benched, squad vs a full-rebuild squad each GW: HOLD -> GWn while it stays at/above 94% (the document's 6% gap reused, UNVALIDATED), PLAY at the first GW that starts 2 consecutive weeks below it, PLAY NOW if that is the current GW. Prototype on SYNTHETIC squads only: compared against the reachable ceiling it could not tell a dead team from a healthy one (plan and ceiling share the same transfer budget); compared against a full rebuild it separated them. The 88%-style trigger number stays as a label (today). (3) Extended Check now reaches Wildcard Current+9 and BB/TC/FH Current+11 (button \"Extended Check GW{Current+11}\"). (4) Table: Wildcard value column renamed \"if played alone\"; Rating % column replaced by the bridge rating; Wildcard week shown only at the decision GW. "
                   "Patch 109 (2026-10-04): Extended check ran >6 minutes live. Measured: ~93% of the weekly-plan cost was pandas re-sorting inside optimizer.best_starting_xi and the bench-autosub loop (via recommend._position_tie_break), not the solver; both rewritten losslessly (parity-tested vs the Patch 108 code). UI: the extend button is now just \"Extended Check GW{n}\"; the intro/caption text and the calibration-log expander are removed (the log still records silently). "
                   "Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
@@ -1456,6 +1456,20 @@ def _chip_portfolio_calc(squad_df_adv, pool_df_adv, cfg, free_transfers: int, ba
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _chip_portfolio_fixed_wc_calc(wc_scan_one: dict, fh_gap_table: dict, squad_df_adv, portfolio_gw_list: tuple,
+                                   cfg: dict, available_chip_types: tuple, valid_gws_by_type_items: tuple,
+                                   fh_by_gw: dict | None, reachable_ceiling_by_gw: dict | None, wc_gw: int):
+    """Patch 112: Rule #49 joint sequence again, with the Wildcard pinned to the chain decision's week so
+    Triple Captain / Bench Boost / Free Hit are valued on that Wildcard's rebuild squad. Reuses the scan
+    already computed (no new MILP solves except the pre-Wildcard reachable tables)."""
+    valid = {k: set(v) for k, v in valid_gws_by_type_items} if valid_gws_by_type_items else None
+    return chip_protocol.chip_portfolio_schedule(
+        set(available_chip_types), wc_scan_one, fh_gap_table, squad_df_adv, list(portfolio_gw_list), cfg,
+        lambda total: eng.margin_of_error_threshold(total, cfg), valid_gws_by_type=valid,
+        fh_by_gw=fh_by_gw, reachable_ceiling_by_gw=reachable_ceiling_by_gw, force_wildcard_gw=wc_gw)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def _reachable_ceiling_calc(cfg: dict, shape_proj: pd.DataFrame, squad_codes_items: tuple,
                              free_transfers: int, detect_gw_list: tuple):
     """Patch 99 -- same uncached-hot-path finding as _suggest_transfers_calc()
@@ -1679,8 +1693,13 @@ def _extended_wc_cross_check_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame,
 def _wc_chain_compare_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_proj: pd.DataFrame, cfg: dict,
                            style_name: str, free_transfers: int, bank: float, planning_gw: int, eval_gws: tuple,
                            cand_gws: tuple, rebuild_len: int, meaningful_bar: float, bb_play_gw: int | None,
-                           disrupted_codes_items: tuple, team_value: float, first_moves: tuple):
-    """Patch 111 (2026-10-04): the Wildcard CHAIN COMPARISON. For the NO-CHIP path and for a Wildcard
+                           disrupted_codes_items: tuple, team_value: float, first_moves: tuple,
+                           freehit_gw: int | None = None, cap_use_bar: float | None = None,
+                           tail_gws: tuple = (), chip_types: tuple = (), include_chip_value: bool = False):
+    """Patch 111 (2026-10-04): the Wildcard CHAIN COMPARISON. Patch 112 adds: the scheduled Free Hit week is
+    left out of both the plan's valuations and the gain sum (it reverts, so the persisted squad does not
+    matter that week); `cap_use_bar` makes the chain spend a transfer instead of wasting it at the 5-FT cap;
+    `tail_gws` are extra GWs after the span used only to VALUE late-week moves (never planned or shown). For the NO-CHIP path and for a Wildcard
     played at each candidate GW, runs a chained free-transfers-only plan (no hits) over `eval_gws` and
     scores the squad fielded each week. The Wildcard's value at GW t is the SUM over the whole span of
     (score with the chip at t) - (score with no chip) -- not a 4-GW window. The Wildcard team is rebuilt
@@ -1720,33 +1739,68 @@ def _wc_chain_compare_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_
         dsq = dream_pool[dream_pool["code"].isin([p["code"] for p in dsq])]
     dream_score = {g: opt.rating_gw_value(dsq, f"xpts_gw{g}", cfg)["total_realized"] for g in gws}
 
-    def _scores(start_sq, plan_wp, first_sq=None):
+    def _squads(start_sq, plan_wp, first_sq=None):
         after = recommend.build_squad_after_by_gw(start_sq, plan_wp or [], pool_all)
         out = {}
         for g in gws:
             if g == planning_gw and first_sq is not None:
-                sq = first_sq
+                out[g] = first_sq
             else:
                 app_ = [k for k in after if k is not None and k <= g]
-                sq = after[max(app_)] if app_ else start_sq
-            out[g] = opt.rating_gw_value(sq, f"xpts_gw{g}", cfg)["total_realized"]
+                out[g] = after[max(app_)] if app_ else start_sq
         return out
+
+    def _scores(start_sq, plan_wp, first_sq=None, sqs=None):
+        sqs = sqs if sqs is not None else _squads(start_sq, plan_wp, first_sq)
+        return {g: opt.rating_gw_value(sqs[g], f"xpts_gw{g}", cfg)["total_realized"] for g in gws}
 
     def _pct(score):
         return {g: eng.team_rating_pct(score[g], dream_score[g], "")["rating_pct"] for g in gws}
 
+    fh_gw = freehit_gw if (freehit_gw is not None and freehit_gw in gws) else None
+    tail = [g for g in tail_gws if f"xpts_gw{g}" in shape_proj.columns and f"xpts_gw{g}" in squad_df.columns]
+
     def _plan(start_sq, start_bank, ft, plan_gws, chip=None):
         if not plan_gws:
             return {"weekly_plan": []}
+        chip = dict(chip or {})
+        if fh_gw is not None and fh_gw in plan_gws:
+            chip["freehit_gw"] = fh_gw
         return recommend.plan_transfer_schedule(
             start_sq, pool_df, cfg, style_name, ft, start_bank, plan_gws[0], plan_gws, meaningful_bar, None,
-            bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes, hit_stance="No hits", chip_schedule=chip,
-            use_tie_break=False)
+            bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes, hit_stance="No hits", chip_schedule=chip or None,
+            use_tie_break=False, cap_use_bar=cap_use_bar, value_tail=tail)
+
+    # Patch 112: chip value (Triple Captain / Bench Boost / Free Hit) on each chain's own squads -- manager
+    # instruction, a DEVIATION from Standing Rule #31 (flag include_chip_value; flagged for the model chat).
+    use_chips = bool(include_chip_value and chip_types)
+    fh_ref = None
+    if use_chips and "freehit" in chip_types and freehit_gw is not None and freehit_gw in gws:
+        _fp = shape_proj.copy()
+        _fo = opt.solve_squad(_fp, cfg, budget=float(team_value), objective_col=f"xpts_gw{freehit_gw}", label="chain_fh_ref")
+        if _fo is not None and _fo.get("squad") is not None:
+            _fs = _fo["squad"]
+            if not isinstance(_fs, pd.DataFrame):
+                _fs = _fp[_fp["code"].isin([p["code"] for p in _fs])]
+            fh_ref = opt.rating_gw_value(_fs, f"xpts_gw{freehit_gw}", cfg)["total_realized"]
+
+    def _chips(sqs, wc_gw):
+        if not use_chips:
+            return None
+        return recommend.chain_chip_value(sqs, gws, cfg, wc_gw, fh_gw, fh_ref, tuple(chip_types))
 
     base_plan = _plan(squad1, bank1, ft_next, rest)
-    base_score = _scores(squad1, base_plan.get("weekly_plan"), first_sq=squad1)
-    out = {"gws": gws, "dream": dream_score, "first_moves_n": len(first_moves),
-           "base": {"score": base_score, "pct": _pct(base_score), "plan": base_plan.get("weekly_plan") or []},
+    base_sqs = _squads(squad1, base_plan.get("weekly_plan"), first_sq=squad1)
+    base_score = _scores(None, None, sqs=base_sqs)
+    base_chips = _chips(base_sqs, None)
+    g0 = gws[0]
+    cur_sc = opt.rating_gw_value(squad_df, f"xpts_gw{g0}", cfg)["total_realized"]
+    out = {"gws": gws, "dream": dream_score, "first_moves_n": len(first_moves), "first_ft_after": ft_next,
+           "diag": {"gw": g0, "current": round(float(cur_sc), 1), "after_move": round(float(base_score[g0]), 1),
+                    "reference": round(float(dream_score[g0]), 1), "n_after": int(len(squad1)),
+                    "n_current": int(len(squad_df))},
+           "base": {"score": base_score, "pct": _pct(base_score), "plan": base_plan.get("weekly_plan") or [],
+                    "chips": base_chips},
            "cands": {}}
     for t in cands:
         win = [f"xpts_gw{g}" for g in range(t, t + int(rebuild_len)) if f"xpts_gw{g}" in shape_proj.columns]
@@ -1763,12 +1817,17 @@ def _wc_chain_compare_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_
         chip = {"wildcard_gw": t, "wildcard_rebuild_squad": rsq}
         if t == planning_gw:
             plan = _plan(squad_df, bank, free_transfers, gws, chip)
-            sc = _scores(squad_df, plan.get("weekly_plan"))
+            sqs = _squads(squad_df, plan.get("weekly_plan"))
         else:
             plan = _plan(squad1, bank1, ft_next, rest, chip)
-            sc = _scores(squad1, plan.get("weekly_plan"), first_sq=squad1)
-        out["cands"][t] = {"gain": round(sum(sc[g] - base_score[g] for g in gws), 2), "score": sc,
-                           "pct": _pct(sc), "plan": plan.get("weekly_plan") or []}
+            sqs = _squads(squad1, plan.get("weekly_plan"), first_sq=squad1)
+        sc = _scores(None, None, sqs=sqs)
+        g_chain = round(sum(sc[g] - base_score[g] for g in gws if g != fh_gw), 2)
+        c_chips = _chips(sqs, t)
+        g_chips = round(c_chips["total"] - base_chips["total"], 2) if (c_chips and base_chips) else 0.0
+        out["cands"][t] = {"gain": round(g_chain + g_chips, 2), "gain_chain": g_chain, "gain_chips": g_chips,
+                           "chips": c_chips, "score": sc, "pct": _pct(sc), "plan": plan.get("weekly_plan") or [],
+                           "rebuild_codes": [int(c) for c in rsq["code"]]}
     return out if out["cands"] else None
 
 
@@ -3103,6 +3162,7 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
 _wc_chain = None
 _wc_decision = None
 _wc_decision_seq = ((chip_portfolio or {}).get("detail", {}) or {}).get("wildcard") if wc_flag else None
+_seq_detail_early = ((chip_portfolio or {}).get("detail", {}) or {}) if chip_portfolio else {}
 _wc_first_week = None
 if wc_flag and not squad_df.empty and shape_proj is not None:
     try:
@@ -3130,7 +3190,12 @@ if wc_flag and not squad_df.empty and shape_proj is not None:
                 squad_df, pool_df, shape_proj, cfg, style_name, ft["free_transfers"], bank, planning_gw,
                 tuple(_eval_gws), tuple(_cand_gws), 8, meaningful_bar_override, _bb_play_gw,
                 tuple(sorted(_disrupted_codes)) if _disrupted_codes else (), float(team_value),
-                tuple((m["out_code"], m["in_code"]) for m in _mv0))
+                tuple((m["out_code"], m["in_code"]) for m in _mv0),
+                ((_seq_detail_early.get("freehit") or {}).get("gw") if _seq_detail_early else None),
+                float(cfg.get("chip_extended_check", {}).get("cap_use_bar", 0.25)),
+                tuple(range(_eval_gws[-1] + 1, _eval_gws[-1] + 1 + int(cfg.get("chip_extended_check", {}).get("value_tail_gws", 3)))),
+                tuple(sorted(k for k in (globals().get("_available_chip_types") or set()) if k != "wildcard")),
+                bool(cfg.get("chip_extended_check", {}).get("include_chip_value", True)))
     except Exception:
         _wc_chain = None
 if wc_flag and wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
@@ -3139,6 +3204,33 @@ if wc_flag and wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
         margin=eng.margin_of_error_threshold(0.0, cfg), floor=float(meaningful_bar_override),
         today_pct=wc_trigger.get("avg_rating_pct"), gap_pct=wc_trigger["avg_gap_pct"],
         seq_gw=(_wc_decision_seq or {}).get("gw"), seq_value=(_wc_decision_seq or {}).get("value"))
+# Patch 112: Triple Captain / Bench Boost / Free Hit follow the Wildcard week the chain picked. The joint
+# sequence valued them on the SEQUENCE's own Wildcard squad; when the decision lands on another week they
+# are re-picked on that week's rebuild squad (Rule #49b). Chip-level value only -- the chain gain is untouched.
+_chips_repicked = None
+try:
+    _dw = (_wc_decision or {}).get("gw")
+    _seq_wc = (((chip_portfolio or {}).get("detail", {}) or {}).get("wildcard") or {}).get("gw")
+    _by = (wc_window_scan or {}).get("by_gw") or {}
+    if wc_flag and _dw is not None and _dw != _seq_wc and _dw in _by:
+        _re = _chip_portfolio_fixed_wc_calc(
+            {"by_gw": {_dw: _by[_dw]}}, _fh_gap_table, squad_df_adv, tuple(_portfolio_gw_list), cfg,
+            tuple(sorted(_available_chip_types)), _valid_gws_by_type_items, _fh_by_gw,
+            _reachable_ceiling_for_guardrail, int(_dw))
+        if _re and (_re.get("detail") or {}).get("wildcard", {}).get("gw") == _dw:
+            _old = {k: v.get("gw") for k, v in (chip_portfolio or {}).get("detail", {}).items() if k != "wildcard"}
+            _new = {k: v.get("gw") for k, v in _re["detail"].items() if k != "wildcard"}
+            chip_portfolio = _re
+            _chips_repicked = {"old": _old, "new": _new, "changed": _old != _new}
+except Exception:
+    _chips_repicked = None
+_final_chip_gw = {}
+try:
+    for _k, _v in (((chip_portfolio or {}).get("detail", {}) or {}).items()):
+        if _k != "wildcard" and _v.get("gw") is not None:
+            _final_chip_gw[_k] = int(_v["gw"])
+except Exception:
+    _final_chip_gw = {}
 if _wc_decision is not None:
     # the top pill now states the same decision as the card (replaces the
     # old "transfers close the gap" headline, which used a hit-inclusive plan).
@@ -4042,6 +4134,12 @@ with tab_chips:
                 planning_gw, _span_gws, ((wc_window_scan or {}).get("by_gw") if _wc_in_play else None),
                 {}, {g: v for g, v in _chips_by_gw.items()})
             st.markdown("🏆 **" + recommend.chip_plan_headline(_chips_by_gw, _wc_decision) + "**")
+            if _chips_repicked and _chips_repicked["changed"]:
+                _nm = {"3xc": "Triple Captain", "bboost": "Bench Boost", "freehit": "Free Hit"}
+                st.caption("🔗 chips re-picked on the Wildcard squad: " + " · ".join(
+                    f"{_nm.get(k, k)} GW{_chips_repicked['old'].get(k, '—')} → GW{v}"
+                    for k, v in _chips_repicked["new"].items() if _chips_repicked["old"].get(k) != v)
+                    + " (chip value only; the Wildcard gain does not include captaincy, Rule #31)")
             for _cn in _chip_collisions:
                 st.warning(_cn)
             # Patch 111: which Wildcard candidate to draw beside the no-chip path -- the decision's week,
@@ -4075,6 +4173,17 @@ with tab_chips:
                          "starting from your recommended move this GW. 'No chip' = without the Wildcard; "
                          "'With Wildcard' = chip played at the stated GW.")
             st.dataframe(_tbl_df, hide_index=True, use_container_width=True, column_config=_cfgs)
+            if _wc_chain and _wc_chain.get("diag"):
+                _d = _wc_chain["diag"]
+                st.caption(
+                    f"GW{_d['gw']} reconciliation (xPts, best XI): current squad **{_d['current']}** (the Pitch tab's "
+                    f"Rating basis: vs the best possible GW{_d['gw']} squad) → after your recommended move "
+                    f"**{_d['after_move']}** (the table's basis: vs the best fixed squad for the whole span, "
+                    f"which scores {_d['reference']} in GW{_d['gw']}). A lower % here than on the Pitch tab "
+                    f"means the recommended move costs GW{_d['gw']} points in exchange for later weeks.")
+                if _d["n_after"] != _d["n_current"]:
+                    st.warning(f"Squad size changed after the recommended move ({_d['n_current']} → {_d['n_after']}): "
+                               "a recommended incoming player was missing from the pool. Table % is unreliable.")
             if _wc_chain and _wc_chain["cands"]:
                 _g_df = pd.DataFrame({"Wildcard at": [f"GW{t}" for t in sorted(_wc_chain["cands"])],
                                       "Total gain over span (xPts)": [_wc_chain["cands"][t]["gain"]
@@ -4087,7 +4196,8 @@ with tab_chips:
             if _wc_chain and _show_t is not None:
                 _tl = recommend.plan_timeline_lines(
                     _wc_chain["cands"][_show_t]["plan"],
-                    first_week=(None if _show_t == planning_gw else _wc_first_week))
+                    first_week=(None if _show_t == planning_gw else
+                                (_wc_first_week + (_wc_chain.get("first_ft_after"),) if _wc_first_week else None)))
                 st.markdown(f"📅 **Plan with the Wildcard at GW{_show_t}** (free transfers only)")
                 st.code("\n".join(_tl), language=None)
             if _chip_tags:
@@ -4253,11 +4363,23 @@ with tab_transfers:
     _bb_play = bb_advisor and bb_advisor["verdict"].startswith("play_gw")
     _tc_play = tc_advisor and tc_advisor["verdict"].startswith("play_gw")
     _fh_play = fh_advisor and fh_advisor["verdict"].startswith("play_gw")
+    # Patch 112: ONE source for the chip weeks -- the Chip Plan's joint sequence (_final_chip_gw). The standalone
+    # advisors scan each chip alone and could name a different week (Free Hit GW9 here vs GW13 in the Chip Plan).
+    _adv_diff = []
+    if _final_chip_gw:
+        for _ck, _adv, _nm in (("bboost", bb_advisor, "Bench Boost"), ("3xc", tc_advisor, "Triple Captain"),
+                               ("freehit", fh_advisor, "Free Hit")):
+            _av = (_adv or {}).get("verdict", "") if _adv else ""
+            if _ck in _final_chip_gw and _av.startswith("play_gw") and int(_av.split("gw")[1]) != _final_chip_gw[_ck]:
+                _adv_diff.append(f"{_nm}: standalone scan GW{_av.split('gw')[1]}, Chip Plan GW{_final_chip_gw[_ck]}")
+        _bb_play, _tc_play, _fh_play = ("bboost" in _final_chip_gw, "3xc" in _final_chip_gw, "freehit" in _final_chip_gw)
     _wc_active = bool(wc_flag)
     if _wc_active or _bb_play or _tc_play or _fh_play:
         st.markdown('<div class="section-h">🎯 Team Recommendation — active signals, auto-built</div>',
                     unsafe_allow_html=True)
 
+        if _adv_diff:
+            st.caption("🔗 Chip weeks follow the Chip Plan (joint sequence). Standalone scans differ — " + " · ".join(_adv_diff))
         if _wc_active:
             wc_rebuild_gw = detect_gw_list[0] if detect_gw_list else planning_gw
             _wc_col = f"xpts_gw{wc_rebuild_gw}"
@@ -4266,10 +4388,37 @@ with tab_transfers:
                 _full_pool_now = _full_pool_now.drop_duplicates(subset=["code"], keep="first")
             wc_eval_auto = _wc_whatif_calc(
                 squad_df, pool_df, cfg, team_value, tuple(detect_gw_list or gw_list))
-            with st.expander(f"🃏 Wildcard rebuild — trigger active, shown for GW{wc_rebuild_gw} onward", expanded=False):
+            # Patch 112: the rebuild shown is the CHAIN's squad for the decision's Wildcard week (same data and
+            # 8-GW window the decision used), so the squad you see is the one the Chip Plan scored. HOLD -> the
+            # best-gain candidate is shown as a reference. No chain -> the old 'if played now' rebuild.
+            _rb_t, _rb_codes, _rb_ref = None, None, False
+            if _wc_chain and _wc_chain.get("cands"):
+                _rb_t = (_wc_decision or {}).get("gw")
+                if _rb_t not in _wc_chain["cands"]:
+                    _rb_t = max(_wc_chain["cands"], key=lambda t: _wc_chain["cands"][t]["gain"])
+                    _rb_ref = True
+                _rb_codes = _wc_chain["cands"][_rb_t].get("rebuild_codes")
+            if _rb_codes:
+                wc_rebuild_gw = int(_rb_t)
+                _wc_col = f"xpts_gw{wc_rebuild_gw}"
+                _rb_sq = _full_pool_now[_full_pool_now["code"].isin(_rb_codes)]
+                if len(_rb_sq) == 15 and _wc_col in _rb_sq.columns:
+                    wc_eval_auto = dict(wc_eval_auto)
+                    wc_eval_auto["feasible"] = True
+                    wc_eval_auto["rebuild_squad"] = _rb_sq
+            with st.expander(f"🃏 Wildcard rebuild — "
+                             + (f"best week GW{wc_rebuild_gw}" if _rb_codes and not _rb_ref else
+                                f"HOLD · reference GW{wc_rebuild_gw}" if _rb_codes else
+                                f"trigger active, shown for GW{wc_rebuild_gw} onward"), expanded=False):
                 if not wc_eval_auto["feasible"]:
                     st.info("Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
                 else:
+                    if _rb_codes:
+                        _cc = _wc_chain["cands"][_rb_t]
+                        st.caption(f"Same squad the Chip Plan scored for a Wildcard at GW{_rb_t} (built for GW{_rb_t}–"
+                                   f"GW{_rb_t + 7}, current data). Chain gain {_cc['gain_chain']:+.1f} xPts"
+                                   + (f" + chips {_cc['gain_chips']:+.1f}" if _cc.get("chips") else "")
+                                   + f" = {_cc['gain']:+.1f}.")
                     styled_wc = recommend.apply_style_to_wildcard_squad(
                         squad_df, wc_eval_auto["rebuild_squad"], _full_pool_now, style_name, cfg, _wc_col)
                     gap = wc_eval_auto["gap"]
@@ -4278,7 +4427,10 @@ with tab_transfers:
                     # requires for a decision; the shared gain_disclosure()
                     # formatter states that plainly plus horizon/variant/
                     # tier, instead of this caption's own ad hoc wording.
-                    st.caption(f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
+                    if _rb_codes:
+                        st.caption(f"Style profile **{style_name}** applied. Date remains your own call (Standing Rule #32).")
+                    else:
+                      st.caption(f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
                                f"{wc_eval_auto['hold_total']:.1f} xPts holding your current squad over this window "
                                f"({gap:+.1f} xPts) "
                                f"{chip_protocol.gain_disclosure('hold_squad', detect_gw_list or gw_list, cfg)}. "
@@ -4303,7 +4455,7 @@ with tab_transfers:
                                          .rename(columns=rn), hide_index=True, use_container_width=True)
 
         if _fh_play:
-            _fh_gw = int(fh_advisor["verdict"].split("gw")[1])
+            _fh_gw = _final_chip_gw["freehit"] if "freehit" in _final_chip_gw else int(fh_advisor["verdict"].split("gw")[1])
             _fh_col = f"xpts_gw{_fh_gw}"
             _fh_proj_auto = proj if _fh_col in proj.columns else _project(snap, hist_df, overrides, cfg, [_fh_gw], fixture_baselines)
             fh_res_auto = _fh_optimal_calc(cfg, _fh_proj_auto, team_value, _fh_gw)
@@ -4330,7 +4482,7 @@ with tab_transfers:
                                  .rename(columns=rn), hide_index=True, use_container_width=True)
 
         if _bb_play:
-            _bb_gw = int(bb_advisor["verdict"].split("gw")[1])
+            _bb_gw = _final_chip_gw["bboost"] if "bboost" in _final_chip_gw else int(bb_advisor["verdict"].split("gw")[1])
             _bb_col = f"xpts_gw{_bb_gw}"
             with st.expander(f"🛋️ Bench Boost — PLAY GW{_bb_gw}, full 15", expanded=False):
                 if _bb_col in squad_df_adv.columns:
@@ -4345,7 +4497,7 @@ with tab_transfers:
                                  .rename(columns=rn), hide_index=True, use_container_width=True)
 
         if _tc_play:
-            _tc_gw = int(tc_advisor["verdict"].split("gw")[1])
+            _tc_gw = _final_chip_gw["3xc"] if "3xc" in _final_chip_gw else int(tc_advisor["verdict"].split("gw")[1])
             _tc_col = f"xpts_gw{_tc_gw}"
             with st.expander(f"👑 Triple Captain — PLAY GW{_tc_gw}", expanded=False):
                 if _tc_col in starters_df_adv.columns and not starters_df_adv.empty:

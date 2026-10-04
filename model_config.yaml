@@ -3319,4 +3319,7 @@ chip_advisor_horizon:
 # this span for that one run; normal runs are unchanged.
 chip_extended_check:
   span_gws: 10        # Wildcard detection window in the extended run (Current..Current+9)
+  cap_use_bar: 0.25   # Patch 112: at the 5-FT cap, a free move with a real gain >= this is preferred to wasting the transfer (unvalidated)
+  include_chip_value: true  # Patch 112: Triple Captain / Bench Boost / Free Hit value counts in the Wildcard decision (manager instruction; DEVIATES from Standing Rule #31 -- pending model-chat approval; false = chain gain without chips)
+  value_tail_gws: 3   # Patch 112: GWs past the shown span used only to value late-week moves
   chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window

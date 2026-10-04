@@ -984,7 +984,8 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
                              pool_df: pd.DataFrame | None = None, free_transfers: int = 0,
                              valid_gws_by_type: dict[str, set[int]] | None = None,
                              fh_by_gw: dict | None = None,
-                             reachable_ceiling_by_gw: dict | None = None) -> dict:
+                             reachable_ceiling_by_gw: dict | None = None,
+                             force_wildcard_gw: int | None = None) -> dict:
     """Rule #49 (Chip Portfolio Scheduling): assigns the still-available
     chips to distinct gameweeks within `gw_list` to maximise their combined
     value, honoring the doc's dependencies:
@@ -1111,6 +1112,11 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
     wc_valid = _valid_for("wildcard")
     wc_choices = ([g for g in wc_by_gw.keys() if g in wc_valid] + [None]) \
         if "wildcard" in types_available else [None]
+    # Patch 112: `force_wildcard_gw` pins the Wildcard to a week chosen elsewhere (the chain comparison) so
+    # Bench Boost / Triple Captain / Free Hit are re-picked on THAT week's rebuild squad (Rule #49b post-Wildcard
+    # tables). Ignored when the week is not a valid scanned candidate. None = unchanged behaviour.
+    if force_wildcard_gw is not None and "wildcard" in types_available and force_wildcard_gw in wc_choices:
+        wc_choices = [force_wildcard_gw]
     other_types = [t for t in types_available if t != "wildcard"]
     other_valid = {t: _valid_for(t) for t in other_types}
 

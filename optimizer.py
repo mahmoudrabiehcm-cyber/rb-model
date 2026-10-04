@@ -1023,30 +1023,44 @@ def best_starting_xi(squad: pd.DataFrame, gw_col: str) -> dict:
     always uses that week's single-GW column, never a multi-week average.
 
     Patch 109 (performance, lossless): each position is sorted ONCE and every
-    formation takes a prefix (`.head(n)`) of that same sorted frame, instead
-    of re-sorting identical data 24 times. A prefix of one sort is exactly
-    what repeated sort + head returned, so selection, tie-breaking and totals
-    are unchanged (parity-tested in test_patch109)."""
+    formation takes a prefix of that sort, instead of re-sorting identical data
+    24 times. Patch 112 (performance, lossless): the sorts run on the single GW
+    column (one Series per position, same pandas sort => same tie order) and the
+    15-row XI frame is built once with a positional take, instead of filtering,
+    sorting and concatenating whole multi-column frames. Parity-tested against
+    the Patch 108 implementation (tied values, NaN, duplicate index labels,
+    pyarrow-backed floats)."""
     VALID_SHAPES = [  # (DEF, MID, FWD)
         (3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3),
     ]
     pos_arr = squad["position"].to_numpy()
-    gk = squad[pos_arr == "GK"].sort_values(gw_col, ascending=False).head(1)
-    def_all = squad[pos_arr == "DEF"].sort_values(gw_col, ascending=False)
-    mid_all = squad[pos_arr == "MID"].sort_values(gw_col, ascending=False)
-    fwd_all = squad[pos_arr == "FWD"].sort_values(gw_col, ascending=False)
-    gk_v = gk[gw_col].to_numpy()
-    def_v, mid_v, fwd_v = def_all[gw_col].to_numpy(), mid_all[gw_col].to_numpy(), fwd_all[gw_col].to_numpy()
+    s_all = squad[gw_col].reset_index(drop=True)
+
+    def _sorted(pos):
+        return s_all[pos_arr == pos].sort_values(ascending=False)
+
+    gk_s = _sorted("GK").head(1)
+    def_s, mid_s, fwd_s = _sorted("DEF"), _sorted("MID"), _sorted("FWD")
+    # numpy float64 columns: sum plain arrays (identical to Series.sum for numpy data, ~10x cheaper than
+    # building 8 Series). Other dtypes (e.g. pyarrow-backed floats sum differently in the last digit) keep
+    # the original Series-sum semantics.
+    fast = s_all.dtype == np.float64
+    if fast:
+        gk_v, def_v, mid_v, fwd_v = gk_s.to_numpy(), def_s.to_numpy(), mid_s.to_numpy(), fwd_s.to_numpy()
     best_shape, best_total = None, None
     for d, m, f in VALID_SHAPES:
-        if len(def_v) < d or len(mid_v) < m or len(fwd_v) < f:
+        if len(def_s) < d or len(mid_s) < m or len(fwd_s) < f:
             continue
-        # same element order as the concat [gk, defs, mids, fwds] -> identical float sum
-        total = pd.Series(np.concatenate([gk_v, def_v[:d], mid_v[:m], fwd_v[:f]])).sum()
+        if fast:
+            total = pd.Series(np.concatenate([gk_v, def_v[:d], mid_v[:m], fwd_v[:f]])).sum()
+        else:
+            total = pd.concat([gk_s, def_s.head(d), mid_s.head(m), fwd_s.head(f)]).sum()
         if best_total is None or total > best_total:
             best_shape, best_total = (d, m, f), total
     if best_shape is None:
         return None
     d, m, f = best_shape
-    xi = pd.concat([gk, def_all.head(d), mid_all.head(m), fwd_all.head(f)])
+    pos_idx = np.concatenate([gk_s.index.to_numpy(), def_s.index.to_numpy()[:d],
+                              mid_s.index.to_numpy()[:m], fwd_s.index.to_numpy()[:f]])
+    xi = squad.iloc[pos_idx]
     return {"xi": xi, "total": best_total, "shape": best_shape}
