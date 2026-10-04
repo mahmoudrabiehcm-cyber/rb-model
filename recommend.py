@@ -2680,11 +2680,12 @@ def season_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) -
 
 
 def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,
-                     fh_ref_score: float | None, types: tuple) -> dict:
+                     fh_ref_score: float | None, types: tuple, moe_fn=None) -> dict:
     """Patch 112 (manager: Triple Captain / Bench Boost / Free Hit must count in the Wildcard decision).
     Chip value for ONE squad path (`squads_by_gw` = the squad fielded each GW). DEVIATION from Standing Rule #31
     (captaincy is disclosure, never a scoring input) -- explicit manager instruction, flagged for the model chat.
       Bench Boost   = that week's bench xPts (best XI recomputed per week); best week not hosting the Wildcard/Free Hit.
+      Ties within the margin of error go to the LATEST week (Rule #34/#49 deferral).
       Triple Captain= the best-XI top scorer's xPts (the extra x1 on top of the captain doubling already counted),
                       best week not hosting the Wildcard/Free Hit/Bench Boost.
       Free Hit      = (fh_ref_score - squad's best-XI value) at `fh_gw`, floored at 0 (it reverts, so only the gap counts).
@@ -2705,19 +2706,26 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
                   round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0)
     out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None}
 
+    def _pick(cand):
+        """Rule #34/#49 tie-break: among weeks within the margin of error of the best, DEFER -- take the latest."""
+        best = max(cand.values())
+        tol = float(moe_fn(best)) if moe_fn is not None else 0.0
+        tied = [k for k, v in cand.items() if best - v <= tol + 1e-9]
+        return max(tied)
+
     def _gap(cand, g):
         rest = [v for k, v in cand.items() if k != g]
         return round(cand[g] - max(rest), 2) if rest else None
     if "bboost" in types:
         cand = {g: v[1] for g, v in per.items() if g not in blocked}
         if cand:
-            g = max(cand, key=lambda k: (cand[k], -k)); out["bb"] = (g, cand[g])
+            g = _pick(cand); out["bb"] = (g, cand[g])
             out["bb_by_gw"] = dict(cand); out["bb_gap"] = _gap(cand, g)
     if "3xc" in types:
         taken = blocked | ({out["bb"][0]} if out["bb"] else set())
         cand = {g: v[0] for g, v in per.items() if g not in taken}
         if cand:
-            g = max(cand, key=lambda k: (cand[k], -k)); out["tc"] = (g, cand[g])
+            g = _pick(cand); out["tc"] = (g, cand[g])
             out["tc_by_gw"] = dict(cand); out["tc_gap"] = _gap(cand, g)
     if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
         cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
