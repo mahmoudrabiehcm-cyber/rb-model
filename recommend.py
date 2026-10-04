@@ -2704,7 +2704,8 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         bench = sq[~sq["code"].isin(xi_codes)]
         per[g] = (round(float(pd.to_numeric(best["xi"][col], errors="coerce").max()), 2),
                   round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0)
-    out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None}
+    out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None,
+           "tc_best": None, "bb_best": None}
 
     def _pick(cand):
         """Rule #34/#49 tie-break: among weeks within the margin of error of the best, DEFER -- take the latest."""
@@ -2721,12 +2722,14 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         if cand:
             g = _pick(cand); out["bb"] = (g, cand[g])
             out["bb_by_gw"] = dict(cand); out["bb_gap"] = _gap(cand, g)
+            _b = max(cand, key=lambda k: (cand[k], -k)); out["bb_best"] = (_b, cand[_b])
     if "3xc" in types:
         taken = blocked | ({out["bb"][0]} if out["bb"] else set())
         cand = {g: v[0] for g, v in per.items() if g not in taken}
         if cand:
             g = _pick(cand); out["tc"] = (g, cand[g])
             out["tc_by_gw"] = dict(cand); out["tc_gap"] = _gap(cand, g)
+            _b = max(cand, key=lambda k: (cand[k], -k)); out["tc_best"] = (_b, cand[_b])
     if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
         cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
         out["fh"] = (fh_gw, round(max(0.0, float(fh_ref_score) - float(cur)), 2))
@@ -2749,6 +2752,10 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
         if not pick:
             continue
         gw, val = pick
+        if key in new and float(val) < float(floor):
+            changes[key] = (new[key].get("gw"), None)       # no real edge: hold the chip (Rule #34 -- play only above the margin)
+            del new[key]
+            continue
         if key in new or float(val) >= float(floor):
             old = new.get(key, {}).get("gw")
             e = dict(new.get(key, {}))
