@@ -611,6 +611,16 @@ def resolve_wildcard_extend_target(current_max_gw: int, auto_wildcard_gw: int | 
     return target
 
 
+def extend_reach_status(target_gw: int, reached_gw: int) -> tuple[bool, str]:
+    """Patch 106 (2026-10-04): compares the GW the extend button promised
+    against the GW the cross-check actually reached, so a shortfall is never
+    reported quietly as success. Returns (ok, warning_message)."""
+    if reached_gw >= target_gw:
+        return True, ""
+    return False, (f"Asked to reach GW{target_gw} but only reached GW{reached_gw} — GW{reached_gw + 1}-"
+                   f"GW{target_gw} had no projection data, so treat this as a partial check.")
+
+
 def build_wc_extend_note(chip_driven: bool, reached_target: bool, check_gws_last: int,
                           auto_wildcard_gw: int | None) -> str:
     """Patch 105 (2026-10-01, manager screenshot: "already clicked but i

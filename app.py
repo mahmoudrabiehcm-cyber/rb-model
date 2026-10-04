@@ -37,7 +37,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
+PATCH_VERSION = ("Patch 106 (2026-10-04, manager screenshot: button said \"reach GW15\" but the result said \"reached GW10\" — \"We need it to reach Current GW + 9\"): root cause confirmed in code — the shared projection only carried xpts columns through GW10, so the extended solves for GW11-15 were silently dropped by the `_check_gws` filter. Fixed by projecting the extension GWs when the button is clicked, and by comparing requested vs reached GW (recommend.extend_reach_status) so any shortfall shows as a warning instead of a quiet success. 6 new tests in test_patch106_extend_actually_reaches_target.py. Previously, Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
                   "red annotation \"i need a confirmation here after the run finishes that it's already done and "
                   "what is on the chips is the final\" + \"already clicked but i don't have a confirmation!!!!\"): "
                   "confirmed in code — the extended check's result (`_wc_check_note`) WAS already computed "
@@ -1990,8 +1990,16 @@ with st.spinner("Fetching live data and computing xPts..."):
     _compliant_window = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
     compliant_gw_list = list(range(planning_gw, planning_gw + _compliant_window))
 
+    # Patch 106 (2026-10-04, manager: button said "reach GW15", result said
+    # "reached GW10"): the extension GWs have to exist in `proj` or the
+    # cross-check's `_check_gws` filter silently drops them. When the extend
+    # button was clicked this run, project through the +8 cap now.
+    _extend_proj_gws = set()
+    if bool(st.session_state.get("wc_extend_run", False)):
+        _early_max = max([gw_list[-1]] + ([detect_gw_list[-1]] if detect_gw_list else []))
+        _extend_proj_gws = set(range(_early_max + 1, _early_max + 9))
     _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
-                        | set(compliant_gw_list) | {_tie_break_lookahead_gw})
+                        | set(compliant_gw_list) | {_tie_break_lookahead_gw} | _extend_proj_gws)
     proj = _project(snap, hist_df, overrides, cfg, _gw_union, fixture_baselines)
     picks = _picks(entry_id, squad_gw)
 
@@ -3807,7 +3815,11 @@ with tab_chips:
         # exactly the run this confirms.
         if _wc_extend_requested_flag:
             if _wc_extended_active:
-                st.success(f"✅ Extended cross-check complete — reached GW{_check_gws[-1]}.")
+                _reach_ok, _reach_msg = recommend.extend_reach_status(_wc_extend_target_gw, _check_gws[-1])
+                if _reach_ok:
+                    st.success(f"✅ Extended cross-check complete — reached GW{_check_gws[-1]}.")
+                else:
+                    st.warning(f"⚠️ Extended cross-check finished short. {_reach_msg}")
                 if _wc_check_note:
                     st.markdown(_wc_check_note)
             else:
