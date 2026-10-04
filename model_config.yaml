@@ -3318,4 +3318,5 @@ chip_advisor_horizon:
 # chip_advisor_horizon and chip_shape_test.detection_window_gws to at least
 # this span for that one run; normal runs are unchanged.
 chip_extended_check:
-  span_gws: 10
+  span_gws: 10        # Wildcard detection window in the extended run (Current..Current+9)
+  chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window

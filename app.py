@@ -38,7 +38,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 109 (2026-10-04): Extended check ran >6 minutes live. Measured: ~93% of the weekly-plan cost was pandas re-sorting inside optimizer.best_starting_xi and the bench-autosub loop (via recommend._position_tie_break), not the solver; both rewritten losslessly (parity-tested vs the Patch 108 code). UI: the extend button is now just \"Extended Check GW{n}\"; the intro/caption text and the calibration-log expander are removed (the log still records silently). "
+PATCH_VERSION = ("Patch 110 (2026-10-04, manager decisions after Patch 109): (1) ONE LINKED WILDCARD DECISION — the card, the top pill and the best-GW table now read the same object (recommend.wildcard_final_decision); verified cause of the old mismatch: the card badge came from the hit-inclusive \"transfers close the gap\" check, the table's Chips column from the joint sequence, and the \"Best Wildcard GW\" headline from the isolated Rule #48 window scan. (2) BRIDGE TEST — free transfers only (no hits), flagged players benched, squad vs a full-rebuild squad each GW: HOLD -> GWn while it stays at/above 94% (the document's 6% gap reused, UNVALIDATED), PLAY at the first GW that starts 2 consecutive weeks below it, PLAY NOW if that is the current GW. Prototype on SYNTHETIC squads only: compared against the reachable ceiling it could not tell a dead team from a healthy one (plan and ceiling share the same transfer budget); compared against a full rebuild it separated them. The 88%-style trigger number stays as a label (today). (3) Extended Check now reaches Wildcard Current+9 and BB/TC/FH Current+11 (button \"Extended Check GW{Current+11}\"). (4) Table: Wildcard value column renamed \"if played alone\"; Rating % column replaced by the bridge rating; Wildcard week shown only at the decision GW. "
+                  "Patch 109 (2026-10-04): Extended check ran >6 minutes live. Measured: ~93% of the weekly-plan cost was pandas re-sorting inside optimizer.best_starting_xi and the bench-autosub loop (via recommend._position_tie_break), not the solver; both rewritten losslessly (parity-tested vs the Patch 108 code). UI: the extend button is now just \"Extended Check GW{n}\"; the intro/caption text and the calibration-log expander are removed (the log still records silently). "
                   "Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
                   "Patch 107 (2026-10-04, manager decisions after discussion: button must be dynamic \"Current GW + 9\"; the extended run must confirm the best GW between Current and Current+9 and re-evaluate ALL chips, not only the Wildcard text; performance must be optimized): (1) PERFORMANCE — profiled (cProfile) and found ~93% of every optimizer.solve_squad() call was Python-side MILP construction (a pandas .loc lookup per player per constraint), not CBC; solve_squad() and solve_xi_first_squad() now read each column once into lists. Lossless: golden results captured from the OLD code (26 solves) match exactly (golden_solver_parity.json + test). Sandbox timing, chip stages only: 5-GW window 12.8s -> 3.1s, 10-GW window 23.4s -> 6.2s; Free Hit solver 31s -> 2.9s for 8 calls; full test suite ~55s -> ~28s. Threading was tested and gave no gain, so not used. NOT live-measured. (2) EXTENDED MODE — clicking the button now re-runs the whole Chip Plan over Current..Current+9 (chip advisor window and Wildcard detection window widened to chip_extended_check.span_gws=10; 3 trailing GWs projected so late Wildcard candidates get a full 4-GW window instead of a truncated 1-3 GW one), so all four cards update; any card that moves versus your previous normal run gets an \"updated by extended check (was GWx)\" tag (no tag, and a note, if there is no earlier normal run in the session); a per-GW table and verdict name the best Wildcard GW in the span. Button label is dynamic (recommend.extended_button_label). Superseded tests from Patches 102/104/105 updated in place. 36 new tests; full suite 215 passed. Previously, "
                   "Patch 106 (2026-10-04, manager screenshot: button said \"reach GW15\" but the result said \"reached GW10\" — \"We need it to reach Current GW + 9\"): root cause confirmed in code — the shared projection only carried xpts columns through GW10, so the extended solves for GW11-15 were silently dropped by the `_check_gws` filter. Fixed by projecting the extension GWs when the button is clicked, and by comparing requested vs reached GW (recommend.extend_reach_status) so any shortfall shows as a warning instead of a quiet success. 6 new tests in test_patch106_extend_actually_reaches_target.py. Previously, Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
@@ -1673,6 +1674,50 @@ def _extended_wc_cross_check_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame,
     return {"weekly_plan": ext_plan.get("weekly_plan") or [], "reachable_by_gw": ext_reachable_by_gw}
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def _wc_bridge_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, shape_proj: pd.DataFrame, cfg: dict,
+                    style_name: str, free_transfers: int, bank: float, planning_gw: int, bridge_gws: tuple,
+                    meaningful_bar: float, bb_play_gw: int | None, disrupted_codes_items: tuple,
+                    team_value: float):
+    """Patch 110 (2026-10-04): the Wildcard BRIDGE TEST. Free transfers only (a
+    hit_stance="No hits" chained plan over `bridge_gws`; flagged players are
+    already near-zero in the projections so they sit on the bench), then each
+    GW's Rating % of the squad you would field vs a full-rebuild ("dream")
+    squad optimised over the same window. Prototype on synthetic squads
+    separated a dead team from bench-coverable ones; the 94% line is the
+    document's 6% rule, NOT separately validated on real data.
+    Returns {gw: rating_pct}, or None if any piece cannot be computed."""
+    gws = list(bridge_gws)
+    cols = [f"xpts_gw{g}" for g in gws]
+    if not gws or any(c not in shape_proj.columns for c in cols) or any(c not in squad_df.columns for c in cols):
+        return None
+    disrupted_codes = set(disrupted_codes_items) if disrupted_codes_items else None
+    plan = recommend.plan_transfer_schedule(
+        squad_df, pool_df, cfg, style_name, free_transfers, bank, planning_gw, gws, meaningful_bar, None,
+        bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes, hit_stance="No hits", chip_schedule=None)
+    after = recommend.build_squad_after_by_gw(squad_df, plan.get("weekly_plan") or [], shape_proj)
+    dream_pool = shape_proj.copy()
+    dream_pool["_bridge_obj"] = dream_pool[cols].sum(axis=1)
+    dream = opt.solve_squad(dream_pool, cfg, budget=max(float(team_value), float(cfg["squad_rules"]["budget"])),
+                             objective_col="_bridge_obj", label="bridge_dream")
+    if dream is None or dream.get("squad") is None:
+        return None
+    dsq = dream["squad"]
+    if not isinstance(dsq, pd.DataFrame):
+        dsq = dream_pool[dream_pool["code"].isin([p["code"] for p in dsq])]
+    out = {}
+    for g in gws:
+        applicable = [k for k in after if k is not None and k <= g]
+        sa = after[max(applicable)] if applicable else squad_df
+        col = f"xpts_gw{g}"
+        sv = opt.rating_gw_value(sa, col, cfg)["total_realized"]
+        rv = opt.rating_gw_value(dsq, col, cfg)["total_realized"]
+        rp = eng.team_rating_pct(sv, rv, "")["rating_pct"]
+        if rp is not None:
+            out[g] = rp
+    return out or None
+
+
 # ---------------------------------------------------------------------------
 # Gate screen — team ID first, everything else unlocks after.
 # ---------------------------------------------------------------------------
@@ -1952,6 +1997,8 @@ with st.spinner("Fetching live data and computing xPts..."):
     # exactly the configured windows.
     _extended_mode = bool(st.session_state.get("wc_extend_run", False))
     _ext_span = int(cfg.get("chip_extended_check", {}).get("span_gws", 10))
+    # Patch 110: BB/TC/FH windows in the extended run reach Current+11 (>=4 GWs past the normal window).
+    _chip_span = int(cfg.get("chip_extended_check", {}).get("chip_span_gws", 12))
     _detect_window_size_base = cfg.get("chip_shape_test", {}).get("detection_window_gws", 4)
     _detect_window_size = max(_detect_window_size_base, _ext_span) if _extended_mode else _detect_window_size_base
     _detect_candidate_gws = list(range(planning_gw, planning_gw + _detect_window_size))
@@ -1969,7 +2016,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     chip_adv_gw_list = None
     if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names):
         chip_adv_window = chip_protocol.chip_advisor_gw_window(
-            planning_gw, snap.fixtures, all_team_ids, cfg, min_gws=_ext_span if _extended_mode else None)
+            planning_gw, snap.fixtures, all_team_ids, cfg, min_gws=_chip_span if _extended_mode else None)
         chip_adv_gw_list = chip_adv_window["gw_list"]
 
     # Patch 44 (2026-09-15, manager report: Damsgaard-vs-Tavernier tie-break
@@ -2789,6 +2836,7 @@ _detect_gw_list_base = detect_gw_list[:_detect_window_size_base] if detect_gw_li
 _wc_check_window = recommend.resolve_wildcard_check_gw_window(transfer_gw_list, _detect_gw_list_base)
 _wc_current_max_gw = _wc_check_window[-1] if _wc_check_window else planning_gw
 _wc_extend_target_gw = recommend.extended_window_target(planning_gw, _ext_span)
+_chip_target_gw = recommend.extended_chip_target(planning_gw, _chip_span)  # Patch 110: furthest GW the extended check reaches
 _wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
 _wc_extend_info = None
 _wc_extended_active = False
@@ -3013,6 +3061,43 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             _wc_check_headline = (
                 "Wildcard not needed yet — your transfers close the gap" if _closes else
                 "Wildcard looks warranted — your transfers don't close the gap")
+
+# Patch 110 (2026-10-04): the Wildcard BRIDGE TEST + the single linked decision.
+# Runs only when the 6% trigger is active (the only time it is needed), so
+# healthy-team runs pay nothing extra. The decision object below is the ONLY
+# source for the Wildcard card, the top pill and the best-GW table.
+_wc_bridge = None
+_wc_bridge_ratings = None
+_wc_decision = None
+_wc_decision_seq = ((chip_portfolio or {}).get("detail", {}) or {}).get("wildcard") if wc_flag else None
+if wc_flag and not squad_df.empty and shape_proj is not None:
+    try:
+        _bridge_base_end = planning_gw + max(1, int(_detect_window_size_base)) - 1
+        _bridge_end = _wc_decision_seq["gw"] if _wc_decision_seq else _bridge_base_end
+        _bridge_end = min(max(_bridge_end, planning_gw), planning_gw + _ext_span - 1)
+        _bridge_gws = tuple(g for g in range(planning_gw, _bridge_end + 1)
+                            if f"xpts_gw{g}" in shape_proj.columns and f"xpts_gw{g}" in squad_df.columns)
+        if _bridge_gws:
+            _wc_bridge_ratings = _wc_bridge_calc(
+                squad_df, pool_df, shape_proj, cfg, style_name, ft["free_transfers"], bank, planning_gw,
+                _bridge_gws, meaningful_bar_override, _bb_play_gw,
+                tuple(sorted(_disrupted_codes)) if _disrupted_codes else (), float(team_value))
+            _wc_bridge = recommend.bridge_verdict(_wc_bridge_ratings, planning_gw,
+                                                  threshold=100.0 - float(cfg.get("wildcard_trigger", {}).get("gap_pct_threshold", 6.0)))
+    except Exception:
+        _wc_bridge = None
+if wc_flag and wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
+    _wc_decision = recommend.wildcard_final_decision(
+        True, _wc_bridge, bool(_wc_decision_seq), (_wc_decision_seq or {}).get("gw"),
+        (_wc_decision_seq or {}).get("value"), wc_trigger["avg_gap_pct"], planning_gw,
+        today_pct=wc_trigger.get("avg_rating_pct"))
+if _wc_decision is not None:
+    # the top pill now states the same decision as the card (replaces the
+    # old "transfers close the gap" headline, which used a hit-inclusive plan).
+    _wc_check_headline = _wc_decision["pill"]
+    _wc_check_note = ((_wc_decision["pill"] + ". The decision uses the free-transfers-only bridge test. "
+                       + ("Older hit-inclusive plan cross-check, for reference: " + _wc_check_note) if _wc_check_note else "")
+                      or _wc_decision["pill"])
 
 # ---------------------------------------------------------------------------
 # Patch 66 — top-tab section navigation, matching the project's 5 standing
@@ -3778,21 +3863,17 @@ with tab_chips:
         # DECISION (PLAY GWn / MONITOR / HOLD) and the net xPts gain instead
         # of a bare alarm percentage. Falls back to the old card when no gap
         # figure exists.
-        _wc_verdict = None
-        if wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
-            _wc_verdict = recommend.wildcard_verdict(
-                True, seq_scheduled=(_wc_seq["scheduled"] if _wc_seq is not None else None),
-                seq_gw=(_wc_seq["gw"] if _wc_seq is not None else None),
-                seq_value=(_wc_seq["value"] if _wc_seq is not None else None),
-                closes=(_closes if _wc_check_note else None), gap_pct=wc_trigger["avg_gap_pct"])
+        # Patch 110: the card reads the SAME decision object as the pill and the table.
+        _wc_verdict = _wc_decision
         if _wc_verdict is not None:
             _wc_tag = f" · {_chip_tags['wildcard']}" if "wildcard" in _chip_tags else ""
             wc_card = _signal_card(
                 "Wildcard", _wc_verdict["badge"], _wc_verdict["badge_cls"], _wc_verdict["stat"],
                 _wc_verdict["sub"] + _wc_tag,
-                f"Verdict rules (no new thresholds): MONITOR when your recommended transfers already close the "
-                f"gap; PLAY GWn when they don't and the Rule #48/#49 sequence schedules the chip; HOLD when the "
-                f"sequence finds no positive slot. The 6% trigger (Standing Rule #45) is unchanged. " + wc_card_tooltip,
+                f"Patch 110 bridge test: free transfers only (no hits), flagged players benched, squad compared "
+                f"with a full-rebuild squad each GW. HOLD -> GWn while the squad stays at/above 94% (the 6% gap "
+                f"rule reused, unvalidated) until the sequence's best GW; PLAY GWn at the first GW that starts "
+                f"2 weeks in a row below it. The 6% trigger (Standing Rule #45) is unchanged. " + wc_card_tooltip,
                 _wc_verdict["card_cls"], note=_wc_verdict["note"], note_cls=_wc_verdict["note_cls"])
         else:
             wc_card = _signal_card("Wildcard", "TRIGGER ACTIVE", "active", wc_stat,
@@ -3878,7 +3959,7 @@ with tab_chips:
     # copy of the same condition to drift out of sync.
     with st.container(border=True):
         _span_n = _ext_span - 1
-        st.button(recommend.extended_button_label(planning_gw, _wc_extend_target_gw, _ext_span),
+        st.button(recommend.extended_button_label(planning_gw, _chip_target_gw, _chip_span),
                   key="wc_extend_run", type="primary")
         # Patch 105/107: explicit confirmation right where the button is.
         if _wc_extend_requested_flag:
@@ -3886,7 +3967,7 @@ with tab_chips:
                 # Patch 108: no Wildcard cross-check to run for this team
                 # (e.g. Wildcard already used) -- the chips themselves were
                 # still re-evaluated over the wider window.
-                st.success(f"✅ Done — all chips re-evaluated over GW{planning_gw}–GW{_wc_extend_target_gw}.")
+                st.success(f"✅ Done — all chips re-evaluated over GW{planning_gw}–GW{_chip_target_gw}.")
             elif _wc_extended_active:
                 _reach_ok, _reach_msg = recommend.extend_reach_status(_wc_extend_target_gw, _check_gws[-1])
                 if _reach_ok:
@@ -3897,35 +3978,38 @@ with tab_chips:
                 st.warning("The transfer-plan cross-check didn't complete (a solve failed) — the chip cards are "
                            "still re-evaluated over the wider window.")
             # Patch 107/108: best-GW answer + what changed, visual first.
-            _span_gws = list(range(planning_gw, _wc_extend_target_gw + 1))
+            _span_gws = list(range(planning_gw, _chip_target_gw + 1))
             _wc_in_play = "wildcard" in _available_chip_types
-            _chips_by_gw = {}
-            for _ck, _cinfo in (_seq_detail or {}).items():
-                _chips_by_gw.setdefault(_cinfo["gw"], []).append(chip_protocol.CHIP_LABELS.get(_ck, _ck))
+            # Patch 110: ONE source -- the Wildcard week is the decision's GW (same object as the card
+            # and the pill); BB/TC/FH come from the joint sequence.
+            _seq_gws_only = {k: v for k, v in (_seq_detail or {}).items()}
+            _chips_by_gw, _chip_collisions = recommend.final_chips_by_gw(
+                _seq_gws_only, chip_protocol.CHIP_LABELS, _wc_decision, _wc_in_play)
             _best_tbl = recommend.build_best_gw_table(
                 planning_gw, _span_gws, ((wc_window_scan or {}).get("by_gw") if _wc_in_play else None),
-                _rating_by_gw, _chips_by_gw)
-            if _wc_in_play and _best_tbl["best_wc_gw"] is not None:
-                st.markdown(f"🏆 **{_best_tbl['verdict']}**")
-            elif _chips_by_gw:
-                st.markdown("🏆 **Chip plan: " + " · ".join(
-                    f"{', '.join(v)} GW{g}" for g, v in sorted(_chips_by_gw.items())) + "**")
+                (_wc_bridge_ratings or {}), {g: v for g, v in _chips_by_gw.items()})
+            st.markdown("🏆 **" + recommend.chip_plan_headline(_chips_by_gw, _wc_decision) + "**")
+            for _cn in _chip_collisions:
+                st.warning(_cn)
             _rows = []
             for r in _best_tbl["rows"]:
                 row = {"GW": f"GW{r['gw']}", "Chips": r["chips"] or "—"}
                 if _wc_in_play:
-                    row["Wildcard value (xPts)"] = r["wc_gap"]
+                    row["Wildcard value if played alone (xPts)"] = r["wc_gap"]
                 if r["rating_pct"] is not None:
-                    row["Rating %"] = r["rating_pct"]
+                    row["Squad vs dream squad %"] = r["rating_pct"]
                 _rows.append(row)
             _tbl_df = pd.DataFrame(_rows)
             _cfgs = {}
-            if "Wildcard value (xPts)" in _tbl_df.columns and _tbl_df["Wildcard value (xPts)"].notna().any():
-                _cfgs["Wildcard value (xPts)"] = st.column_config.ProgressColumn(
-                    "Wildcard value (xPts)", format="%.1f", min_value=0.0,
-                    max_value=float(max(1.0, _tbl_df["Wildcard value (xPts)"].max())))
-            if "Rating %" in _tbl_df.columns:
-                _cfgs["Rating %"] = st.column_config.NumberColumn("Rating %", format="%.1f%%")
+            _wcv = "Wildcard value if played alone (xPts)"
+            if _wcv in _tbl_df.columns and _tbl_df[_wcv].notna().any():
+                _cfgs[_wcv] = st.column_config.ProgressColumn(
+                    _wcv, format="%.1f", min_value=0.0, max_value=float(max(1.0, _tbl_df[_wcv].max())))
+            if "Squad vs dream squad %" in _tbl_df.columns:
+                _cfgs["Squad vs dream squad %"] = st.column_config.NumberColumn(
+                    "Squad vs dream squad %", format="%.1f%%",
+                    help="Free transfers only, no hits, flagged players benched, vs a full-rebuild squad. "
+                         "Below 94% for 2 weeks in a row = the Wildcard bridge breaks.")
             st.dataframe(_tbl_df, hide_index=True, use_container_width=True, column_config=_cfgs)
             if _chip_tags:
                 st.markdown("🔁 **Moved vs your last normal run:** " + " · ".join(

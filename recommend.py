@@ -647,6 +647,128 @@ def wildcard_verdict(trigger_active: bool, seq_scheduled, seq_gw, seq_value, clo
             "note": None, "note_cls": ""}
 
 
+def bridge_verdict(ratings: dict | None, planning_gw: int, threshold: float = 94.0,
+                    consecutive: int = 2) -> dict | None:
+    """Patch 110 (2026-10-04, manager: "can the free transfers + benching carry
+    the team to the best chip GW?"). `ratings` = {gw: Rating %} of the squad you
+    would field using FREE TRANSFERS ONLY (no hits, flagged players benched)
+    against a full-rebuild ("dream") squad for that GW. The bridge BREAKS at the
+    first GW that starts `consecutive` weeks in a row below `threshold` (a single
+    bad week is a blip, not a dead team). The 94% line is the document's 6% trigger
+    gap (Standing Rule #45), reused -- NOT separately validated.
+    Returns None when there are no ratings."""
+    clean = {int(g): float(r) for g, r in (ratings or {}).items() if r is not None}
+    if not clean:
+        return None
+    gws = sorted(clean)
+    need = min(max(1, consecutive), len(gws))
+    break_gw = None
+    for i in range(len(gws) - need + 1):
+        if all(clean[g] < threshold for g in gws[i:i + need]):
+            break_gw = gws[i]
+            break
+    min_gw = min(gws, key=lambda g: clean[g])
+    return {"holds": break_gw is None, "break_gw": break_gw, "min_rating": clean[min_gw], "min_gw": min_gw,
+            "threshold": threshold, "consecutive": need, "ratings": clean, "planning_gw": planning_gw}
+
+
+def wildcard_final_decision(trigger_active: bool, bridge: dict | None, seq_scheduled, seq_gw, seq_value,
+                             gap_pct, planning_gw: int, today_pct: float | None = None) -> dict | None:
+    """Patch 110: the ONE Wildcard decision that the card, the top pill and the
+    best-GW table all read. The 6% trigger (Rule #45) still decides whether this
+    runs; the bridge decides WHEN:
+
+      bridge breaks at GW b      -> PLAY NOW (b == current GW) / PLAY GWb
+      bridge holds + sequence GW -> HOLD -> GWn (play the sequence's best week)
+      bridge holds, no slot      -> HOLD (no week)
+      no bridge available        -> unverified: shows the sequence's week, if any
+
+    `gw` is the single Wildcard week the table shows (None = none)."""
+    if not trigger_active:
+        return None
+    today_txt = f"today {today_pct:.0f}%" if today_pct is not None else None
+    gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
+    thr = bridge["threshold"] if bridge else 94.0
+
+    def _pack(kind, gw, badge, cls, card_cls, stat, sub, pill, note=None, note_cls=""):
+        return {"kind": kind, "gw": gw, "badge": badge, "badge_cls": cls, "card_cls": card_cls, "stat": stat,
+                "sub": sub, "pill": pill, "note": note, "note_cls": note_cls}
+
+    if bridge is None:
+        if seq_scheduled and seq_gw is not None:
+            return _pack("unverified", seq_gw, f"SEQUENCE GW{seq_gw}", "active", "is-active",
+                         f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap",
+                         " · ".join(x for x in [today_txt, "bridge check unavailable"] if x),
+                         f"Wildcard: sequence says GW{seq_gw} (bridge unavailable)")
+        return _pack("unverified", None, "TRIGGER ACTIVE", "active", "is-active", f"{gap_txt} gap",
+                     " · ".join(x for x in [today_txt, "bridge check unavailable"] if x),
+                     "Wildcard: trigger active (bridge unavailable)")
+    if not bridge["holds"]:
+        b = bridge["break_gw"]
+        low = bridge["ratings"].get(b)
+        sub = " · ".join(x for x in [today_txt, f"free transfers can't hold {thr:.0f}%"] if x)
+        if b == planning_gw:
+            return _pack("play_now", b, "PLAY NOW", "play", "is-play", f"{low:.0f}% vs dream", sub,
+                         f"Wildcard: PLAY NOW — free transfers can't hold {thr:.0f}%",
+                         "Below the line this week and next", "warn")
+        return _pack("play", b, f"PLAY GW{b}", "play", "is-play", f"{low:.0f}% at GW{b}", sub,
+                     f"Wildcard: PLAY GW{b} — free transfers stop holding {thr:.0f}%",
+                     "Bridge breaks here", "warn")
+    if seq_scheduled and seq_gw is not None:
+        sub = " · ".join(x for x in [today_txt, f"free transfers keep you ≥{thr:.0f}% until then"] if x)
+        return _pack("hold_until", seq_gw, f"HOLD → GW{seq_gw}", "hold", "",
+                     f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap", sub,
+                     f"Wildcard: HOLD → GW{seq_gw} — free transfers cover until then",
+                     "Free transfers carry the team", "good")
+    sub = " · ".join(x for x in [today_txt, "no positive Wildcard slot found"] if x)
+    return _pack("hold", None, "HOLD", "hold", "", f"{gap_txt} gap", sub,
+                 "Wildcard: HOLD — no positive slot", None, "")
+
+
+def final_chips_by_gw(seq_gws: dict | None, labels: dict, wc_decision: dict | None,
+                       wc_in_play: bool) -> tuple[dict, list[str]]:
+    """Patch 110: {gw: [chip labels]} for the table/headline from ONE source. Bench
+    Boost / Triple Captain / Free Hit come from the joint sequence; the Wildcard
+    appears ONLY at the decision's GW (none when HOLD without a slot). When the
+    trigger is not active, a sequence Wildcard is labelled "(value only)".
+    Returns (by_gw, collision_notes)."""
+    seq_gws = seq_gws or {}
+    by_gw: dict[int, list[str]] = {}
+    for ck, info in seq_gws.items():
+        if ck == "wildcard":
+            continue
+        by_gw.setdefault(info["gw"], []).append(labels.get(ck, ck))
+    notes: list[str] = []
+    if wc_in_play:
+        wc_gw, wc_label = None, "Wildcard"
+        if wc_decision is not None:
+            wc_gw = wc_decision.get("gw")
+        elif seq_gws.get("wildcard"):
+            wc_gw, wc_label = seq_gws["wildcard"]["gw"], "Wildcard (value only)"
+        if wc_gw is not None:
+            if wc_gw in by_gw:
+                notes.append(f"Wildcard and {', '.join(by_gw[wc_gw])} both land on GW{wc_gw} — only one chip per GW.")
+            by_gw.setdefault(wc_gw, []).append(wc_label)
+    return by_gw, notes
+
+
+def chip_plan_headline(chips_by_gw: dict, wc_decision: dict | None) -> str:
+    """Patch 110: one line, GW order, same data as the table."""
+    parts = [f"{', '.join(v)} GW{g}" for g, v in sorted(chips_by_gw.items())]
+    head = ""
+    if wc_decision is not None and wc_decision.get("gw") is None:
+        head = "Wildcard HOLD (no week) · "
+    elif wc_decision is not None and wc_decision.get("kind") == "hold_until":
+        head = "Wildcard on HOLD until its week · "
+    return "Chip plan: " + head + " · ".join(parts) if parts else "Chip plan: " + (head.rstrip(" ·") or "no chip scheduled")
+
+
+def extended_chip_target(planning_gw: int, chip_span: int = 12) -> int:
+    """Patch 110: the furthest GW the Extended Check reaches for the BB/TC/FH
+    windows (Current + chip_span - 1 = Current + 11)."""
+    return int(planning_gw) + int(chip_span) - 1
+
+
 _CAL_COLUMNS = ["logged_at", "team_id", "team_name", "planning_gw", "style", "gap_pct", "rating_pct",
                 "cumulative_gap", "fired", "verdict", "wc_value_xpts", "wc_gw", "transfers_close_gap", "patch"]
 
