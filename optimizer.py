@@ -847,8 +847,49 @@ def _bench_autosub_total(squad: pd.DataFrame, xi: pd.DataFrame, gw_col: str, xm_
     return total
 
 
+_RGV_MEMO: dict = {}
+_RGV_MEMO_MAX = 200_000
+_NAN_KEY = -1.0e18
+
+
+def _rgv_key(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str, bench_weight_scale: float):
+    """Patch 111 (performance, lossless): everything realized_gw_value() reads, as a hashable key --
+    row order, index labels (the bench step filters by label), position, the GW points, `xm`, the
+    scale and the two config values bench_autosub_prob() uses. NaN is mapped to a sentinel because
+    NaN != NaN would defeat dict lookups."""
+    tcfg = cfg.get("transfer", {}) if cfg else {}
+    vals = np.nan_to_num(squad[gw_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
+    xm = (np.nan_to_num(squad[xm_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
+          if xm_col in squad.columns else None)
+    return (gw_col, xm_col, float(bench_weight_scale), float(tcfg.get("bench_gk_autosub_prob", 0.05)),
+            tuple(tcfg.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15])), tuple(squad.index.tolist()),
+            tuple(squad["position"].tolist()), tuple(vals.tolist()), None if xm is None else tuple(xm.tolist()))
+
+
 def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
                        bench_weight_scale: float = 1.0) -> dict:
+    """Memoised wrapper (Patch 111): the transfer planner and the Wildcard chain comparison re-score the
+    exact same squad/GW thousands of times (measured: 89% of calls were exact repeats). The result is a
+    pure function of the key built by _rgv_key(), so caching is lossless (parity-tested against the
+    Patch 108 implementation, including tied values, NaNs and duplicate index labels)."""
+    if squad is None or squad.empty or gw_col not in squad.columns:
+        return {"xi_total": 0.0, "bench_total": 0.0, "total_realized": 0.0}
+    try:
+        key = _rgv_key(squad, gw_col, cfg, xm_col, bench_weight_scale)
+    except Exception:
+        return _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale)
+    hit = _RGV_MEMO.get(key)
+    if hit is not None:
+        return dict(hit)
+    res = _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale)
+    if len(_RGV_MEMO) >= _RGV_MEMO_MAX:
+        _RGV_MEMO.clear()
+    _RGV_MEMO[key] = dict(res)
+    return res
+
+
+def _realized_gw_value_uncached(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
+                                 bench_weight_scale: float = 1.0) -> dict:
     """Standing Rule #12 (Bench Value Rule): "a bench player's value in any
     comparison is P(autosub triggers) x their points in that scenario, never
     their full 'if they started every week' xPts — and this must actually be

@@ -505,6 +505,13 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
                                                  bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
         ext_scores[code] = round(ext_bd["total"] - ext_baseline - hit_cost, 2)
     winner_code = max(ext_scores, key=lambda c: ext_scores[c])
+    # Patch 111: the model's own pick may sit OUTSIDE the tied set (others beat it by more than the margin
+    # while tied with each other) -- its extended score is still needed for the "switched" message below.
+    # The winner is still chosen among the tied candidates only (unchanged behaviour).
+    if in_code not in ext_scores:
+        _ib = opt.realized_horizon_breakdown(scored[in_code]["squad"], extended_gw_list, cfg,
+                                              bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+        ext_scores[in_code] = round(_ib["total"] - ext_baseline - hit_cost, 2)
 
     if winner_code == in_code:
         return chosen, [f"GW{current_gw}: Tie-break: {len(tied_codes)} candidates were statistically tied at this "
@@ -767,6 +774,97 @@ def extended_chip_target(planning_gw: int, chip_span: int = 12) -> int:
     """Patch 110: the furthest GW the Extended Check reaches for the BB/TC/FH
     windows (Current + chip_span - 1 = Current + 11)."""
     return int(planning_gw) + int(chip_span) - 1
+
+
+def chain_candidate_gws(wc_by_gw: dict | None, planning_gw: int, eval_gws: list, seq_gw: int | None = None,
+                         max_n: int = 4) -> list[int]:
+    """Patch 111: the Wildcard weeks worth a full chained plan (each costs one plan + one rebuild
+    solve). Always the current GW and the joint sequence's GW (when inside `eval_gws`), plus the
+    top Rule #48 window-value weeks up to `max_n` extra. Sorted ascending."""
+    ev = set(eval_gws or [])
+    cands: set[int] = set()
+    if planning_gw in ev:
+        cands.add(planning_gw)
+    if seq_gw is not None and seq_gw in ev:
+        cands.add(seq_gw)
+    scored = [(v.get("gap"), g) for g, v in (wc_by_gw or {}).items()
+              if g in ev and isinstance(v, dict) and v.get("gap") is not None]
+    for _, g in sorted(scored, key=lambda x: (-x[0], x[1]))[:max_n]:
+        cands.add(g)
+    return sorted(cands)
+
+
+def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_gw: int, margin: float = 2.0,
+                             floor: float = 2.0, today_pct: float | None = None, gap_pct: float | None = None,
+                             seq_gw: int | None = None, seq_value: float | None = None) -> dict | None:
+    """Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path
+    over the whole checked span). `gains` = {candidate GW: total xPts gain of playing the Wildcard at
+    that GW vs the no-chip chained plan, summed over the whole span (free transfers only, no hits)}.
+
+      best gain < floor                     -> HOLD, no week (the chip adds too little)
+      best week == current GW               -> PLAY NOW
+      best week later                       -> HOLD -> GWn (waiting beats playing now)
+
+    Ties: the EARLIEST week within `margin` xPts of the best wins (the margin-of-error floor, 2.0 -
+    same band the transfer planner uses); the 2.0 `floor` is the materiality bar. Both are borrowed
+    thresholds, not validated. The 6% trigger (Rule #45) still decides whether this runs.
+    Replaces the Patch 110 94% bridge rule. No gains available -> "unverified" (shows the sequence's
+    own week, if any)."""
+    if not trigger_active:
+        return None
+    today_txt = f"today {today_pct:.0f}%" if today_pct is not None else None
+    gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
+
+    def _pack(kind, gw, badge, cls, card_cls, stat, sub, pill, note=None, note_cls="", gains_=None, best=None):
+        return {"kind": kind, "gw": gw, "badge": badge, "badge_cls": cls, "card_cls": card_cls, "stat": stat,
+                "sub": sub, "pill": pill, "note": note, "note_cls": note_cls,
+                "gains": dict(gains_ or {}), "best_gain": best}
+
+    if not gains:
+        sub = " · ".join(x for x in [today_txt, "chain comparison unavailable"] if x)
+        if seq_gw is not None:
+            return _pack("unverified", seq_gw, f"SEQUENCE GW{seq_gw}", "active", "is-active",
+                         f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap", sub,
+                         f"Wildcard: sequence says GW{seq_gw} (chain comparison unavailable)")
+        return _pack("unverified", None, "TRIGGER ACTIVE", "active", "is-active", f"{gap_txt} gap", sub,
+                     "Wildcard: trigger active (chain comparison unavailable)")
+    best = max(gains.values())
+    if best < floor:
+        sub = " · ".join(x for x in [today_txt, f"adds only {best:+.1f} xPts over the span"] if x)
+        return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
+                     f"Wildcard: HOLD — adds only {best:+.1f} xPts over the span", None, "", gains, best)
+    best_gw = min(g for g, v in gains.items() if v >= best - margin)
+    gain = gains[best_gw]
+    if best_gw == planning_gw:
+        sub = " · ".join(x for x in [today_txt, "best week in the span"] if x)
+        return _pack("play_now", best_gw, "PLAY NOW", "play", "is-play", f"{gain:+.1f} xPts", sub,
+                     f"Wildcard: PLAY NOW — {gain:+.1f} xPts over the span",
+                     "Best week is this one", "warn", gains, gain)
+    now = gains.get(planning_gw)
+    cmp_txt = f"{gain:+.1f} vs {now:+.1f} now" if now is not None else f"{gain:+.1f} xPts"
+    sub = " · ".join(x for x in [today_txt, f"waiting beats playing now ({cmp_txt})"] if x)
+    return _pack("hold_until", best_gw, f"HOLD → GW{best_gw}", "hold", "", f"{gain:+.1f} xPts", sub,
+                 f"Wildcard: HOLD → GW{best_gw} — {cmp_txt}", "Free transfers carry the team", "good", gains, gain)
+
+
+def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = None) -> list[str]:
+    """Patch 111: GW-by-GW lines ("GW7: Roll", "GW8: Palmer → Saka, Isak → Haaland",
+    "GW9: WILDCARD (11 changes)") from a chained weekly_plan. `first_week` = (gw, [move texts]) is the
+    manager's own recommended move for the current GW, shown first (the chain starts after it)."""
+    lines: list[str] = []
+    if first_week is not None:
+        gw0, moves0 = first_week
+        lines.append(f"GW{gw0}: " + (", ".join(moves0) if moves0 else "Roll"))
+    for wk in weekly_plan or []:
+        gw = wk.get("gw")
+        moves = wk.get("moves") or []
+        if wk.get("chip_played") == "wildcard":
+            lines.append(f"GW{gw}: WILDCARD ({len(moves)} changes)")
+        elif moves:
+            lines.append(f"GW{gw}: " + ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in moves))
+        else:
+            lines.append(f"GW{gw}: Roll")
+    return lines
 
 
 _CAL_COLUMNS = ["logged_at", "team_id", "team_name", "planning_gw", "style", "gap_pct", "rating_pct",
@@ -1085,7 +1183,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             bb_play_gw: int | None = None,
                             disrupted_codes: set | None = None,
                             hit_stance: str = "No hits",
-                            chip_schedule: dict | None = None) -> dict:
+                            chip_schedule: dict | None = None,
+                            use_tie_break: bool = True) -> dict:
     """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
@@ -1366,7 +1465,10 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # (see _position_tie_break()'s docstring): the same "one MILP pick
         # per k, never compared against real alternatives" blind spot
         # exists per week in this chained pacing plan too.
-        if chosen.get("actual_k") == 1:
+        # Patch 111: `use_tie_break=False` (default True = unchanged) skips this scan; it is ~93% of the
+        # planner's runtime and only decides between near-tied in-players. Used by the Wildcard chain
+        # comparison, whose first week comes from the manager's actual recommendation instead.
+        if use_tie_break and chosen.get("actual_k") == 1:
             chosen, _tie_plan = _position_tie_break(chosen, sim_squad, full_pool, remaining_gws, cfg,
                                                       bench_w, bb_play_gw, moe, team_value, gw)
             if _tie_plan:
