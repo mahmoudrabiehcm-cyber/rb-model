@@ -2703,18 +2703,74 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         bench = sq[~sq["code"].isin(xi_codes)]
         per[g] = (round(float(pd.to_numeric(best["xi"][col], errors="coerce").max()), 2),
                   round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0)
-    out = {"tc": None, "bb": None, "fh": None}
+    out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None}
+
+    def _gap(cand, g):
+        rest = [v for k, v in cand.items() if k != g]
+        return round(cand[g] - max(rest), 2) if rest else None
     if "bboost" in types:
         cand = {g: v[1] for g, v in per.items() if g not in blocked}
         if cand:
             g = max(cand, key=lambda k: (cand[k], -k)); out["bb"] = (g, cand[g])
+            out["bb_by_gw"] = dict(cand); out["bb_gap"] = _gap(cand, g)
     if "3xc" in types:
         taken = blocked | ({out["bb"][0]} if out["bb"] else set())
         cand = {g: v[0] for g, v in per.items() if g not in taken}
         if cand:
             g = max(cand, key=lambda k: (cand[k], -k)); out["tc"] = (g, cand[g])
+            out["tc_by_gw"] = dict(cand); out["tc_gap"] = _gap(cand, g)
     if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
         cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
         out["fh"] = (fh_gw, round(max(0.0, float(fh_ref_score) - float(cur)), 2))
     out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
     return out
+
+
+def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float) -> tuple[dict, dict]:
+    """Patch 112: swap the joint-sequence weeks of Triple Captain / Bench Boost / Free Hit for the weeks picked on the
+    chain's own weekly squads (plain Wildcard rebuild + later transfers). Chips the sequence scheduled are rewritten;
+    a chip it did not schedule is added only if its chain value clears `floor`. The Wildcard entry is untouched.
+    Returns (new_detail, {chip_key: (old_gw, new_gw)}) -- the input is not mutated."""
+    detail = detail or {}
+    new = {k: dict(v) for k, v in detail.items()}
+    changes: dict = {}
+    if not path_chips:
+        return new, changes
+    for key, slot in (("3xc", "tc"), ("bboost", "bb"), ("freehit", "fh")):
+        pick = path_chips.get(slot)
+        if not pick:
+            continue
+        gw, val = pick
+        if key in new or float(val) >= float(floor):
+            old = new.get(key, {}).get("gw")
+            e = dict(new.get(key, {}))
+            e["gw"], e["value"] = int(gw), round(float(val), 2)
+            new[key] = e
+            if old != gw:
+                changes[key] = (old, int(gw))
+    return new, changes
+
+
+def style_swap_overlay(plain: pd.DataFrame, styled: pd.DataFrame, window_cols: list) -> tuple[list, float]:
+    """Patch 112: the Wildcard is decided and scored PLAIN (best xPts squad); a style profile only swaps tied players.
+    Lists each swap (out -> in, matched by position) with its xPts cost over `window_cols` (plain minus styled,
+    positive = the style costs points) and the total. Empty when the style changes nothing."""
+    if plain is None or styled is None or plain.empty or styled.empty:
+        return [], 0.0
+    p_codes, s_codes = set(plain["code"]), set(styled["code"])
+    outs = plain[plain["code"].isin(p_codes - s_codes)]
+    ins = styled[styled["code"].isin(s_codes - p_codes)]
+    cols = [c for c in window_cols if c in plain.columns and c in styled.columns]
+
+    def _v(r):
+        return float(pd.to_numeric(r[cols], errors="coerce").fillna(0.0).sum()) if cols else 0.0
+    swaps, used = [], set()
+    for _, o in outs.iterrows():
+        cand = ins[(ins["position"] == o["position"]) & (~ins["code"].isin(used))]
+        if cand.empty:
+            continue
+        i = cand.iloc[0]
+        used.add(i["code"])
+        swaps.append({"out_code": o["code"], "in_code": i["code"], "out": o.get("web_name", o["code"]),
+                      "in": i.get("web_name", i["code"]), "cost": round(_v(o) - _v(i), 2)})
+    return swaps, round(sum(x["cost"] for x in swaps), 2)
