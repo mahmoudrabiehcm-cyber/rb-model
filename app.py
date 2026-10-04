@@ -37,7 +37,32 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 104 (2026-10-01, manager screenshot: the \"Run extended Wildcard cross-check\" button "
+PATCH_VERSION = ("Patch 105 (2026-10-01, manager screenshot: Patch 104's always-on extend button clicked live, "
+                  "red annotation \"i need a confirmation here after the run finishes that it's already done and "
+                  "what is on the chips is the final\" + \"already clicked but i don't have a confirmation!!!!\"): "
+                  "confirmed in code — the extended check's result (`_wc_check_note`) WAS already computed "
+                  "correctly, but only ever rendered in the Wildcard card's tooltip near the TOP of the Chip Plan "
+                  "tab, nowhere near the button at the bottom where the manager actually clicked and was looking. "
+                  "Fixed by adding an explicit st.success()/st.warning() confirmation directly under the button, "
+                  "showing the reached GW and the real cross-check result the moment it finishes. A second, more "
+                  "serious bug was found investigating this: the note text itself was still hard-coded to claim "
+                  "every extension ran \"to reach your scheduled Wildcard at GW{x}\" — true for a chip-driven "
+                  "extension, but actively WRONG for Patch 104's new exploratory case (no scheduled chip in range "
+                  "at all, or one already within normal reach) — the manager could run an exploratory +5 GW check "
+                  "and get back a result that falsely describes itself as chip-driven. Fixed by extracting the "
+                  "note-building into a new pure function recommend.build_wc_extend_note(chip_driven, "
+                  "reached_target, check_gws_last, auto_wildcard_gw), branching correctly on the SAME "
+                  "`_wc_extend_chip_driven` flag Patch 104 already computed at the button — moved to compute ONCE, "
+                  "early, and threaded through to both the note-building site and the button site, rather than "
+                  "letting a second independent copy drift out of sync the way `_wc_current_max_gw` did across "
+                  "Patch 102/103. NEW test file test_patch105_extend_confirmation_and_note_fix.py (9 tests): the "
+                  "note function's 5 cases (chip-driven wording, capped disclosure shown/omitted, exploratory "
+                  "wording, exploratory with no scheduled chip at all), and 4 app.py wiring checks (single shared "
+                  "chip_driven computation, note built via the new function, confirmation shown, failure case "
+                  "handled). DISCLOSED: the confirmation only shows for the one run right after the click — same "
+                  "one-run lifetime as the extension itself and as Cross-Tool Reconciliation's own result display; "
+                  "a later, unrelated click clears it, same as before. Full regression suite: 184 passed (175 "
+                  "prior + 9 new), zero regressions. Previously, Patch 104 (2026-10-01, manager screenshot: the \"Run extended Wildcard cross-check\" button "
                   "went correctly-but-confusingly disabled once Patch 103's wider normal reach (GW10) already "
                   "covered the one scheduled Wildcard on screen (GW8) — \"why it's grayed , it should give an "
                   "option for another 5 GWs beyond the one maximum used for the current run\", then \"i didn't get "
@@ -2789,6 +2814,15 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
     # fixed +5 GWs beyond _wc_current_max_gw, extended further only if an
     # actual scheduled Wildcard sits even beyond that.
     _wc_extend_target_gw = recommend.resolve_wildcard_extend_target(_wc_current_max_gw, _auto_wildcard_gw)
+    # Patch 105 (2026-10-01, manager screenshot: "already clicked but i don't
+    # have a confirmation!!!!"). While building that confirmation, found that
+    # the note text below (and the button's own framing further down) each
+    # need to know whether THIS run's extension is chip-driven or
+    # exploratory -- computed ONCE here, early, and threaded through to both
+    # call sites, rather than letting a second independent copy at the
+    # button site drift out of sync the way `_wc_current_max_gw` did across
+    # Patch 102/103.
+    _wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
     _wc_extend_info = recommend.resolve_cross_check_horizon(
         planning_gw, _wc_current_max_gw, _wc_extend_target_gw, max_extension=8) \
         if recommend.wc_extend_requested(_wc_extend_requested_flag, _auto_wildcard_gw) else None
@@ -2874,17 +2908,15 @@ if wc_flag and reachable_by_gw and not squad_df.empty:
             # detection window, and separately flag it if the +8 GW cap
             # still fell short of the actual scheduled Wildcard GW (Standing
             # Rule #4 — show the inputs, never silently narrow the claim).
-            _wc_extend_note = ""
-            if _wc_extended_active:
-                _wc_extend_note = (
-                    f" (auto-extended to GW{_check_gws[-1]} to reach your scheduled Wildcard at "
-                    f"GW{_auto_wildcard_gw}, beyond your current Horizon/detection window — this extension is "
-                    f"only for this cross-check, your Transfer Recommendations and Wildcard trigger % above are "
-                    f"unaffected)")
-                if not _wc_extended_reached_target:
-                    _wc_extend_note += (
-                        f" — capped at +8 GWs and did NOT reach GW{_auto_wildcard_gw} yet; treat this as a "
-                        f"partial check, not the full picture.")
+            # Patch 105 (2026-10-01) — this used to be built inline here,
+            # unconditionally claiming "to reach your scheduled Wildcard"
+            # even for Patch 104's new exploratory extensions (no scheduled
+            # chip in range at all) — wrong in that case. Moved to a pure,
+            # directly-testable function that branches on the SAME
+            # `_wc_extend_chip_driven` flag computed once, early, above.
+            _wc_extend_note = recommend.build_wc_extend_note(
+                _wc_extend_chip_driven, _wc_extended_reached_target, _check_gws[-1], _auto_wildcard_gw) \
+                if _wc_extended_active else ""
             _wc_check_note = (
                 f"Cross-check against your own recommended transfer plan ({hit_stance}, {_plan_desc}, "
                 f"GW{_check_gws[0]}-GW{_check_gws[-1]}{_wc_extend_note}): if followed in full, your squad's "
@@ -3747,7 +3779,9 @@ with tab_chips:
     # chip sits beyond even that). The messaging below just changes framing
     # depending on whether a scheduled chip happens to be the reason this
     # run's extension matters, or whether it's purely exploratory.
-    _wc_extend_chip_driven = _auto_wildcard_gw is not None and _auto_wildcard_gw > _wc_current_max_gw
+    # Patch 105 (2026-10-01) — `_wc_extend_chip_driven` is now computed once,
+    # early (see above), and reused here rather than recomputed — no second
+    # copy of the same condition to drift out of sync.
     with st.container(border=True):
         if _wc_extend_chip_driven:
             st.markdown(f"🔎 **Your scheduled Wildcard is GW{_auto_wildcard_gw}, beyond this check's normal "
@@ -3763,6 +3797,22 @@ with tab_chips:
         st.caption("Off by default to keep routine runs fast (Patch 101: a full extra transfer-plan solve plus "
                    "a full extra reachable-ceiling scan, every time it ran automatically). A later, unrelated "
                    "click reverts to the fast check until you run this again.")
+        # Patch 105 (2026-10-01, manager: "already clicked but i don't have a
+        # confirmation!!!!" — the extended check's result WAS already being
+        # computed (`_wc_check_note` above) but only ever surfaced in the
+        # Wildcard card's tooltip near the TOP of the tab, nowhere near where
+        # the manager actually clicked and was looking. This shows the real
+        # outcome right here, immediately — same one-run-only lifetime as
+        # the button click itself (`_wc_extend_requested_flag`), since that's
+        # exactly the run this confirms.
+        if _wc_extend_requested_flag:
+            if _wc_extended_active:
+                st.success(f"✅ Extended cross-check complete — reached GW{_check_gws[-1]}.")
+                if _wc_check_note:
+                    st.markdown(_wc_check_note)
+            else:
+                st.warning("The extended cross-check didn't complete this run (an underlying solve failed) — "
+                           "showing the normal, unextended check above instead.")
 
     # Full analysis — Patch 29's synthesis narrative, kept in full (nothing
     # deleted per manager instruction) but moved behind an opt-in expander now

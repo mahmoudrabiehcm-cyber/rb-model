@@ -611,6 +611,39 @@ def resolve_wildcard_extend_target(current_max_gw: int, auto_wildcard_gw: int | 
     return target
 
 
+def build_wc_extend_note(chip_driven: bool, reached_target: bool, check_gws_last: int,
+                          auto_wildcard_gw: int | None) -> str:
+    """Patch 105 (2026-10-01, manager screenshot: "already clicked but i
+    don't have a confirmation!!!!" on the Patch 104 always-on extend
+    button). While fixing the missing-confirmation gap, a second, more
+    serious bug was found in code: this note's text was still hard-coded to
+    claim the extension ran "to reach your scheduled Wildcard at GW{x}" —
+    true for a chip-driven extension, but actively WRONG for Patch 104's new
+    exploratory case (no scheduled chip beyond normal reach at all, or one
+    already within it) — the manager could click "Exploratory" and get back
+    a result that falsely describes itself as chip-driven.
+
+    `chip_driven` is the same recommend.wc_extend... decision app.py's
+    `_wc_extend_chip_driven` flag already computes (auto_wildcard_gw is not
+    None and beyond the normal reach) -- computed ONCE in app.py and passed
+    in here, never recomputed a second time (the same two-sources-of-truth
+    class of bug already fixed once, in Patch 103, for `_wc_current_max_gw`
+    — not repeating it here).
+    """
+    if chip_driven:
+        note = (f" (auto-extended to GW{check_gws_last} to reach your scheduled Wildcard at "
+                 f"GW{auto_wildcard_gw}, beyond your current Horizon/detection window — this extension is "
+                 f"only for this cross-check, your Transfer Recommendations and Wildcard trigger % above are "
+                 f"unaffected)")
+        if not reached_target:
+            note += (f" — capped at +8 GWs and did NOT reach GW{auto_wildcard_gw} yet; treat this as a "
+                      f"partial check, not the full picture.")
+        return note
+    return (f" (manually extended to GW{check_gws_last} at your request — exploratory, no scheduled chip "
+            f"currently sits beyond your normal Horizon/detection window; this extension is only for this "
+            f"cross-check, your Transfer Recommendations and Wildcard trigger % above are unaffected)")
+
+
 def resolve_wildcard_check_gw_window(transfer_gw_list: list[int], detect_gw_list: list[int] | None) -> list[int]:
     """Patch 102 (2026-10-01, manager report: Chip Plan tab showed "Wildcard
     trigger ACTIVE (93.6%)" right next to "Wildcard may not be needed --
