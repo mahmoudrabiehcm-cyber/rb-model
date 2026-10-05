@@ -759,9 +759,12 @@ def final_chips_by_gw(seq_gws: dict | None, labels: dict, wc_decision: dict | No
     return by_gw, notes
 
 
-def chip_plan_headline(chips_by_gw: dict, wc_decision: dict | None) -> str:
-    """Patch 110: one line, GW order, same data as the table."""
-    parts = [f"{', '.join(v)} GW{g}" for g, v in sorted(chips_by_gw.items())]
+def chip_plan_headline(chips_by_gw: dict, wc_decision: dict | None, tc_player: dict | None = None) -> str:
+    """Patch 110: one line, GW order, same data as the table. Patch 113: the Triple Captain names its player."""
+    def _lab(g, v):
+        return [(f"Triple Captain ({tc_player['name']})" if (x == "Triple Captain" and tc_player and tc_player.get("gw") == g
+                                                              and tc_player.get("name")) else x) for x in v]
+    parts = [f"{', '.join(_lab(g, v))} GW{g}" for g, v in sorted(chips_by_gw.items())]
     head = ""
     if wc_decision is not None and wc_decision.get("gw") is None:
         head = "Wildcard HOLD (no week) · "
@@ -2679,17 +2682,39 @@ def season_verdict(rank_history: list[int], hits_last_n: int, current_gw: int) -
     return {"headline": "Finding Your XI", "body": "Too soon for a verdict, not too soon for a plan.", "key": "flat_early_season"}
 
 
+def top_scorer(sq: pd.DataFrame, col: str) -> dict | None:
+    """Patch 113: the best-XI top scorer on `sq` for `col` -- the player a Triple Captain (or the armband) would sit on."""
+    if sq is None or col not in sq.columns:
+        return None
+    best = opt.best_starting_xi(sq, col)
+    if not best or best.get("xi") is None or best["xi"].empty:
+        return None
+    xi = best["xi"]
+    vals = pd.to_numeric(xi[col], errors="coerce")
+    if vals.isna().all():
+        return None
+    row = xi.loc[vals.idxmax()]
+    return {"name": str(row.get("web_name", "")), "code": int(row["code"]) if "code" in xi.columns else None,
+            "team": row.get("team", ""), "xpts": round(float(vals.max()), 2)}
+
+
 def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,
-                     fh_ref_score: float | None, types: tuple, moe_fn=None) -> dict:
-    """Patch 112 (manager: Triple Captain / Bench Boost / Free Hit must count in the Wildcard decision).
+                     fh_ref_score: float | None, types: tuple, moe_fn=None, pick_rule: str = "best_horizon",
+                     allowed: dict | None = None) -> dict:
+    """Patch 112/113 (manager: Triple Captain / Bench Boost / Free Hit must count in the Wildcard decision).
     Chip value for ONE squad path (`squads_by_gw` = the squad fielded each GW). DEVIATION from Standing Rule #31
     (captaincy is disclosure, never a scoring input) -- explicit manager instruction, flagged for the model chat.
-      Bench Boost   = that week's bench xPts (best XI recomputed per week); best week not hosting the Wildcard/Free Hit.
-      Ties within the margin of error go to the LATEST week (Rule #34/#49 deferral).
+      Bench Boost   = that week's bench xPts (best XI recomputed per week); never the Wildcard/Free Hit week.
       Triple Captain= the best-XI top scorer's xPts (the extra x1 on top of the captain doubling already counted),
-                      best week not hosting the Wildcard/Free Hit/Bench Boost.
+                      never the Wildcard/Free Hit/Bench Boost week; the PLAYER is named (`tc_player`).
       Free Hit      = (fh_ref_score - squad's best-XI value) at `fh_gw`, floored at 0 (it reverts, so only the gap counts).
-    `types` uses the chip keys '3xc', 'bboost', 'freehit'. Returns {'tc','bb','fh': (gw, value)|None, 'total'}."""
+    Patch 113 pick rule `pick_rule="best_horizon"` (default): the best week across the WHOLE horizon; exact ties -> the
+    earlier week; when both TC and BB are wanted they are chosen as a PAIR (best combined value, different weeks).
+    Near-ties are reported (`tc_conf`/`bb_conf` = 'near-tie') instead of moving the chip to another week.
+    `pick_rule="latest_tied"` restores the Patch 112 rule (ties within the margin of error -> latest week, BB first).
+    `allowed` = {chip key: GWs} limits a chip to its earliest still-available window (a first-half chip lapses at the
+    deadline); None = no restriction. `types` uses the chip keys '3xc', 'bboost', 'freehit'.
+    Returns {'tc','bb','fh': (gw, value)|None, 'total', 'tc_player', '*_by_gw', '*_gap', '*_best', '*_conf'}."""
     blocked = {g for g in (wc_gw, fh_gw) if g is not None}
     per = {}
     for g in gws:
@@ -2700,41 +2725,128 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         best = opt.best_starting_xi(sq, col)
         if not best or best.get("xi") is None or best["xi"].empty:
             continue
-        xi_codes = set(best["xi"]["code"])
+        xi = best["xi"]
+        xi_codes = set(xi["code"])
         bench = sq[~sq["code"].isin(xi_codes)]
-        per[g] = (round(float(pd.to_numeric(best["xi"][col], errors="coerce").max()), 2),
-                  round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0)
+        xv = pd.to_numeric(xi[col], errors="coerce")
+        top = xi.loc[xv.idxmax()] if not xv.isna().all() else None
+        per[g] = {"top": round(float(xv.max()), 2),
+                  "bench": round(float(pd.to_numeric(bench[col], errors="coerce").sum(skipna=True)), 2) if not bench.empty else 0.0,
+                  "player": ({"gw": g, "name": str(top.get("web_name", "")), "code": int(top["code"]),
+                              "team": top.get("team", ""), "xpts": round(float(xv.max()), 2)} if top is not None else None)}
     out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None,
-           "tc_best": None, "bb_best": None}
+           "tc_best": None, "bb_best": None, "tc_player": None, "tc_conf": None, "bb_conf": None,
+           "tc_runner": None, "bb_runner": None}
 
-    def _pick(cand):
-        """Rule #34/#49 tie-break: among weeks within the margin of error of the best, DEFER -- take the latest."""
-        best = max(cand.values())
-        tol = float(moe_fn(best)) if moe_fn is not None else 0.0
-        tied = [k for k, v in cand.items() if best - v <= tol + 1e-9]
-        return max(tied)
+    def _ok(key, g):
+        return g not in blocked and (allowed is None or key not in allowed or g in set(allowed[key]))
+
+    def _moe(v):
+        return float(moe_fn(v)) if moe_fn is not None else 0.0
 
     def _gap(cand, g):
         rest = [v for k, v in cand.items() if k != g]
         return round(cand[g] - max(rest), 2) if rest else None
-    if "bboost" in types:
-        cand = {g: v[1] for g, v in per.items() if g not in blocked}
-        if cand:
-            g = _pick(cand); out["bb"] = (g, cand[g])
-            out["bb_by_gw"] = dict(cand); out["bb_gap"] = _gap(cand, g)
-            _b = max(cand, key=lambda k: (cand[k], -k)); out["bb_best"] = (_b, cand[_b])
-    if "3xc" in types:
-        taken = blocked | ({out["bb"][0]} if out["bb"] else set())
-        cand = {g: v[0] for g, v in per.items() if g not in taken}
-        if cand:
-            g = _pick(cand); out["tc"] = (g, cand[g])
-            out["tc_by_gw"] = dict(cand); out["tc_gap"] = _gap(cand, g)
-            _b = max(cand, key=lambda k: (cand[k], -k)); out["tc_best"] = (_b, cand[_b])
+
+    def _runner(cand, g):
+        rest = {k: v for k, v in cand.items() if k != g}
+        if not rest:
+            return None
+        k = max(rest, key=lambda x: (rest[x], -x))
+        return (k, rest[k])
+
+    def _latest_tied(cand):
+        best = max(cand.values())
+        tied = [k for k, v in cand.items() if best - v <= _moe(best) + 1e-9]
+        return max(tied)
+
+    def _argmax(cand):
+        return max(cand, key=lambda k: (cand[k], -k))          # highest value; exact ties -> the earlier week
+
+    def _fill(slot, cand, g):
+        out[slot] = (g, cand[g])
+        out[slot + "_by_gw"] = dict(cand)
+        out[slot + "_gap"] = _gap(cand, g)
+        out[slot + "_runner"] = _runner(cand, g)
+        b = _argmax(cand)
+        out[slot + "_best"] = (b, cand[b])
+        gp = out[slot + "_gap"]
+        out[slot + "_conf"] = "clear" if (gp is not None and gp > _moe(cand[g]) + 1e-9) else "near-tie"
+
+    want_bb, want_tc = "bboost" in types, "3xc" in types
+    cand_bb = {g: v["bench"] for g, v in per.items() if want_bb and _ok("bboost", g)}
+    cand_tc = {g: v["top"] for g, v in per.items() if want_tc and _ok("3xc", g)}
+    gb = gt = None
+    if pick_rule == "latest_tied":
+        if cand_bb:
+            gb = _latest_tied(cand_bb)
+        if cand_tc:
+            cand_tc = {g: v for g, v in cand_tc.items() if g != gb}
+            if cand_tc:
+                gt = _latest_tied(cand_tc)
+    else:
+        if cand_bb and cand_tc:
+            pairs = [(cand_bb[b] + cand_tc[t], b, t) for b in cand_bb for t in cand_tc if b != t]
+            if pairs:
+                _, gb, gt = max(pairs, key=lambda x: (x[0], -x[1], -x[2]))
+            else:
+                gb, gt = _argmax(cand_bb), None
+        elif cand_bb:
+            gb = _argmax(cand_bb)
+        elif cand_tc:
+            gt = _argmax(cand_tc)
+    if gb is not None:
+        _fill("bb", cand_bb, gb)
+    if gt is not None:
+        tc_pool = {g: v for g, v in cand_tc.items() if gb is None or g != gb} if pick_rule == "latest_tied" else cand_tc
+        _fill("tc", tc_pool if gt in tc_pool else cand_tc, gt)
+        out["tc_player"] = per[gt]["player"]
+    # caption honesty: when a chip's best week was given to the other chip (pair total), say which
+    out["tc_yield"] = ("the Bench Boost" if out["tc"] and out["tc_best"] and out["tc_best"][0] != out["tc"][0]
+                       and gb is not None and out["tc_best"][0] == gb else None)
+    out["bb_yield"] = ("the Triple Captain" if out["bb"] and out["bb_best"] and out["bb_best"][0] != out["bb"][0]
+                       and gt is not None and out["bb_best"][0] == gt else None)
     if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
         cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
         out["fh"] = (fh_gw, round(max(0.0, float(fh_ref_score) - float(cur)), 2))
     out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
     return out
+
+
+def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None) -> str:
+    """Patch 113: one honest sentence about how clear a chip week is. Always starts with a capital and ends with a
+    full stop, so it can follow any caption without stray punctuation."""
+    if chosen is None:
+        return ""
+    gw, val = chosen
+    if best is not None and best[0] != gw:
+        why = f" because GW{best[0]} hosts {yielded_to}" if yielded_to else ""
+        return (f"GW{best[0]} scores higher on its own ({best[1]:.1f} xPts) but GW{gw} is used{why}; "
+                f"the pair together has the higher total.")
+    if gap is None:
+        return f"GW{gw} is the only {what} available."
+    if conf == "clear":
+        return f"GW{gw} is {gap:+.1f} xPts clear of the next-best {what}."
+    return (f"GW{gw} is the best {what} but only {max(gap, 0.0):+.1f} xPts ahead of the next one, inside the margin of "
+            f"error, so treat it as low confidence.")
+
+
+def chip_captain_rows(now: dict | None, planning_gw: int, wc_gw: int | None, wc_top: dict | None,
+                      tc_gw: int | None, tc_top: dict | None) -> list[dict]:
+    """Patch 113: the armband story in one list -- now (current squad), after the recommended Wildcard, and the Triple
+    Captain week. Rows for chips that are not planned are left out."""
+    rows = []
+    if now:
+        rows.append({"kind": "now", "gw": int(planning_gw), "name": now.get("name", ""), "xpts": float(now.get("xpts", 0.0)),
+                     "label": "Now, with your current squad"})
+    if wc_gw is not None and wc_top:
+        rows.append({"kind": "wildcard", "gw": int(wc_gw), "name": wc_top.get("name", ""), "xpts": float(wc_top.get("xpts", 0.0)),
+                     "label": f"After the Wildcard (GW{wc_gw}), on the Wildcard squad"})
+    if tc_gw is not None and tc_top:
+        x = float(tc_top.get("xpts", 0.0))
+        rows.append({"kind": "triple_captain", "gw": int(tc_gw), "name": tc_top.get("name", ""), "xpts": x,
+                     "total": round(x * 3, 2), "label": f"Triple Captain (GW{tc_gw}), tripled"})
+    return rows
 
 
 def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float) -> tuple[dict, dict]:
@@ -2760,6 +2872,12 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
             old = new.get(key, {}).get("gw")
             e = dict(new.get(key, {}))
             e["gw"], e["value"] = int(gw), round(float(val), 2)
+            if key == "3xc":
+                _tp = path_chips.get("tc_player")
+                if _tp and _tp.get("gw") == int(gw):
+                    e["player"] = _tp.get("name")
+                else:
+                    e.pop("player", None)
             new[key] = e
             if old != gw:
                 changes[key] = (old, int(gw))
