@@ -516,8 +516,13 @@ def evaluate_free_hit(squad_df: pd.DataFrame, gw_list: list[int], rebuild_fn, mo
 # ---------------------------------------------------------------------------
 def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                 free_transfers: int, bank: float, candidate_gws: list[int],
-                                full_gw_list: list[int], window_len: int = 4) -> dict:
-    """Rule #48 (Chip Window Value): for each candidate Wildcard week `t` in
+                                full_gw_list: list[int], window_len: int = 4, objective: str = "sum15") -> dict:
+    """Patch 115 (model v6.12 ruling 7): `objective="weekly_xi"` solves both legs (the Wildcard rebuild and the reachable
+    no-chip baseline) with opt.solve_squad_xi_weighted -- a legal XI per week, bench at transfer.bench_weight_non_bb_gw,
+    captain term, decay weights (chip_extended_check.wc_build_decay) -- the same objective as the Wildcard build; the value is
+    still measured with the plain realized total over the window. The default "sum15" is the pre-Patch-115 objective.
+
+    Rule #48 (Chip Window Value): for each candidate Wildcard week `t` in
     `candidate_gws`, computes
         window_value(t) = wildcard_rebuild_total(t) - best_transfer_path_total(t)
     over a `window_len`-GW span starting at `t` (the doc's own worked
@@ -573,18 +578,28 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
     team_value = round(bank_val + (pd.to_numeric(squad_df["price"], errors="coerce").sum(skipna=True) or 0.0), 1)
 
     by_gw = {}
-    for t in candidate_gws:
+
+    def _one(t):
         window_gws = [g for g in full_gw_list if t <= g < t + window_len]
         window_cols = [f"xpts_gw{g}" for g in window_gws if f"xpts_gw{g}" in full_pool.columns]
         if not window_gws or not window_cols:
-            continue
+            return None
         obj_col = f"_wc_window_sum_gw{t}"
         full_pool_t = full_pool.copy()
         full_pool_t[obj_col] = full_pool_t[window_cols].sum(axis=1, skipna=True)
-        rebuild = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
-                                   label=f"wc_window_value_gw{t}")
+        if objective == "weekly_xi":
+            _ece = cfg.get("chip_extended_check", {}) or {}
+            _dec = float(_ece.get("wc_build_decay", 0.9))
+            _wts = [round(_dec ** k, 6) for k in range(len(window_cols))]
+            _bw = float(cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
+            _cap = bool(_ece.get("wc_build_captain", True))
+            rebuild = opt.solve_squad_xi_weighted(full_pool_t, cfg, team_value, window_cols, bench_weight=_bw,
+                                                  label=f"wc_window_value_gw{t}", week_weights=_wts, captain=_cap)
+        else:
+            rebuild = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
+                                       label=f"wc_window_value_gw{t}")
         if rebuild is None or rebuild.get("squad") is None or rebuild["squad"].empty:
-            continue
+            return None
         rebuild_total = opt.realized_horizon_value(rebuild["squad"], window_gws, cfg)
         hold_total = opt.realized_horizon_value(squad_df, window_gws, cfg)
         # End-of-window accrued free-transfer count (+1/GW from
@@ -593,13 +608,18 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
         # app, reused here rather than re-deriving it a second way.
         accrued_ft = min(5, max(0, free_transfers) + max(0, len(window_gws) - 1))
         min_retain = max(0, min(15, 15 - accrued_ft))
-        reachable = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
-                                     retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
-                                     label=f"wc_window_reachable_gw{t}")
+        if objective == "weekly_xi":
+            reachable = opt.solve_squad_xi_weighted(full_pool_t, cfg, team_value, window_cols, bench_weight=_bw,
+                                                    label=f"wc_window_reachable_gw{t}", week_weights=_wts, captain=_cap,
+                                                    retain_pool_codes=list(squad_df["code"]), min_retain=min_retain)
+        else:
+            reachable = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
+                                         retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
+                                         label=f"wc_window_reachable_gw{t}")
         best_path_total = round(opt.realized_horizon_value(reachable["squad"], window_gws, cfg), 2) \
             if reachable and reachable.get("squad") is not None and not reachable["squad"].empty \
             else round(hold_total, 2)
-        by_gw[t] = {"window_gws": window_gws, "rebuild_total": rebuild_total,
+        return {"window_gws": window_gws, "rebuild_total": rebuild_total,
                     "best_path_total": best_path_total, "hold_total": round(hold_total, 2),
                     "gap": round(rebuild_total - best_path_total, 2), "rebuild_squad": rebuild["squad"],
                     # Patch 89 (Rule #51) -- the reachable-baseline squad,
@@ -609,6 +629,19 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
                     # hold_total (see best_path_total's own fallback above).
                     "reachable_squad": (reachable["squad"] if reachable and reachable.get("squad") is not None
                                          and not reachable["squad"].empty else None)}
+
+
+    # Patch 115: the weekly-XI legs are heavier than the 15-man sum, and CBC runs as a subprocess, so the candidate weeks
+    # solve side by side (same pattern as the chain comparison); results are collected in candidate order.
+    if objective == "weekly_xi" and len(candidate_gws) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(4, len(candidate_gws))) as _ex:
+            _res = list(_ex.map(_one, list(candidate_gws)))
+    else:
+        _res = [_one(t) for t in candidate_gws]
+    for t, r_ in zip(candidate_gws, _res):
+        if r_ is not None:
+            by_gw[t] = r_
 
     if not by_gw:
         return empty
@@ -880,7 +913,7 @@ def _reachable_bb_tc_tables(squad_df: pd.DataFrame, pool_df: pd.DataFrame | None
 
 
 def _fh_post_table_for_squad(rebuild_squad: pd.DataFrame, fh_by_gw: dict, gw_list: list[int]) -> dict:
-    """Rule #50(a) (Chip Timing Harmony, Patch 96) -- Free Hit's POST-Wildcard
+    """Rule #52(a) (Chip Timing Harmony, Patch 96) -- Free Hit's POST-Wildcard
     value table for one candidate Wildcard's rebuild squad. Confirmed via
     code read of data_pipeline.solve_free_hit_rebuild() (2026-09-30): a Free
     Hit rebuild is a fresh 15-man squad optimized against total budget for
@@ -913,7 +946,7 @@ def _fh_post_table_for_squad(rebuild_squad: pd.DataFrame, fh_by_gw: dict, gw_lis
 
 def _apply_squad_health_guardrail(near_ties: list[dict], gw_list: list[int], squad_df: pd.DataFrame,
                                    wc_by_gw: dict, reachable_ceiling_by_gw: dict | None, moe_fn) -> list[dict]:
-    """Rule #50(b) (Chip Timing Harmony, Patch 96) -- rejects any near-tied
+    """Rule #52(b) (Chip Timing Harmony, Patch 96) -- rejects any near-tied
     assignment (already filtered to within Rule #34's moe_fn tie-band of the
     best total, at the call site below) that leaves a MEANINGFULLY weaker
     squad than the healthiest near-tie once every scheduled chip has played,
@@ -1151,7 +1184,7 @@ def chip_portfolio_schedule(available_chip_types: set[str], wc_scan: dict, fh_ga
     best_total = max(a["total"] for a in all_assignments)
     tie_band = round(moe_fn(best_total), 2) if best_total > 0 else round(moe_fn(0.0), 2)
     near_ties = [a for a in all_assignments if best_total - a["total"] <= tie_band]
-    # Rule #50(b) (Chip Timing Harmony, Patch 96) -- filter the near-tie set
+    # Rule #52(b) (Chip Timing Harmony, Patch 96) -- filter the near-tie set
     # down to only those that leave a healthy squad once the chips are done,
     # BEFORE the existing Rule #34/#49 tie-break picks among them. No-op
     # (returns near_ties unchanged) when reachable_ceiling_by_gw isn't given.

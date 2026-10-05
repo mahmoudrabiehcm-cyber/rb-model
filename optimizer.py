@@ -526,7 +526,9 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
 @_cache_decorator
 def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, window_cols: list,
                             bench_weight: float = 0.08, bb_col: str | None = None,
-                            bonus: dict | None = None, label: str | None = None) -> dict | None:
+                            bonus: dict | None = None, label: str | None = None,
+                            week_weights: list | None = None, captain: bool = False,
+                            retain_pool_codes: list | None = None, min_retain: int = 0) -> dict | None:
     """Patch 114 (manager: the Wildcard must be the best team over the window, then shaped for the chips). Verified in the
     Patch 113 code: solve_squad() maximises the plain SUM of all 15 players, i.e. every player counts as a starter in
     every week. Here the squad (x_i) and a legal starting XI for EACH week of the window (y_ig) are chosen together:
@@ -539,8 +541,13 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
     bench_weight_non_bb_gw), exactly how the weekly scoring values a squad. bench_weight=1.0 reproduces solve_squad's
     optimum. MEASURED before shipping (3 sandbox scenarios, GW6-13 window, realized value): a static single-XI variant
     of this idea was WORSE than the 15-man sum in 2 of 3 scenarios, whereas this per-week model beat the 15-man sum in
-    all 3 (+2.7 to +6.7 xPts) and solves in ~1s. Not modelled (disclosed): the captain's doubling and the autosub
-    probability curve inside the solve (the squad is scored with them afterwards). Same legality as solve_squad:
+    all 3 (+2.7 to +6.7 xPts) and solves in ~1s.
+    Patch 115 (model v6.12, Rule #54): `week_weights` (one per window column, e.g. recommend.decay_weights) multiply every
+    term of their week -- nearer weeks count more; `captain=True` adds each week's captain (the XI's top scorer, one extra x1)
+    via continuous variables c_ig (sum_i c_ig = 1, c_ig <= y_ig): maximising picks the best XI member, and the LP vertex is
+    integral, so it is exact without extra binaries; `retain_pool_codes`/`min_retain` keep at least that many of the given
+    players (the reachable-from-your-squad variant used by the Rule #48 scan). Not modelled (disclosed): the autosub
+    probability curve inside the solve (the squad is scored with it afterwards). Same legality as solve_squad:
     2/5/5/3, club cap, budget, available players only."""
     if pulp is None:
         _diag(label, "pulp (the MILP library this solver needs) is not installed/importable in this environment.")
@@ -552,7 +559,8 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
     df = players.dropna(subset=["price", "position"] + cols).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     if "status" in df.columns:
-        df = df[df["status"] == "a"]
+        _keep = set(retain_pool_codes or []) if (retain_pool_codes and int(min_retain) > 0) else set()
+        df = df[(df["status"] == "a") | df["code"].isin(_keep)]       # a retained player stays eligible (as solve_squad)
     if df.empty:
         _diag(label, "empty candidate pool for the XI-weighted solve (nothing survived the price/projection/position/"
                       "status filters).")
@@ -571,14 +579,31 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
         CODE = df["code"].tolist()
         b_code = int(bonus["code"]) if bonus and bonus.get("code") is not None else None
         b_col = bonus.get("col") if bonus else None
+        WK = list(week_weights) if week_weights else [1.0] * len(cols)
+        if len(WK) != len(cols):
+            WK = (WK + [WK[-1]] * len(cols))[:len(cols)] if WK else [1.0] * len(cols)
+        cap_v = {}
+        if captain:
+            cap_v = {(i, c): pulp.LpVariable(f"c_{i}_{k}", lowBound=0, upBound=1) for k, c in enumerate(cols) for i in I}
         terms = []
-        for c in cols:
+        for k, c in enumerate(cols):
             w = 1.0 if (bb_col is not None and c == bb_col) else bw
+            wk = float(WK[k])
             for i in I:
                 v = V[c][i]
                 extra = v if (b_code is not None and CODE[i] == b_code and c == b_col) else 0.0
-                terms.append(y[(i, c)] * ((1.0 - w) * v + extra) + x[i] * (w * v))
+                terms.append(wk * (y[(i, c)] * ((1.0 - w) * v + extra) + x[i] * (w * v)))
+                if captain:
+                    terms.append(cap_v[(i, c)] * (wk * v))
         prob += pulp.lpSum(terms)
+        if captain:
+            for c in cols:
+                prob += pulp.lpSum(cap_v[(i, c)] for i in I) == 1
+                for i in I:
+                    prob += cap_v[(i, c)] <= y[(i, c)]
+        if retain_pool_codes and int(min_retain) > 0:
+            _ret = set(retain_pool_codes)
+            prob += pulp.lpSum(x[i] for i in I if CODE[i] in _ret) >= int(min_retain)
         prob += pulp.lpSum(x[i] * PRICE[i] for i in I) <= budget
         prob += pulp.lpSum(x[i] for i in I) == cfg["squad_rules"]["squad_size"]
         for pos, count in cfg["squad_rules"]["formation"].items():
