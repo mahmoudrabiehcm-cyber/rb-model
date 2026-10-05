@@ -797,57 +797,282 @@ def chain_candidate_gws(wc_by_gw: dict | None, planning_gw: int, eval_gws: list,
     return sorted(cands)
 
 
+def decay_weights(n: int, decay: float) -> list:
+    """Patch 115 (model v6.12 rulings 3b and 4): weekly weights decay^k, k=0 the nearest week. With decay < 1 the front half of
+    a window always carries more total weight than the back half (0.9 over eight weeks: 62% on the front four)."""
+    return [round(float(decay) ** k, 6) for k in range(max(0, int(n)))]
+
+
+def post_chip_gain(score: dict, base: dict, t: int, gws: list, n: int, decay: float, skip_gw: int | None = None):
+    """Patch 115 (v6.12 ruling 3a/3b): the Wildcard-at-`t` gain over the next `n` gameweeks (decay-weighted), the SAME `n`
+    for every candidate. A candidate with fewer than `n` weeks left in `gws` is NOT scored (None) -- never scored on fewer
+    weeks (Rule #48(a)). The Free Hit week (`skip_gw`) is left out of the sum."""
+    weeks = [g for g in gws if g >= t][:int(n)]
+    if len(weeks) < int(n):
+        return None
+    w = decay_weights(len(weeks), decay)
+    gain = sum(w[i] * (score[g] - base[g]) for i, g in enumerate(weeks) if g != skip_gw)
+    return {"gain": round(float(gain), 2), "weeks": weeks}
+
+
+def decay_sensitivity(cands: dict, base_score: dict, gws: list, n: int, skip_gw, decays, decide_fn):
+    """Patch 115 fix 2: how much does the Wildcard pick depend on the estimate-tier decay (0.9)? Re-decides the week at each
+    alternative decay from the SAME solved squads (their weekly scores; no re-solve). Gain = decay-weighted post-chip chain
+    gain + the candidate's chip gain. `decide_fn(gains)` is the real decision (band, later week, guardrail). A flip means the
+    verdict is low confidence; the pick itself is never changed. None when there is nothing to vary."""
+    if not cands or not int(n) or not decays:
+        return None
+    picks, all_gains = {}, {}
+    for d in decays:
+        g = {}
+        for t, c in cands.items():
+            pg = post_chip_gain(c["score"], base_score, t, gws, int(n), float(d), skip_gw=skip_gw)
+            if pg is None:
+                continue
+            g[t] = round(pg["gain"] + float(c.get("gain_chips") or 0.0), 2)
+        if not g:
+            continue
+        dec = decide_fn(g)
+        picks[d] = (dec or {}).get("gw")
+        all_gains[d] = g
+    if not picks:
+        return None
+    flips = len(set(picks.values())) > 1
+    shown = ", ".join(f"decay {d}: " + (f"GW{p}" if p is not None else "HOLD") for d, p in picks.items())
+    text = (f"Decay sensitivity (0.9 is estimate-tier): {shown}"
+            + (" - the week moves, so this verdict is low confidence." if flips else " - same week at every decay tested."))
+    return {"picks": picks, "gains": all_gains, "flips": flips, "text": text}
+
+
+def common_post_weeks(cands: list, gws: list, cap: int = 6, minimum: int = 4):
+    """Patch 115 (v6.12 ruling 3a): ONE post-chip window length for every candidate = min(cap, fewest weeks left among the
+    scorable candidates), never below `minimum` (Rule #48's four). Candidates with fewer than `minimum` weeks left are
+    'not scored (window truncated)'. Returns (n, scored, not_scored)."""
+    avail = {t: len([g for g in gws if g >= t]) for t in cands}
+    scored = [t for t in cands if avail[t] >= minimum]
+    not_scored = [t for t in cands if avail[t] < minimum]
+    if not scored:
+        return int(minimum), [], list(not_scored)
+    return int(min(cap, min(avail[t] for t in scored))), scored, not_scored
+
+
+def fallback_weeks(weeks: list, planning_gw: int, coverage: int = 5) -> list:
+    """Patch 115 (v6.12 ruling 3c): weeks beyond market coverage (Current + `coverage`) are fallback-tier (Rule #46(e))."""
+    return [g for g in weeks if g > int(planning_gw) + int(coverage)]
+
+
+def four_gw_crosscheck(by_gw_gaps: dict | None, chain_gw: int | None, moe_fn=None) -> dict | None:
+    """Patch 115 (v6.12 ruling 3): the Rule #48 four-GW window value is always computed and shown beside the chain
+    comparison; a disagreement is reported. `by_gw_gaps` = {t: four-GW Wildcard value}. The four-GW pick follows the same
+    rule as the chain (band = Rule #34, LATER week inside it)."""
+    gaps = {int(k): float(v) for k, v in (by_gw_gaps or {}).items() if v is not None}
+    if not gaps:
+        return None
+    best = max(gaps.values())
+    band = float(moe_fn(best)) if moe_fn is not None else 2.0
+    tie = sorted(g for g, v in gaps.items() if best - v <= band + 1e-9)
+    pick = max(tie)
+    agrees = (chain_gw is None) or (chain_gw in tie)
+    if chain_gw is None:
+        text = f"Four-GW value (Rule #48) puts the Wildcard at GW{pick} (+{gaps[pick]:.1f}; tie set " + ", ".join(f"GW{g}" for g in tie) + ")."
+    elif agrees:
+        text = (f"Four-GW cross-check (Rule #48) agrees: GW{chain_gw} is inside its tie set (" +
+                ", ".join(f"GW{g}" for g in tie) + f"), best GW{pick} +{gaps[pick]:.1f}.")
+    else:
+        text = (f"The chain comparison says GW{chain_gw} but the four-GW value (Rule #48) puts GW{pick} "
+                f"(+{gaps[pick]:.1f}; tie set " + ", ".join(f"GW{g}" for g in tie) + ") -- they disagree.")
+    return {"best_gw": pick, "tie_set": tie, "agrees": bool(agrees), "text": text, "band": round(band, 2)}
+
+
+def wc_shift_label(prev_gw: int | None, new_gw: int | None) -> str:
+    """Patch 115 (v6.12 ruling 2): how the recommended Wildcard week moved versus the previous logged run."""
+    if new_gw is None:
+        return "hold"
+    if prev_gw is None:
+        return "new"
+    return "later" if new_gw > prev_gw else ("earlier" if new_gw < prev_gw else "same")
+
+
+def apply_chain_guardrail(gains: dict, health: dict | None, base_health: float | None, band: float,
+                          health_band: float) -> dict:
+    """Patch 115 (v6.12 ruling 6, Rule #52): the squad-health guardrail on the chain comparison. `gains` = {Wildcard GW:
+    gain}; only weeks inside Rule #34's `band` of the best gain are alternatives. `health` = {GW: the squad's xPts at the
+    checkpoint week once the chip has played}. A week is REJECTED when its checkpoint health is more than `health_band`
+    below (a) the healthiest in-band alternative or (b) the no-chip path (`base_health`: a chip that leaves the squad weaker
+    than doing nothing). Rejected weeks come back with their gain and reason; if every alternative is rejected the verdict
+    is 'hold' (no week). Weeks with no health figure cannot be checked and pass. Returns {'verdict','gw','gain','passed',
+    'rejected','changed'}."""
+    if not gains:
+        return {"verdict": "pass", "gw": None, "gain": None, "passed": [], "rejected": [], "changed": False}
+    best = max(gains.values())
+    alts = {g: v for g, v in gains.items() if v >= best - float(band) - 1e-9}
+    h = {g: float(health[g]) for g in alts if health and health.get(g) is not None}
+    healthiest = max(h.values()) if h else None
+    healthiest_gw = max((g for g, v in h.items() if v == healthiest)) if h else None
+    rejected, passed = [], []
+    for g in sorted(alts):
+        reason = None
+        if g in h:
+            if healthiest is not None and h[g] < healthiest - float(health_band) - 1e-9:
+                reason = (f"squad health: checkpoint {h[g]:.1f} xPts is {healthiest - h[g]:.1f} below the healthiest in-band "
+                          f"alternative (GW{healthiest_gw}, {healthiest:.1f}); band {health_band:.1f}")
+            elif base_health is not None and h[g] < float(base_health) - float(health_band) - 1e-9:
+                reason = (f"squad health: checkpoint {h[g]:.1f} xPts leaves the squad {float(base_health) - h[g]:.1f} below the "
+                          f"no-chip path ({float(base_health):.1f}); band {health_band:.1f}")
+        if reason:
+            rejected.append({"gw": g, "gain": round(float(alts[g]), 2), "checkpoint": round(h[g], 1), "reason": reason})
+        else:
+            passed.append(g)
+    if not passed:
+        return {"verdict": "hold", "gw": None, "gain": None, "passed": [], "rejected": rejected, "changed": True}
+    pick = max(passed)
+    return {"verdict": "pass", "gw": pick, "gain": round(float(alts[pick]), 2), "passed": passed,
+            "rejected": rejected, "changed": bool(rejected) and pick != max(alts)}
+
+
+def tc_target_from_schedule(pool: pd.DataFrame, tc_sched_gw: int | None, own_codes, owned_top_xpts: float | None = None):
+    """Patch 115 (v6.12 ruling 5): the Triple Captain premium reaches the planner ONLY when TC is scheduled in the Rule #49
+    harmonized assignment (`tc_sched_gw` None -> no premium). The premium is the named captain's projected points in the
+    TC week, counted once; the target is the best pool scorer that week when he beats the best player already owned."""
+    if tc_sched_gw is None or pool is None:
+        return None
+    col = f"xpts_gw{int(tc_sched_gw)}"
+    if col not in pool.columns:
+        return None
+    own = set(own_codes or [])
+    if owned_top_xpts is None:
+        o = pool[pool["code"].isin(own)]
+        owned_top_xpts = float(pd.to_numeric(o[col], errors="coerce").max()) if not o.empty else 0.0
+        if owned_top_xpts != owned_top_xpts:        # NaN
+            owned_top_xpts = 0.0
+    cand = tc_target_candidates(pool, int(tc_sched_gw), own, k=1)
+    if cand and cand[0]["xpts"] > float(owned_top_xpts) + 1e-9:
+        return {"code": cand[0]["code"], "gw": int(tc_sched_gw), "name": cand[0]["name"], "xpts": cand[0]["xpts"]}
+    return None
+
+
 def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_gw: int, margin: float = 2.0,
                              floor: float = 2.0, today_pct: float | None = None, gap_pct: float | None = None,
-                             seq_gw: int | None = None, seq_value: float | None = None) -> dict | None:
-    """Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path
-    over the whole checked span). `gains` = {candidate GW: total xPts gain of playing the Wildcard at
-    that GW vs the no-chip chained plan, summed over the whole span (free transfers only, no hits)}.
+                             seq_gw: int | None = None, seq_value: float | None = None,
+                             window_totals: dict | None = None, moe_fn=None, health: dict | None = None,
+                             base_health: float | None = None, health_band: float | None = None,
+                             not_scored: list | None = None, fallback: list | None = None,
+                             prev_gw: int | None = None, crosscheck: dict | None = None,
+                             band_totals: dict | None = None, unavailable_reason: str | None = None,
+                             extra_lines: list | None = None) -> dict | None:
+    """Patch 115 fix: the tie band is Rule #34 on the FOUR-gameweek total (`band_totals`, about 5) even when the primary
+    window (`window_totals`) is longer -- v6.12 Rules #34 / #48(a). A later-week pick carries `wait_cost` (xPts lost against
+    the best week; display only, the pick is unchanged). `unavailable_reason` says why no chain comparison exists.
+
+    Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path over the checked
+    span). `gains` = {candidate GW: decay-weighted xPts gain of playing the Wildcard at that GW vs the no-chip chained plan
+    over the SAME number of post-chip weeks (free transfers only, no hits)}.
 
       best gain < floor                     -> HOLD, no week (the chip adds too little)
       best week == current GW               -> PLAY NOW
       best week later                       -> HOLD -> GWn (waiting beats playing now)
 
-    Ties: the EARLIEST week within `margin` xPts of the best wins (the margin-of-error floor, 2.0 -
-    same band the transfer planner uses); the 2.0 `floor` is the materiality bar. Both are borrowed
-    thresholds, not validated. The 6% trigger (Rule #45) still decides whether this runs.
-    Replaces the Patch 110 94% bridge rule. No gains available -> "unverified" (shows the sequence's
-    own week, if any)."""
+    Patch 115 (model v6.12 rulings 2 and 6): ties use Rule #34's BAND over the compared window total (the greater of 2 points
+    or 2% of the total, about 5; `moe_fn(window_totals[best])`; the old fixed 2.0 is only the band's floor) and the LATER
+    week inside the band wins -- the earliest week is not allowed inside it. The Rule #52 squad-health guardrail then checks
+    the in-band weeks (`health` = checkpoint xPts per candidate, `base_health` = the no-chip path, `health_band`); a
+    rejected week is listed with its gain and reason, and if none passes the verdict is HOLD. A later shift against
+    `prev_gw` is a Rule #11 reversal (`shift`, `shift_text`; the app logs it). The 6% trigger (Rule #45) still decides
+    whether this runs. No gains available -> "unverified"."""
     if not trigger_active:
         return None
     today_txt = f"today {today_pct:.0f}%" if today_pct is not None else None
     gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
 
-    def _pack(kind, gw, badge, cls, card_cls, stat, sub, pill, note=None, note_cls="", gains_=None, best=None):
-        return {"kind": kind, "gw": gw, "badge": badge, "badge_cls": cls, "card_cls": card_cls, "stat": stat,
-                "sub": sub, "pill": pill, "note": note, "note_cls": note_cls,
-                "gains": dict(gains_ or {}), "best_gain": best}
+    def _pack(kind, gw, badge, cls, card_cls, stat, sub, pill, note=None, note_cls="", gains_=None, best=None, **extra):
+        d = {"kind": kind, "gw": gw, "badge": badge, "badge_cls": cls, "card_cls": card_cls, "stat": stat,
+             "sub": sub, "pill": pill, "note": note, "note_cls": note_cls,
+             "gains": dict(gains_ or {}), "best_gain": best, "band": None, "tie_set": [], "shift": wc_shift_label(prev_gw, gw),
+             "shift_text": "", "guardrail": None, "not_scored": list(not_scored or []), "fallback_weeks": list(fallback or []),
+             "crosscheck": crosscheck, "detail_lines": [], "wait_cost": None}
+        d.update(extra)
+        return d
+
+    def _lines(band, tie, guard, gw):
+        L = []
+        if band is not None:
+            L.append(f"Tie band (Rule #34) {band:.1f} xPts"
+                     + (f" - tie set " + ", ".join(f"GW{g}" for g in tie) + "; the later week wins inside the band" if len(tie) > 1 else ""))
+        if guard and guard.get("rejected"):
+            for r_ in guard["rejected"]:
+                L.append(f"Rejected by the squad-health guardrail (Rule #52): GW{r_['gw']} ({r_['gain']:+.1f} xPts) - {r_['reason']}")
+        if not_scored:
+            L.append("Not scored (window truncated): " + ", ".join(f"GW{g}" for g in not_scored))
+        if fallback:
+            L.append("Rests on fallback-tier weeks (beyond market coverage): " + ", ".join(f"GW{g}" for g in fallback))
+        if crosscheck and crosscheck.get("text"):
+            L.append(crosscheck["text"])
+        L.append("cap_use_bar 0.25 and value tail 3 are estimate-tier (unvalidated) and can move this verdict")
+        for x_ in (extra_lines or []):
+            L.append(x_)
+        return L
 
     if not gains:
+        why = f" — {unavailable_reason}" if unavailable_reason else ""
         sub = " · ".join(x for x in [today_txt, "chain comparison unavailable"] if x)
+        why_lines = ([f"Chain comparison unavailable: {unavailable_reason}"] if unavailable_reason else []) + list(extra_lines or [])
         if seq_gw is not None:
             return _pack("unverified", seq_gw, f"SEQUENCE GW{seq_gw}", "active", "is-active",
                          f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap", sub,
-                         f"Wildcard: sequence says GW{seq_gw} (chain comparison unavailable)")
+                         f"Wildcard: sequence says GW{seq_gw} (chain comparison unavailable{why})",
+                         detail_lines=why_lines)
         return _pack("unverified", None, "TRIGGER ACTIVE", "active", "is-active", f"{gap_txt} gap", sub,
-                     "Wildcard: trigger active (chain comparison unavailable)")
+                     f"Wildcard: trigger active (chain comparison unavailable{why})", detail_lines=why_lines)
     best = max(gains.values())
+    best_gw0 = max(g for g, v in gains.items() if v == best)
     if best < floor:
-        sub = " · ".join(x for x in [today_txt, f"adds only {best:+.1f} xPts over the span"] if x)
+        sub = " · ".join(x for x in [today_txt, f"adds only {best:+.1f} xPts over the window"] if x)
         return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
-                     f"Wildcard: HOLD — adds only {best:+.1f} xPts over the span", None, "", gains, best)
-    best_gw = min(g for g, v in gains.items() if v >= best - margin)
+                     f"Wildcard: HOLD — adds only {best:+.1f} xPts over the window", None, "", gains, best,
+                     detail_lines=_lines(None, [], None, None))
+    ref_total = (band_totals or {}).get(best_gw0)
+    if ref_total is None:
+        ref_total = (window_totals or {}).get(best_gw0)
+    band = float(moe_fn(ref_total)) if (moe_fn is not None and ref_total is not None) else float(margin)
+    tie = sorted(g for g, v in gains.items() if v >= best - band - 1e-9)
+    guard = None
+    pick_pool = {g: gains[g] for g in tie}
+    if health is not None:
+        guard = apply_chain_guardrail(pick_pool, health, base_health, band,
+                                      float(health_band if health_band is not None else margin))
+        if guard["verdict"] == "hold":
+            sub = " · ".join(x for x in [today_txt, "every in-band week failed the squad-health guardrail"] if x)
+            return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
+                         "Wildcard: HOLD — the squad-health guardrail (Rule #52) rejected every in-band week", None, "",
+                         gains, best, band=band, tie_set=tie, guardrail=guard, detail_lines=_lines(band, tie, guard, None))
+        best_gw = guard["gw"]
+    else:
+        best_gw = max(tie)
     gain = gains[best_gw]
+    shift = wc_shift_label(prev_gw, best_gw)
+    shift_text = ""
+    if shift == "later" and prev_gw is not None:
+        shift_text = (f"Rule #11 reversal: the recommended Wildcard week moved LATER (GW{prev_gw} → GW{best_gw}) since the "
+                      f"previous run; logged in the trigger log.")
+    wait = None
+    if best_gw != best_gw0 and gains.get(best_gw0) is not None:
+        wait = {"best_gw": best_gw0, "pick_gw": best_gw, "cost": round(float(gains[best_gw0]) - float(gain), 2)}
+    extra = dict(band=band, tie_set=tie, guardrail=guard, shift=shift, shift_text=shift_text,
+                 detail_lines=_lines(band, tie, guard, best_gw), wait_cost=wait)
+    if wait:
+        extra["detail_lines"].insert(1 if extra["detail_lines"] else 0,
+                                     f"Waiting from GW{wait['best_gw']} to GW{wait['pick_gw']} costs about {wait['cost']:.1f} xPts "
+                                     f"against the best week; the later week is the model's tie rule (Rule #48(a)), the date is your call (Rule #32)")
     if best_gw == planning_gw:
-        sub = " · ".join(x for x in [today_txt, "best week in the span"] if x)
+        sub = " · ".join(x for x in [today_txt, "best week in the window"] if x)
         return _pack("play_now", best_gw, "PLAY NOW", "play", "is-play", f"{gain:+.1f} xPts", sub,
-                     f"Wildcard: PLAY NOW — {gain:+.1f} xPts over the span",
-                     "Best week is this one", "warn", gains, gain)
+                     f"Wildcard: PLAY NOW — {gain:+.1f} xPts over the window",
+                     "Best week is this one", "warn", gains, gain, **extra)
     now = gains.get(planning_gw)
     cmp_txt = f"{gain:+.1f} vs {now:+.1f} now" if now is not None else f"{gain:+.1f} xPts"
     sub = " · ".join(x for x in [today_txt, f"waiting beats playing now ({cmp_txt})"] if x)
     return _pack("hold_until", best_gw, f"HOLD → GW{best_gw}", "hold", "", f"{gain:+.1f} xPts", sub,
-                 f"Wildcard: HOLD → GW{best_gw} — {cmp_txt}", "Free transfers carry the team", "good", gains, gain)
+                 f"Wildcard: HOLD → GW{best_gw} — {cmp_txt}", "Free transfers carry the team", "good", gains, gain, **extra)
 
 
 def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = None) -> list[str]:
@@ -879,11 +1104,12 @@ def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = Non
 
 
 _CAL_COLUMNS = ["logged_at", "team_id", "team_name", "planning_gw", "style", "gap_pct", "rating_pct",
-                "cumulative_gap", "fired", "verdict", "wc_value_xpts", "wc_gw", "transfers_close_gap", "patch"]
+                "cumulative_gap", "fired", "verdict", "wc_value_xpts", "wc_gw", "transfers_close_gap", "patch",
+                "wc_shift", "wc_band"]
 
 
 def calibration_log_row(team_id, team_name, planning_gw, patch, style, gap_pct, rating_pct, cumulative_gap,
-                         active, verdict, wc_value, wc_gw, closes) -> dict:
+                         active, verdict, wc_value, wc_gw, closes, shift=None, band=None) -> dict:
     """Patch 108: one row of the Wildcard calibration log -- the data needed
     to validate the (document-flagged "unvalidated") 6% threshold from the
     manager's own weeks."""
@@ -892,7 +1118,24 @@ def calibration_log_row(team_id, team_name, planning_gw, patch, style, gap_pct, 
             "team_name": team_name, "planning_gw": planning_gw, "style": style, "gap_pct": gap_pct,
             "rating_pct": rating_pct, "cumulative_gap": cumulative_gap, "fired": bool(active),
             "verdict": verdict, "wc_value_xpts": wc_value, "wc_gw": wc_gw,
-            "transfers_close_gap": closes, "patch": patch}
+            "transfers_close_gap": closes, "patch": patch, "wc_shift": shift, "wc_band": band}
+
+
+def last_logged_wc_gw(path: str, team_id) -> int | None:
+    """Patch 115 (v6.12 ruling 2): the Wildcard week the previous logged run recommended for this team (None if none)."""
+    import csv as _csv
+    import os as _os
+    try:
+        if not _os.path.exists(path):
+            return None
+        last = None
+        with open(path, newline="", encoding="utf-8") as fh:
+            for r in _csv.DictReader(fh):
+                if str(r.get("team_id")) == str(team_id) and str(r.get("wc_gw", "")).strip() not in ("", "None", "nan"):
+                    last = int(float(r["wc_gw"]))
+        return last
+    except Exception:
+        return None
 
 
 def append_calibration_row(path: str, row: dict) -> bool:
@@ -911,6 +1154,18 @@ def append_calibration_row(path: str, row: dict) -> bool:
                     if all(str(existing.get(k)) == str(row.get(k)) for k in key):
                         return False
         new_file = not _os.path.exists(path)
+        if not new_file:
+            # Patch 115: an older log (fewer columns) is migrated in place so the new columns line up
+            with open(path, newline="", encoding="utf-8") as fh:
+                rd = _csv.DictReader(fh)
+                header = list(rd.fieldnames or [])
+                old_rows = list(rd) if header != _CAL_COLUMNS else []
+            if header != _CAL_COLUMNS:
+                with open(path, "w", newline="", encoding="utf-8") as fh:
+                    w0 = _csv.DictWriter(fh, fieldnames=_CAL_COLUMNS)
+                    w0.writeheader()
+                    for r0 in old_rows:
+                        w0.writerow({c: r0.get(c) for c in _CAL_COLUMNS})
         with open(path, "a", newline="", encoding="utf-8") as fh:
             w = _csv.DictWriter(fh, fieldnames=_CAL_COLUMNS)
             if new_file:
@@ -1162,7 +1417,7 @@ def resolve_chip_capped_gw_list(gw_list: list[int], manual_planned_chip_gw: int 
 
 
 def resolve_bb_play_gw(isolated_bb_play_gw: int | None, harmonized_bb_gw: int | None) -> int | None:
-    """Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule" — manager,
+    """Patch 98 (v6.9 Rule #52 follow-up, "a more wide rule" — manager,
     2026-09-30): closes the same "two disconnected sources of truth" gap
     Patch 91/92/93 already fixed elsewhere, this time on the transfer
     planner's Bench Boost timing. Confirmed via code read of app.py's
@@ -1237,8 +1492,15 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             chip_schedule: dict | None = None,
                             use_tie_break: bool = True,
                             cap_use_bar: float | None = None,
-                            value_tail: list | None = None) -> dict:
-    """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
+                            value_tail: list | None = None,
+                            tc_target: dict | None = None) -> dict:
+    """Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Chip Plan picked. When
+    given (and the week is inside the planned/valued weeks), the squad's top XI scorer in that week counts one extra time
+    (the tripled captain's extra x1), and the target's horizon sum gets the same bonus so the planner can BUY him with a
+    free transfer when that beats rolling. None (default) = unchanged behaviour. DEVIATION from Standing Rule #31 (same
+    switchable chip-value deviation as Patch 112/113).
+
+    No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
 
@@ -1298,7 +1560,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     pre-Patch-92 behavior — verified by the full existing test suite
     passing unmodified.
 
-    Patch 98 (v6.9 Rule #50 follow-up, "a more wide rule" — manager,
+    Patch 98 (v6.9 Rule #52 follow-up, "a more wide rule" — manager,
     2026-09-30, after confirming Patch 96's harmonized chip sequence was
     live and correct on team 26073, then asking what the Transfers side
     does "if we will use the chip" and explicitly generalizing the ask):
@@ -1361,6 +1623,27 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     if "code" in full_pool.columns:
         full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
 
+    _tc_gw = int(tc_target["gw"]) if tc_target and tc_target.get("gw") is not None else None
+    _tc_col = f"xpts_gw{_tc_gw}" if _tc_gw is not None else None
+    if _tc_col and _tc_col in full_pool.columns and "xpts_horizon_sum" in full_pool.columns \
+            and (_tc_gw in gw_list or _tc_gw in value_tail):
+        _m = full_pool["code"] == tc_target["code"]
+        if _m.any():
+            full_pool.loc[_m, "xpts_horizon_sum"] = (pd.to_numeric(full_pool.loc[_m, "xpts_horizon_sum"], errors="coerce")
+                                                     + pd.to_numeric(full_pool.loc[_m, _tc_col], errors="coerce").fillna(0.0))
+    else:
+        _tc_gw = None
+
+    def _tc_extra(sq, gws_valued):
+        """Triple Captain's extra x1: the best XI's top scorer in the TC week (0 when no target / week not valued)."""
+        if _tc_gw is None or _tc_gw not in gws_valued or sq is None or _tc_col not in sq.columns:
+            return 0.0
+        b = opt.best_starting_xi(sq, _tc_col)
+        if not b or b.get("xi") is None or b["xi"].empty:
+            return 0.0
+        v = pd.to_numeric(b["xi"][_tc_col], errors="coerce").max()
+        return 0.0 if pd.isna(v) else float(v)
+
     sim_squad = squad_df.copy()
     ft_bank = free_transfers
     weekly_plan = []
@@ -1383,7 +1666,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         if wildcard_gw is not None and gw < wildcard_gw:
             remaining_gws = [g for g in remaining_gws if g < wildcard_gw]
 
-        # Patch 98 (Rule #50 follow-up, "a more wide rule" — manager,
+        # Patch 98 (Rule #52 follow-up, "a more wide rule" — manager,
         # 2026-09-30): the SAME illusory-value problem Wildcard already had
         # a fix for also applies to a scheduled Free Hit, and had NO fix at
         # all before this patch — confirmed via code read of the whole
@@ -1413,9 +1696,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             # the same Free Hit exclusion every other week gets.
             wc_remaining = remaining_gws
             old_total_wc = opt.realized_horizon_value(sim_squad, wc_remaining, cfg,
-                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw) \
+                + _tc_extra(sim_squad, wc_remaining)
             new_total_wc = opt.realized_horizon_value(new_squad, wc_remaining, cfg,
-                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw) \
+                + _tc_extra(new_squad, wc_remaining)
             net_gain_wc = round(new_total_wc - old_total_wc, 2)
             pairs_wc = _pair_moves(sim_squad, new_squad, this_gw_col)
             week_moves = [{**_move_row(p, 0.0, net_gain_wc, True), "gw": gw} for p in pairs_wc]
@@ -1444,7 +1729,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # doesn't let bench-quality alone carry a marginal move.
         bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
         old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
-                                                bb_play_gw=bb_play_gw)
+                                                bb_play_gw=bb_play_gw) + _tc_extra(sim_squad, remaining_gws)
         moe = eng.margin_of_error_threshold(old_total, cfg)
 
         candidates = {0: {"squad": sim_squad, "total": old_total, "net_gain": 0.0, "hit_cost": 0.0,
@@ -1466,7 +1751,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 continue  # nothing worth swapping at this k — already covered by k=0
             hit_cost = hit_cost_per * max(0, actual_k - ft_bank) if allow_hits else 0.0
             new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
-                                                    bb_play_gw=bb_play_gw)
+                                                    bb_play_gw=bb_play_gw) + _tc_extra(new_squad, remaining_gws)
             # Patch 36 — same nailed-gate baseline as suggest_transfers(),
             # applied per week: a non-nailed out-player's projection is
             # zeroed across the remaining weeks before the baseline is
@@ -1476,7 +1761,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             out_codes_this = out_codes_all - set(new_squad["code"])
             baseline_info = realistic_baseline_value(sim_squad, out_codes_this, remaining_gws, cfg,
                                                       bb_play_gw=bb_play_gw)
-            baseline_total = baseline_info["baseline_total"]
+            baseline_total = baseline_info["baseline_total"] + _tc_extra(sim_squad, remaining_gws)
             net_gain = round(new_total - baseline_total - hit_cost, 2)
             if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
                 candidates[actual_k] = {"squad": new_squad, "total": new_total, "net_gain": net_gain,
@@ -2698,6 +2983,118 @@ def top_scorer(sq: pd.DataFrame, col: str) -> dict | None:
             "team": row.get("team", ""), "xpts": round(float(vals.max()), 2)}
 
 
+def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: list, mode: str = "weekly_xi",
+                     bench_w: float | None = None, bb_gw: int | None = None, tc_target: dict | None = None,
+                     label: str = "chain_wc_rebuild", captain: bool | None = None) -> pd.DataFrame | None:
+    """Patch 114: the Wildcard's rebuilt squad over `window_gws`. mode 'weekly_xi' (default): the squad and a legal starting
+    XI for EACH week are chosen together -- the XI counts in full, the bench at the planner's low bench weight; the
+    chip-aware variant also counts the Bench Boost week's bench in full (`bb_gw`) and the Triple Captain target's extra x1
+    (`tc_target` {code, gw}). 'sum15': the Patch 113 plain 15-man sum (switch chip_extended_check.wc_objective).
+    Patch 115 (Rule #54): weekly weights decay^k (chip_extended_check.wc_build_decay, 0.9) and the captain term
+    (wc_build_captain) are part of the 'weekly_xi' objective.
+    Returns the 15-man squad frame, or None when the window/solve is unavailable."""
+    cols = [f"xpts_gw{g}" for g in window_gws if f"xpts_gw{g}" in pool.columns]
+    if not cols:
+        return None
+    wp = pool.copy()
+    if mode == "sum15":
+        wp["_wc_obj"] = wp[cols].sum(axis=1)
+        res = opt.solve_squad(wp, cfg, budget=float(budget), objective_col="_wc_obj", label=label)
+    else:
+        bw = float(bench_w if bench_w is not None else cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
+        bb_col = f"xpts_gw{bb_gw}" if (bb_gw is not None and f"xpts_gw{bb_gw}" in cols) else None
+        bonus = None
+        if tc_target and tc_target.get("gw") is not None and f"xpts_gw{int(tc_target['gw'])}" in cols:
+            bonus = {"code": int(tc_target["code"]), "col": f"xpts_gw{int(tc_target['gw'])}"}
+        ece = cfg.get("chip_extended_check", {}) or {}
+        # Patch 115 (Rule #54): nearer weeks count more (decay) and each week's captain is in the objective
+        wts = decay_weights(len(cols), float(ece.get("wc_build_decay", 0.9)))
+        cap_on = bool(ece.get("wc_build_captain", True)) if captain is None else bool(captain)
+        res = opt.solve_squad_xi_weighted(wp, cfg, float(budget), cols, bench_weight=bw, bb_col=bb_col, bonus=bonus,
+                                          label=label, week_weights=wts, captain=cap_on,
+                                          captain_k=int(ece.get("wc_build_captain_k", 60)))
+    if res is None or res.get("squad") is None:
+        return None
+    sq = res["squad"]
+    if not isinstance(sq, pd.DataFrame):
+        sq = wp[wp["code"].isin([p["code"] for p in sq])]
+    sq = sq.copy()
+    sq["_wc_obj"] = sq[cols].sum(axis=1)
+    return sq
+
+
+parallel_workers = opt.parallel_workers
+
+
+def four_week_total(score: dict, t: int, gws: list, weeks: int = 4):
+    """Patch 115 fix (Rule #34 / #48(a)): the compared total for the Wildcard tie band = the squad's scored xPts over the
+    FOUR gameweeks from `t` (about 250, so a band of about 5), whatever the primary window length. None if fewer remain."""
+    ws = [g for g in gws if g >= t][:int(weeks)]
+    if len(ws) < int(weeks):
+        return None
+    return round(float(sum(score[g] for g in ws)), 2)
+
+
+def wc_rebuild_with_fallback(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: list, mode: str = "weekly_xi",
+                             bench_w: float | None = None, bb_gw: int | None = None, tc_target: dict | None = None,
+                             label: str = "chain_wc_rebuild") -> dict:
+    """Patch 115 fix: the Wildcard rebuild with a visible fallback ladder instead of a silent drop.
+      tier 'weekly_xi_captain' -> the full Rule #54 objective (weekly XI + captain + bench + decay)
+      tier 'weekly_xi'         -> the same without the captain term; `note` says Rule #54(a) is not met this run
+      tier None                -> unavailable; `note` says why. NEVER the plain 15-man sum (Rule #54) -- that exists only when
+                                  mode='sum15' is asked for explicitly (switch chip_extended_check.wc_objective).
+    Returns {'squad', 'tier', 'note'}."""
+    if mode == "sum15":
+        sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="sum15", label=label)
+        return {"squad": sq, "tier": "sum15" if sq is not None else None,
+                "note": None if sq is not None else "Wildcard rebuild unavailable: the 15-man solve returned no squad."}
+    want_cap = bool((cfg.get("chip_extended_check", {}) or {}).get("wc_build_captain", True))
+    sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="weekly_xi", bench_w=bench_w, bb_gw=bb_gw,
+                          tc_target=tc_target, label=label, captain=want_cap)
+    if sq is not None:
+        return {"squad": sq, "tier": "weekly_xi_captain" if want_cap else "weekly_xi", "note": None}
+    if want_cap:
+        sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="weekly_xi", bench_w=bench_w, bb_gw=bb_gw,
+                              tc_target=tc_target, label=label, captain=False)
+        if sq is not None:
+            return {"squad": sq, "tier": "weekly_xi",
+                    "note": "Rule #54(a) not met this run: the captain term could not be solved in time, so the Wildcard squad "
+                            "was built on the weekly XI without the captain (still the weekly objective, never the 15-man sum)."}
+    diag = None
+    try:
+        diag = opt.get_diagnostic(label)
+    except Exception:
+        diag = None
+    return {"squad": None, "tier": None,
+            "note": "Wildcard rebuild unavailable: the weekly-XI solve returned no squad (solver time cap "
+                    f"{(cfg.get('solver', {}) or {}).get('time_limit_seconds', '?')} s reached, or infeasible)"
+                    + (f" - {diag}" if diag else "") + "."}
+
+
+def pick_wc_variant(plain_total: float | None, aware_total: float | None, margin: float) -> dict:
+    """Patch 114: plain (XI-first) Wildcard unless the chip-aware one (Bench Boost bench + Triple Captain target) is clearly
+    better -- strictly more than the margin of error. Returns {'variant': 'plain'|'chip-aware', 'edge': aware - plain}."""
+    if aware_total is None:
+        return {"variant": "plain", "edge": None}
+    if plain_total is None:
+        return {"variant": "chip-aware", "edge": None}
+    edge = round(float(aware_total) - float(plain_total), 6)
+    return {"variant": "chip-aware" if edge > float(margin) + 1e-9 else "plain", "edge": edge}
+
+
+def tc_target_candidates(pool: pd.DataFrame, tc_gw: int, own_codes, k: int = 3) -> list[dict]:
+    """Patch 114: the top-`k` available players by xPts in the Triple Captain week who are NOT already in the squad."""
+    col = f"xpts_gw{int(tc_gw)}"
+    if pool is None or pool.empty or col not in pool.columns:
+        return []
+    d = pool[~pool["code"].isin(set(own_codes))]
+    if "status" in d.columns:
+        d = d[d["status"] == "a"]
+    d = d.assign(_v=pd.to_numeric(d[col], errors="coerce")).dropna(subset=["_v"]).sort_values("_v", ascending=False).head(int(k))
+    return [{"code": int(r["code"]), "name": str(r.get("web_name", "")), "xpts": round(float(r["_v"]), 2),
+             "position": r.get("position"), "price": r.get("price")} for _, r in d.iterrows()]
+
+
 def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,
                      fh_ref_score: float | None, types: tuple, moe_fn=None, pick_rule: str = "best_horizon",
                      allowed: dict | None = None) -> dict:
@@ -2708,10 +3105,13 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
       Triple Captain= the best-XI top scorer's xPts (the extra x1 on top of the captain doubling already counted),
                       never the Wildcard/Free Hit/Bench Boost week; the PLAYER is named (`tc_player`).
       Free Hit      = (fh_ref_score - squad's best-XI value) at `fh_gw`, floored at 0 (it reverts, so only the gap counts).
-    Patch 113 pick rule `pick_rule="best_horizon"` (default): the best week across the WHOLE horizon; exact ties -> the
-    earlier week; when both TC and BB are wanted they are chosen as a PAIR (best combined value, different weeks).
-    Near-ties are reported (`tc_conf`/`bb_conf` = 'near-tie') instead of moving the chip to another week.
-    `pick_rule="latest_tied"` restores the Patch 112 rule (ties within the margin of error -> latest week, BB first).
+    Patch 113 pick rule `pick_rule="best_horizon"` (default): the best week across the WHOLE horizon; when both TC and BB
+    are wanted they are chosen as a PAIR (best combined value, different weeks). Near-ties are reported (`tc_conf`/
+    `bb_conf` = 'near-tie', and `tc_tie_set`/`bb_tie_set` = every week within Rule #34's band of the best; compared horizon
+    = one week, so the 2-point floor) instead of moving the chip to another week.
+    Patch 115 (model v6.12 ruling 1): EXACT ties go to the LATER week. `pick_rule="best_horizon_earlier"` keeps the Patch 113
+    behaviour (exact ties -> earlier); `pick_rule="latest_tied"` restores the Patch 112 rule (ties within the margin of
+    error -> latest week, BB first).
     `allowed` = {chip key: GWs} limits a chip to its earliest still-available window (a first-half chip lapses at the
     deadline); None = no restriction. `types` uses the chip keys '3xc', 'bboost', 'freehit'.
     Returns {'tc','bb','fh': (gw, value)|None, 'total', 'tc_player', '*_by_gw', '*_gap', '*_best', '*_conf'}."""
@@ -2736,7 +3136,7 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
                               "team": top.get("team", ""), "xpts": round(float(xv.max()), 2)} if top is not None else None)}
     out = {"tc": None, "bb": None, "fh": None, "tc_by_gw": {}, "bb_by_gw": {}, "tc_gap": None, "bb_gap": None,
            "tc_best": None, "bb_best": None, "tc_player": None, "tc_conf": None, "bb_conf": None,
-           "tc_runner": None, "bb_runner": None}
+           "tc_runner": None, "bb_runner": None, "tc_tie_set": [], "bb_tie_set": []}
 
     def _ok(key, g):
         return g not in blocked and (allowed is None or key not in allowed or g in set(allowed[key]))
@@ -2760,8 +3160,15 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         tied = [k for k, v in cand.items() if best - v <= _moe(best) + 1e-9]
         return max(tied)
 
+    later = pick_rule != "best_horizon_earlier"
+
     def _argmax(cand):
-        return max(cand, key=lambda k: (cand[k], -k))          # highest value; exact ties -> the earlier week
+        # highest value; Patch 115: exact ties -> the LATER week (model v6.12), unless the earlier-week switch is set
+        return max(cand, key=(lambda k: (cand[k], k)) if later else (lambda k: (cand[k], -k)))
+
+    def _tie_set(cand):
+        best = max(cand.values())
+        return sorted((k, round(v, 2)) for k, v in cand.items() if best - v <= _moe(best) + 1e-9)
 
     def _fill(slot, cand, g):
         out[slot] = (g, cand[g])
@@ -2770,6 +3177,7 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         out[slot + "_runner"] = _runner(cand, g)
         b = _argmax(cand)
         out[slot + "_best"] = (b, cand[b])
+        out[slot + "_tie_set"] = _tie_set(cand)
         gp = out[slot + "_gap"]
         out[slot + "_conf"] = "clear" if (gp is not None and gp > _moe(cand[g]) + 1e-9) else "near-tie"
 
@@ -2788,7 +3196,7 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
         if cand_bb and cand_tc:
             pairs = [(cand_bb[b] + cand_tc[t], b, t) for b in cand_bb for t in cand_tc if b != t]
             if pairs:
-                _, gb, gt = max(pairs, key=lambda x: (x[0], -x[1], -x[2]))
+                _, gb, gt = max(pairs, key=(lambda x: (x[0], x[1], x[2])) if later else (lambda x: (x[0], -x[1], -x[2])))
             else:
                 gb, gt = _argmax(cand_bb), None
         elif cand_bb:
@@ -2813,7 +3221,7 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
     return out
 
 
-def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None) -> str:
+def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None) -> str:
     """Patch 113: one honest sentence about how clear a chip week is. Always starts with a capital and ends with a
     full stop, so it can follow any caption without stray punctuation."""
     if chosen is None:
@@ -2827,8 +3235,12 @@ def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None) -> str:
         return f"GW{gw} is the only {what} available."
     if conf == "clear":
         return f"GW{gw} is {gap:+.1f} xPts clear of the next-best {what}."
+    tie_txt = ""
+    others = [w for w, _ in (tie_set or []) if w != gw]
+    if others:
+        tie_txt = " Tie set (inside the band): " + ", ".join(f"GW{w}" for w in sorted(others + [gw])) + "."
     return (f"GW{gw} is the best {what} but only {max(gap, 0.0):+.1f} xPts ahead of the next one, inside the margin of "
-            f"error, so treat it as low confidence.")
+            f"error, so treat it as low confidence." + tie_txt)
 
 
 def chip_captain_rows(now: dict | None, planning_gw: int, wc_gw: int | None, wc_top: dict | None,
