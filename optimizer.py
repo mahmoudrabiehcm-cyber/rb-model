@@ -172,6 +172,13 @@ def _cbc_solver(msg: int = 0, time_limit: float | None = _DEFAULT_SOLVE_TIME_LIM
     return pulp.COIN_CMD(msg=msg, gapRel=0, gapAbs=0, timeLimit=time_limit)
 
 
+def parallel_workers(n_tasks: int, cap: int = 4) -> int:
+    """Patch 115 fix: how many CBC subprocess solves may run side by side -- never more than the tasks, the cap (4) or the
+    CPU count (a 2-core host running four heavy solves at once slowed each past the 12 s solver cap, so every squad was dropped)."""
+    import os as _os
+    return max(1, min(int(cap), int(n_tasks), int(_os.cpu_count() or 1)))
+
+
 def _solve_time_limit(cfg: dict) -> float | None:
     """Reads `solver.time_limit_seconds` from model_config.yaml (see that
     file's comment for the full 2026-09-28 investigation this backs), falling
@@ -528,7 +535,8 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
                             bench_weight: float = 0.08, bb_col: str | None = None,
                             bonus: dict | None = None, label: str | None = None,
                             week_weights: list | None = None, captain: bool = False,
-                            retain_pool_codes: list | None = None, min_retain: int = 0) -> dict | None:
+                            retain_pool_codes: list | None = None, min_retain: int = 0,
+                            captain_k: int = 0) -> dict | None:
     """Patch 114 (manager: the Wildcard must be the best team over the window, then shaped for the chips). Verified in the
     Patch 113 code: solve_squad() maximises the plain SUM of all 15 players, i.e. every player counts as a starter in
     every week. Here the squad (x_i) and a legal starting XI for EACH week of the window (y_ig) are chosen together:
@@ -584,7 +592,12 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
             WK = (WK + [WK[-1]] * len(cols))[:len(cols)] if WK else [1.0] * len(cols)
         cap_v = {}
         if captain:
-            cap_v = {(i, c): pulp.LpVariable(f"c_{i}_{k}", lowBound=0, upBound=1) for k, c in enumerate(cols) for i in I}
+            # Patch 115 fix: only each week's top-`captain_k` scorers can be the captain (0 = everyone). The captain is the
+            # XI's best scorer, so a squad whose XI holds none of the top 60 of a week is not a realistic optimum; measured
+            # identical squad and total on 3 pools, ~2x faster under four parallel solves.
+            TOP = {c: (set(sorted(I, key=lambda i, c=c: -V[c][i])[:int(captain_k)]) if int(captain_k) > 0 else set(I)) for c in cols}
+            cap_v = {(i, c): pulp.LpVariable(f"c_{i}_{k}", lowBound=0, upBound=1) for k, c in enumerate(cols) for i in I
+                     if i in TOP[c]}
         terms = []
         for k, c in enumerate(cols):
             w = 1.0 if (bb_col is not None and c == bb_col) else bw
@@ -593,14 +606,15 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
                 v = V[c][i]
                 extra = v if (b_code is not None and CODE[i] == b_code and c == b_col) else 0.0
                 terms.append(wk * (y[(i, c)] * ((1.0 - w) * v + extra) + x[i] * (w * v)))
-                if captain:
+                if captain and (i, c) in cap_v:
                     terms.append(cap_v[(i, c)] * (wk * v))
         prob += pulp.lpSum(terms)
         if captain:
             for c in cols:
-                prob += pulp.lpSum(cap_v[(i, c)] for i in I) == 1
+                prob += pulp.lpSum(cap_v[(i, c)] for i in I if (i, c) in cap_v) == 1
                 for i in I:
-                    prob += cap_v[(i, c)] <= y[(i, c)]
+                    if (i, c) in cap_v:
+                        prob += cap_v[(i, c)] <= y[(i, c)]
         if retain_pool_codes and int(min_retain) > 0:
             _ret = set(retain_pool_codes)
             prob += pulp.lpSum(x[i] for i in I if CODE[i] in _ret) >= int(min_retain)
@@ -975,7 +989,8 @@ def _rgv_key(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str, bench_wei
     vals = np.nan_to_num(squad[gw_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
     xm = (np.nan_to_num(squad[xm_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
           if xm_col in squad.columns else None)
-    return (gw_col, xm_col, float(bench_weight_scale), float(tcfg.get("bench_gk_autosub_prob", 0.05)),
+    return (gw_col, xm_col, float(bench_weight_scale), bool(tcfg.get("planner_captain", False)),
+            float(tcfg.get("bench_gk_autosub_prob", 0.05)),
             tuple(tcfg.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15])), tuple(squad.index.tolist()),
             tuple(squad["position"].tolist()), tuple(vals.tolist()), None if xm is None else tuple(xm.tolist()))
 
@@ -1034,6 +1049,12 @@ def _realized_gw_value_uncached(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_
     xi_total = float(xi_result["total"])
     bench_total = _bench_autosub_total(squad, xi, gw_col, xm_col, cfg)
     bench_total *= bench_weight_scale
+    if bool((cfg.get("transfer", {}) if cfg else {}).get("planner_captain", False)):
+        # Patch 115 fix 2: OPT-IN sensitivity switch (default OFF = Standing Rule #31, values unchanged). ON adds the
+        # XI's top scorer once, like Rule #54 asks of the Wildcard build.
+        cap = float(xi[gw_col].max()) if not xi.empty else 0.0
+        return {"xi_total": round(xi_total, 2), "bench_total": round(bench_total, 2), "captain_bonus": round(cap, 2),
+                "total_realized": round(xi_total + bench_total + cap, 2)}
     return {"xi_total": round(xi_total, 2), "bench_total": round(bench_total, 2),
             "total_realized": round(xi_total + bench_total, 2)}
 

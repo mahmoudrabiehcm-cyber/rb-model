@@ -587,21 +587,35 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
         obj_col = f"_wc_window_sum_gw{t}"
         full_pool_t = full_pool.copy()
         full_pool_t[obj_col] = full_pool_t[window_cols].sum(axis=1, skipna=True)
+        _tier = None
         if objective == "weekly_xi":
             _ece = cfg.get("chip_extended_check", {}) or {}
             _dec = float(_ece.get("wc_build_decay", 0.9))
             _wts = [round(_dec ** k, 6) for k in range(len(window_cols))]
             _bw = float(cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
             _cap = bool(_ece.get("wc_build_captain", True))
-            rebuild = opt.solve_squad_xi_weighted(full_pool_t, cfg, team_value, window_cols, bench_weight=_bw,
-                                                  label=f"wc_window_value_gw{t}", week_weights=_wts, captain=_cap)
+            _capk = int(_ece.get("wc_build_captain_k", 60))
+
+            def _xi_solve(extra_kw, label):
+                # Patch 115 fix: weekly XI + captain first; if it cannot be solved in time, the weekly XI without the captain
+                # (labelled via build_tier); NEVER the plain 15-man sum (Rule #54).
+                for cap_on, tier in ([(True, "weekly_xi_captain"), (False, "weekly_xi")] if _cap else [(False, "weekly_xi")]):
+                    res_ = opt.solve_squad_xi_weighted(full_pool_t, cfg, team_value, window_cols, bench_weight=_bw, label=label,
+                                                       week_weights=_wts, captain=cap_on, captain_k=_capk, **extra_kw)
+                    if res_ is not None and res_.get("squad") is not None and not res_["squad"].empty:
+                        return res_, tier
+                return None, None
+            rebuild, _tier = _xi_solve({}, f"wc_window_value_gw{t}")
         else:
             rebuild = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
                                        label=f"wc_window_value_gw{t}")
         if rebuild is None or rebuild.get("squad") is None or rebuild["squad"].empty:
             return None
-        rebuild_total = opt.realized_horizon_value(rebuild["squad"], window_gws, cfg)
-        hold_total = opt.realized_horizon_value(squad_df, window_gws, cfg)
+        # Patch 115 fix (Rule #54(d)): the weekly-XI objective is MEASURED with the captain too (rating_horizon_value), like the
+        # build; the default objective keeps the captain-free realized value (Rule #31 / Patch 89 reconciliation).
+        _measure = opt.rating_horizon_value if objective == "weekly_xi" else opt.realized_horizon_value
+        rebuild_total = _measure(rebuild["squad"], window_gws, cfg)
+        hold_total = _measure(squad_df, window_gws, cfg)
         # End-of-window accrued free-transfer count (+1/GW from
         # `free_transfers`, capped at 5) -- same accrual formula
         # `solve_reachable_ceiling_by_gw()` already uses elsewhere in this
@@ -609,19 +623,19 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
         accrued_ft = min(5, max(0, free_transfers) + max(0, len(window_gws) - 1))
         min_retain = max(0, min(15, 15 - accrued_ft))
         if objective == "weekly_xi":
-            reachable = opt.solve_squad_xi_weighted(full_pool_t, cfg, team_value, window_cols, bench_weight=_bw,
-                                                    label=f"wc_window_reachable_gw{t}", week_weights=_wts, captain=_cap,
-                                                    retain_pool_codes=list(squad_df["code"]), min_retain=min_retain)
+            reachable, _rtier = _xi_solve({"retain_pool_codes": list(squad_df["code"]), "min_retain": min_retain},
+                                          f"wc_window_reachable_gw{t}")
         else:
             reachable = opt.solve_squad(full_pool_t, cfg, budget=team_value, objective_col=obj_col,
                                          retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
                                          label=f"wc_window_reachable_gw{t}")
-        best_path_total = round(opt.realized_horizon_value(reachable["squad"], window_gws, cfg), 2) \
+        best_path_total = round(_measure(reachable["squad"], window_gws, cfg), 2) \
             if reachable and reachable.get("squad") is not None and not reachable["squad"].empty \
             else round(hold_total, 2)
         return {"window_gws": window_gws, "rebuild_total": rebuild_total,
                     "best_path_total": best_path_total, "hold_total": round(hold_total, 2),
                     "gap": round(rebuild_total - best_path_total, 2), "rebuild_squad": rebuild["squad"],
+                    "build_tier": _tier,
                     # Patch 89 (Rule #51) -- the reachable-baseline squad,
                     # additive so reconcile_wildcard_gain() can re-score it
                     # under a different formula (e.g. captain-inclusive)
@@ -635,7 +649,7 @@ def wildcard_window_value_scan(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cf
     # solve side by side (same pattern as the chain comparison); results are collected in candidate order.
     if objective == "weekly_xi" and len(candidate_gws) > 1:
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(4, len(candidate_gws))) as _ex:
+        with ThreadPoolExecutor(max_workers=opt.parallel_workers(len(candidate_gws))) as _ex:
             _res = list(_ex.map(_one, list(candidate_gws)))
     else:
         _res = [_one(t) for t in candidate_gws]

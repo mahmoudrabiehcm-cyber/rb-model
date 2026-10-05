@@ -815,6 +815,35 @@ def post_chip_gain(score: dict, base: dict, t: int, gws: list, n: int, decay: fl
     return {"gain": round(float(gain), 2), "weeks": weeks}
 
 
+def decay_sensitivity(cands: dict, base_score: dict, gws: list, n: int, skip_gw, decays, decide_fn):
+    """Patch 115 fix 2: how much does the Wildcard pick depend on the estimate-tier decay (0.9)? Re-decides the week at each
+    alternative decay from the SAME solved squads (their weekly scores; no re-solve). Gain = decay-weighted post-chip chain
+    gain + the candidate's chip gain. `decide_fn(gains)` is the real decision (band, later week, guardrail). A flip means the
+    verdict is low confidence; the pick itself is never changed. None when there is nothing to vary."""
+    if not cands or not int(n) or not decays:
+        return None
+    picks, all_gains = {}, {}
+    for d in decays:
+        g = {}
+        for t, c in cands.items():
+            pg = post_chip_gain(c["score"], base_score, t, gws, int(n), float(d), skip_gw=skip_gw)
+            if pg is None:
+                continue
+            g[t] = round(pg["gain"] + float(c.get("gain_chips") or 0.0), 2)
+        if not g:
+            continue
+        dec = decide_fn(g)
+        picks[d] = (dec or {}).get("gw")
+        all_gains[d] = g
+    if not picks:
+        return None
+    flips = len(set(picks.values())) > 1
+    shown = ", ".join(f"decay {d}: " + (f"GW{p}" if p is not None else "HOLD") for d, p in picks.items())
+    text = (f"Decay sensitivity (0.9 is estimate-tier): {shown}"
+            + (" - the week moves, so this verdict is low confidence." if flips else " - same week at every decay tested."))
+    return {"picks": picks, "gains": all_gains, "flips": flips, "text": text}
+
+
 def common_post_weeks(cands: list, gws: list, cap: int = 6, minimum: int = 4):
     """Patch 115 (v6.12 ruling 3a): ONE post-chip window length for every candidate = min(cap, fewest weeks left among the
     scorable candidates), never below `minimum` (Rule #48's four). Candidates with fewer than `minimum` weeks left are
@@ -928,8 +957,14 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
                              window_totals: dict | None = None, moe_fn=None, health: dict | None = None,
                              base_health: float | None = None, health_band: float | None = None,
                              not_scored: list | None = None, fallback: list | None = None,
-                             prev_gw: int | None = None, crosscheck: dict | None = None) -> dict | None:
-    """Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path over the checked
+                             prev_gw: int | None = None, crosscheck: dict | None = None,
+                             band_totals: dict | None = None, unavailable_reason: str | None = None,
+                             extra_lines: list | None = None) -> dict | None:
+    """Patch 115 fix: the tie band is Rule #34 on the FOUR-gameweek total (`band_totals`, about 5) even when the primary
+    window (`window_totals`) is longer -- v6.12 Rules #34 / #48(a). A later-week pick carries `wait_cost` (xPts lost against
+    the best week; display only, the pick is unchanged). `unavailable_reason` says why no chain comparison exists.
+
+    Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path over the checked
     span). `gains` = {candidate GW: decay-weighted xPts gain of playing the Wildcard at that GW vs the no-chip chained plan
     over the SAME number of post-chip weeks (free transfers only, no hits)}.
 
@@ -954,7 +989,7 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
              "sub": sub, "pill": pill, "note": note, "note_cls": note_cls,
              "gains": dict(gains_ or {}), "best_gain": best, "band": None, "tie_set": [], "shift": wc_shift_label(prev_gw, gw),
              "shift_text": "", "guardrail": None, "not_scored": list(not_scored or []), "fallback_weeks": list(fallback or []),
-             "crosscheck": crosscheck, "detail_lines": []}
+             "crosscheck": crosscheck, "detail_lines": [], "wait_cost": None}
         d.update(extra)
         return d
 
@@ -973,16 +1008,21 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
         if crosscheck and crosscheck.get("text"):
             L.append(crosscheck["text"])
         L.append("cap_use_bar 0.25 and value tail 3 are estimate-tier (unvalidated) and can move this verdict")
+        for x_ in (extra_lines or []):
+            L.append(x_)
         return L
 
     if not gains:
+        why = f" — {unavailable_reason}" if unavailable_reason else ""
         sub = " · ".join(x for x in [today_txt, "chain comparison unavailable"] if x)
+        why_lines = ([f"Chain comparison unavailable: {unavailable_reason}"] if unavailable_reason else []) + list(extra_lines or [])
         if seq_gw is not None:
             return _pack("unverified", seq_gw, f"SEQUENCE GW{seq_gw}", "active", "is-active",
                          f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap", sub,
-                         f"Wildcard: sequence says GW{seq_gw} (chain comparison unavailable)")
+                         f"Wildcard: sequence says GW{seq_gw} (chain comparison unavailable{why})",
+                         detail_lines=why_lines)
         return _pack("unverified", None, "TRIGGER ACTIVE", "active", "is-active", f"{gap_txt} gap", sub,
-                     "Wildcard: trigger active (chain comparison unavailable)")
+                     f"Wildcard: trigger active (chain comparison unavailable{why})", detail_lines=why_lines)
     best = max(gains.values())
     best_gw0 = max(g for g, v in gains.items() if v == best)
     if best < floor:
@@ -990,7 +1030,9 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
         return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
                      f"Wildcard: HOLD — adds only {best:+.1f} xPts over the window", None, "", gains, best,
                      detail_lines=_lines(None, [], None, None))
-    ref_total = (window_totals or {}).get(best_gw0)
+    ref_total = (band_totals or {}).get(best_gw0)
+    if ref_total is None:
+        ref_total = (window_totals or {}).get(best_gw0)
     band = float(moe_fn(ref_total)) if (moe_fn is not None and ref_total is not None) else float(margin)
     tie = sorted(g for g, v in gains.items() if v >= best - band - 1e-9)
     guard = None
@@ -1012,8 +1054,15 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
     if shift == "later" and prev_gw is not None:
         shift_text = (f"Rule #11 reversal: the recommended Wildcard week moved LATER (GW{prev_gw} → GW{best_gw}) since the "
                       f"previous run; logged in the trigger log.")
+    wait = None
+    if best_gw != best_gw0 and gains.get(best_gw0) is not None:
+        wait = {"best_gw": best_gw0, "pick_gw": best_gw, "cost": round(float(gains[best_gw0]) - float(gain), 2)}
     extra = dict(band=band, tie_set=tie, guardrail=guard, shift=shift, shift_text=shift_text,
-                 detail_lines=_lines(band, tie, guard, best_gw))
+                 detail_lines=_lines(band, tie, guard, best_gw), wait_cost=wait)
+    if wait:
+        extra["detail_lines"].insert(1 if extra["detail_lines"] else 0,
+                                     f"Waiting from GW{wait['best_gw']} to GW{wait['pick_gw']} costs about {wait['cost']:.1f} xPts "
+                                     f"against the best week; the later week is the model's tie rule (Rule #48(a)), the date is your call (Rule #32)")
     if best_gw == planning_gw:
         sub = " · ".join(x for x in [today_txt, "best week in the window"] if x)
         return _pack("play_now", best_gw, "PLAY NOW", "play", "is-play", f"{gain:+.1f} xPts", sub,
@@ -2936,7 +2985,7 @@ def top_scorer(sq: pd.DataFrame, col: str) -> dict | None:
 
 def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: list, mode: str = "weekly_xi",
                      bench_w: float | None = None, bb_gw: int | None = None, tc_target: dict | None = None,
-                     label: str = "chain_wc_rebuild") -> pd.DataFrame | None:
+                     label: str = "chain_wc_rebuild", captain: bool | None = None) -> pd.DataFrame | None:
     """Patch 114: the Wildcard's rebuilt squad over `window_gws`. mode 'weekly_xi' (default): the squad and a legal starting
     XI for EACH week are chosen together -- the XI counts in full, the bench at the planner's low bench weight; the
     chip-aware variant also counts the Bench Boost week's bench in full (`bb_gw`) and the Triple Captain target's extra x1
@@ -2960,8 +3009,10 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
         ece = cfg.get("chip_extended_check", {}) or {}
         # Patch 115 (Rule #54): nearer weeks count more (decay) and each week's captain is in the objective
         wts = decay_weights(len(cols), float(ece.get("wc_build_decay", 0.9)))
+        cap_on = bool(ece.get("wc_build_captain", True)) if captain is None else bool(captain)
         res = opt.solve_squad_xi_weighted(wp, cfg, float(budget), cols, bench_weight=bw, bb_col=bb_col, bonus=bonus,
-                                          label=label, week_weights=wts, captain=bool(ece.get("wc_build_captain", True)))
+                                          label=label, week_weights=wts, captain=cap_on,
+                                          captain_k=int(ece.get("wc_build_captain_k", 60)))
     if res is None or res.get("squad") is None:
         return None
     sq = res["squad"]
@@ -2970,6 +3021,54 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
     sq = sq.copy()
     sq["_wc_obj"] = sq[cols].sum(axis=1)
     return sq
+
+
+parallel_workers = opt.parallel_workers
+
+
+def four_week_total(score: dict, t: int, gws: list, weeks: int = 4):
+    """Patch 115 fix (Rule #34 / #48(a)): the compared total for the Wildcard tie band = the squad's scored xPts over the
+    FOUR gameweeks from `t` (about 250, so a band of about 5), whatever the primary window length. None if fewer remain."""
+    ws = [g for g in gws if g >= t][:int(weeks)]
+    if len(ws) < int(weeks):
+        return None
+    return round(float(sum(score[g] for g in ws)), 2)
+
+
+def wc_rebuild_with_fallback(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: list, mode: str = "weekly_xi",
+                             bench_w: float | None = None, bb_gw: int | None = None, tc_target: dict | None = None,
+                             label: str = "chain_wc_rebuild") -> dict:
+    """Patch 115 fix: the Wildcard rebuild with a visible fallback ladder instead of a silent drop.
+      tier 'weekly_xi_captain' -> the full Rule #54 objective (weekly XI + captain + bench + decay)
+      tier 'weekly_xi'         -> the same without the captain term; `note` says Rule #54(a) is not met this run
+      tier None                -> unavailable; `note` says why. NEVER the plain 15-man sum (Rule #54) -- that exists only when
+                                  mode='sum15' is asked for explicitly (switch chip_extended_check.wc_objective).
+    Returns {'squad', 'tier', 'note'}."""
+    if mode == "sum15":
+        sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="sum15", label=label)
+        return {"squad": sq, "tier": "sum15" if sq is not None else None,
+                "note": None if sq is not None else "Wildcard rebuild unavailable: the 15-man solve returned no squad."}
+    want_cap = bool((cfg.get("chip_extended_check", {}) or {}).get("wc_build_captain", True))
+    sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="weekly_xi", bench_w=bench_w, bb_gw=bb_gw,
+                          tc_target=tc_target, label=label, captain=want_cap)
+    if sq is not None:
+        return {"squad": sq, "tier": "weekly_xi_captain" if want_cap else "weekly_xi", "note": None}
+    if want_cap:
+        sq = wc_rebuild_squad(pool, cfg, budget, window_gws, mode="weekly_xi", bench_w=bench_w, bb_gw=bb_gw,
+                              tc_target=tc_target, label=label, captain=False)
+        if sq is not None:
+            return {"squad": sq, "tier": "weekly_xi",
+                    "note": "Rule #54(a) not met this run: the captain term could not be solved in time, so the Wildcard squad "
+                            "was built on the weekly XI without the captain (still the weekly objective, never the 15-man sum)."}
+    diag = None
+    try:
+        diag = opt.get_diagnostic(label)
+    except Exception:
+        diag = None
+    return {"squad": None, "tier": None,
+            "note": "Wildcard rebuild unavailable: the weekly-XI solve returned no squad (solver time cap "
+                    f"{(cfg.get('solver', {}) or {}).get('time_limit_seconds', '?')} s reached, or infeasible)"
+                    + (f" - {diag}" if diag else "") + "."}
 
 
 def pick_wc_variant(plain_total: float | None, aware_total: float | None, margin: float) -> dict:
