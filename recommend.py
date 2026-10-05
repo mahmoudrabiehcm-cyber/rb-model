@@ -1237,8 +1237,15 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             chip_schedule: dict | None = None,
                             use_tie_break: bool = True,
                             cap_use_bar: float | None = None,
-                            value_tail: list | None = None) -> dict:
-    """No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
+                            value_tail: list | None = None,
+                            tc_target: dict | None = None) -> dict:
+    """Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Chip Plan picked. When
+    given (and the week is inside the planned/valued weeks), the squad's top XI scorer in that week counts one extra time
+    (the tripled captain's extra x1), and the target's horizon sum gets the same bonus so the planner can BUY him with a
+    free transfer when that beats rolling. None (default) = unchanged behaviour. DEVIATION from Standing Rule #31 (same
+    switchable chip-value deviation as Patch 112/113).
+
+    No-hits, multi-GW pacing plan (project discussion, 2026-09-07) — see
     the call site in `suggest_transfers()` for why this exists. Simulates
     forward through every GW in `gw_list`:
 
@@ -1361,6 +1368,27 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     if "code" in full_pool.columns:
         full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
 
+    _tc_gw = int(tc_target["gw"]) if tc_target and tc_target.get("gw") is not None else None
+    _tc_col = f"xpts_gw{_tc_gw}" if _tc_gw is not None else None
+    if _tc_col and _tc_col in full_pool.columns and "xpts_horizon_sum" in full_pool.columns \
+            and (_tc_gw in gw_list or _tc_gw in value_tail):
+        _m = full_pool["code"] == tc_target["code"]
+        if _m.any():
+            full_pool.loc[_m, "xpts_horizon_sum"] = (pd.to_numeric(full_pool.loc[_m, "xpts_horizon_sum"], errors="coerce")
+                                                     + pd.to_numeric(full_pool.loc[_m, _tc_col], errors="coerce").fillna(0.0))
+    else:
+        _tc_gw = None
+
+    def _tc_extra(sq, gws_valued):
+        """Triple Captain's extra x1: the best XI's top scorer in the TC week (0 when no target / week not valued)."""
+        if _tc_gw is None or _tc_gw not in gws_valued or sq is None or _tc_col not in sq.columns:
+            return 0.0
+        b = opt.best_starting_xi(sq, _tc_col)
+        if not b or b.get("xi") is None or b["xi"].empty:
+            return 0.0
+        v = pd.to_numeric(b["xi"][_tc_col], errors="coerce").max()
+        return 0.0 if pd.isna(v) else float(v)
+
     sim_squad = squad_df.copy()
     ft_bank = free_transfers
     weekly_plan = []
@@ -1413,9 +1441,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             # the same Free Hit exclusion every other week gets.
             wc_remaining = remaining_gws
             old_total_wc = opt.realized_horizon_value(sim_squad, wc_remaining, cfg,
-                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw) \
+                + _tc_extra(sim_squad, wc_remaining)
             new_total_wc = opt.realized_horizon_value(new_squad, wc_remaining, cfg,
-                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw)
+                                                        bench_weight_scale=bench_w_wc, bb_play_gw=bb_play_gw) \
+                + _tc_extra(new_squad, wc_remaining)
             net_gain_wc = round(new_total_wc - old_total_wc, 2)
             pairs_wc = _pair_moves(sim_squad, new_squad, this_gw_col)
             week_moves = [{**_move_row(p, 0.0, net_gain_wc, True), "gw": gw} for p in pairs_wc]
@@ -1444,7 +1474,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # doesn't let bench-quality alone carry a marginal move.
         bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
         old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
-                                                bb_play_gw=bb_play_gw)
+                                                bb_play_gw=bb_play_gw) + _tc_extra(sim_squad, remaining_gws)
         moe = eng.margin_of_error_threshold(old_total, cfg)
 
         candidates = {0: {"squad": sim_squad, "total": old_total, "net_gain": 0.0, "hit_cost": 0.0,
@@ -1466,7 +1496,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 continue  # nothing worth swapping at this k — already covered by k=0
             hit_cost = hit_cost_per * max(0, actual_k - ft_bank) if allow_hits else 0.0
             new_total = opt.realized_horizon_value(new_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
-                                                    bb_play_gw=bb_play_gw)
+                                                    bb_play_gw=bb_play_gw) + _tc_extra(new_squad, remaining_gws)
             # Patch 36 — same nailed-gate baseline as suggest_transfers(),
             # applied per week: a non-nailed out-player's projection is
             # zeroed across the remaining weeks before the baseline is
@@ -1476,7 +1506,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             out_codes_this = out_codes_all - set(new_squad["code"])
             baseline_info = realistic_baseline_value(sim_squad, out_codes_this, remaining_gws, cfg,
                                                       bb_play_gw=bb_play_gw)
-            baseline_total = baseline_info["baseline_total"]
+            baseline_total = baseline_info["baseline_total"] + _tc_extra(sim_squad, remaining_gws)
             net_gain = round(new_total - baseline_total - hit_cost, 2)
             if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
                 candidates[actual_k] = {"squad": new_squad, "total": new_total, "net_gain": net_gain,
@@ -2696,6 +2726,63 @@ def top_scorer(sq: pd.DataFrame, col: str) -> dict | None:
     row = xi.loc[vals.idxmax()]
     return {"name": str(row.get("web_name", "")), "code": int(row["code"]) if "code" in xi.columns else None,
             "team": row.get("team", ""), "xpts": round(float(vals.max()), 2)}
+
+
+def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: list, mode: str = "weekly_xi",
+                     bench_w: float | None = None, bb_gw: int | None = None, tc_target: dict | None = None,
+                     label: str = "chain_wc_rebuild") -> pd.DataFrame | None:
+    """Patch 114: the Wildcard's rebuilt squad over `window_gws`. mode 'weekly_xi' (default): the squad and a legal starting
+    XI for EACH week are chosen together -- the XI counts in full, the bench at the planner's low bench weight; the
+    chip-aware variant also counts the Bench Boost week's bench in full (`bb_gw`) and the Triple Captain target's extra x1
+    (`tc_target` {code, gw}). 'sum15': the Patch 113 plain 15-man sum (switch chip_extended_check.wc_objective).
+    Returns the 15-man squad frame, or None when the window/solve is unavailable."""
+    cols = [f"xpts_gw{g}" for g in window_gws if f"xpts_gw{g}" in pool.columns]
+    if not cols:
+        return None
+    wp = pool.copy()
+    if mode == "sum15":
+        wp["_wc_obj"] = wp[cols].sum(axis=1)
+        res = opt.solve_squad(wp, cfg, budget=float(budget), objective_col="_wc_obj", label=label)
+    else:
+        bw = float(bench_w if bench_w is not None else cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
+        bb_col = f"xpts_gw{bb_gw}" if (bb_gw is not None and f"xpts_gw{bb_gw}" in cols) else None
+        bonus = None
+        if tc_target and tc_target.get("gw") is not None and f"xpts_gw{int(tc_target['gw'])}" in cols:
+            bonus = {"code": int(tc_target["code"]), "col": f"xpts_gw{int(tc_target['gw'])}"}
+        res = opt.solve_squad_xi_weighted(wp, cfg, float(budget), cols, bench_weight=bw, bb_col=bb_col, bonus=bonus,
+                                          label=label)
+    if res is None or res.get("squad") is None:
+        return None
+    sq = res["squad"]
+    if not isinstance(sq, pd.DataFrame):
+        sq = wp[wp["code"].isin([p["code"] for p in sq])]
+    sq = sq.copy()
+    sq["_wc_obj"] = sq[cols].sum(axis=1)
+    return sq
+
+
+def pick_wc_variant(plain_total: float | None, aware_total: float | None, margin: float) -> dict:
+    """Patch 114: plain (XI-first) Wildcard unless the chip-aware one (Bench Boost bench + Triple Captain target) is clearly
+    better -- strictly more than the margin of error. Returns {'variant': 'plain'|'chip-aware', 'edge': aware - plain}."""
+    if aware_total is None:
+        return {"variant": "plain", "edge": None}
+    if plain_total is None:
+        return {"variant": "chip-aware", "edge": None}
+    edge = round(float(aware_total) - float(plain_total), 6)
+    return {"variant": "chip-aware" if edge > float(margin) + 1e-9 else "plain", "edge": edge}
+
+
+def tc_target_candidates(pool: pd.DataFrame, tc_gw: int, own_codes, k: int = 3) -> list[dict]:
+    """Patch 114: the top-`k` available players by xPts in the Triple Captain week who are NOT already in the squad."""
+    col = f"xpts_gw{int(tc_gw)}"
+    if pool is None or pool.empty or col not in pool.columns:
+        return []
+    d = pool[~pool["code"].isin(set(own_codes))]
+    if "status" in d.columns:
+        d = d[d["status"] == "a"]
+    d = d.assign(_v=pd.to_numeric(d[col], errors="coerce")).dropna(subset=["_v"]).sort_values("_v", ascending=False).head(int(k))
+    return [{"code": int(r["code"]), "name": str(r.get("web_name", "")), "xpts": round(float(r["_v"]), 2),
+             "position": r.get("position"), "price": r.get("price")} for _, r in d.iterrows()]
 
 
 def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,

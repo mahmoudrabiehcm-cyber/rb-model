@@ -524,6 +524,95 @@ def solve_squad(players: pd.DataFrame, cfg: dict, budget: float = 100.0,
 
 
 @_cache_decorator
+def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, window_cols: list,
+                            bench_weight: float = 0.08, bb_col: str | None = None,
+                            bonus: dict | None = None, label: str | None = None) -> dict | None:
+    """Patch 114 (manager: the Wildcard must be the best team over the window, then shaped for the chips). Verified in the
+    Patch 113 code: solve_squad() maximises the plain SUM of all 15 players, i.e. every player counts as a starter in
+    every week. Here the squad (x_i) and a legal starting XI for EACH week of the window (y_ig) are chosen together:
+
+        maximise  sum_g sum_i [ y_ig * v_ig  +  (x_i - y_ig) * w_g * v_ig ]  +  bonus
+        w_g = 1.0 in the Bench Boost week (`bb_col` names its column), else `bench_weight`
+        bonus = the Triple Captain's extra x1: {"code": c, "col": "xpts_gwN"} adds v_cN to y_(c,N)
+
+    i.e. each week's best XI counts in full and the bench at the planner's own bench weight (Rule #12 / transfer.
+    bench_weight_non_bb_gw), exactly how the weekly scoring values a squad. bench_weight=1.0 reproduces solve_squad's
+    optimum. MEASURED before shipping (3 sandbox scenarios, GW6-13 window, realized value): a static single-XI variant
+    of this idea was WORSE than the 15-man sum in 2 of 3 scenarios, whereas this per-week model beat the 15-man sum in
+    all 3 (+2.7 to +6.7 xPts) and solves in ~1s. Not modelled (disclosed): the captain's doubling and the autosub
+    probability curve inside the solve (the squad is scored with them afterwards). Same legality as solve_squad:
+    2/5/5/3, club cap, budget, available players only."""
+    if pulp is None:
+        _diag(label, "pulp (the MILP library this solver needs) is not installed/importable in this environment.")
+        return None
+    cols = [c for c in (window_cols or []) if c in players.columns]
+    if not cols:
+        _diag(label, "no window column present for the XI-weighted solve.")
+        return None
+    df = players.dropna(subset=["price", "position"] + cols).copy()
+    df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
+    if "status" in df.columns:
+        df = df[df["status"] == "a"]
+    if df.empty:
+        _diag(label, "empty candidate pool for the XI-weighted solve (nothing survived the price/projection/position/"
+                      "status filters).")
+        return None
+    df = df.reset_index(drop=True)
+    bw = float(bench_weight)
+    try:
+        prob = pulp.LpProblem("fpl_squad_weekly_xi", pulp.LpMaximize)
+        I = list(df.index)
+        x = {i: _binary_var(prob, f"x_{i}") for i in I}
+        y = {(i, c): _binary_var(prob, f"y_{i}_{k}") for k, c in enumerate(cols) for i in I}
+        V = {c: df[c].tolist() for c in cols}
+        POS = df["position"].tolist()
+        TEAM = df["team"].tolist()
+        PRICE = df["price"].tolist()
+        CODE = df["code"].tolist()
+        b_code = int(bonus["code"]) if bonus and bonus.get("code") is not None else None
+        b_col = bonus.get("col") if bonus else None
+        terms = []
+        for c in cols:
+            w = 1.0 if (bb_col is not None and c == bb_col) else bw
+            for i in I:
+                v = V[c][i]
+                extra = v if (b_code is not None and CODE[i] == b_code and c == b_col) else 0.0
+                terms.append(y[(i, c)] * ((1.0 - w) * v + extra) + x[i] * (w * v))
+        prob += pulp.lpSum(terms)
+        prob += pulp.lpSum(x[i] * PRICE[i] for i in I) <= budget
+        prob += pulp.lpSum(x[i] for i in I) == cfg["squad_rules"]["squad_size"]
+        for pos, count in cfg["squad_rules"]["formation"].items():
+            prob += pulp.lpSum(x[i] for i in I if POS[i] == pos) == count
+        max_per_club = cfg["squad_rules"]["max_per_club"]
+        for team in df["team"].unique():
+            prob += pulp.lpSum(x[i] for i in I if TEAM[i] == team) <= max_per_club
+        bounds = {"GK": (1, 1), "DEF": (3, 5), "MID": (2, 5), "FWD": (1, 3)}
+        for c in cols:
+            prob += pulp.lpSum(y[(i, c)] for i in I) == 11
+            for pos, (lo, hi) in bounds.items():
+                s_ = pulp.lpSum(y[(i, c)] for i in I if POS[i] == pos)
+                prob += s_ >= lo
+                prob += s_ <= hi
+            for i in I:
+                prob += y[(i, c)] <= x[i]
+        status = _solve_and_get_status(prob, _cbc_solver(msg=0, time_limit=_solve_time_limit(cfg)))
+        if status != "Optimal":
+            _diag(label, f"CBC solver returned status={status} for the XI-weighted squad solve ({len(df)} candidates, "
+                          f"{len(cols)} weeks, budget={budget}).")
+            return None
+        chosen = [i for i in I if x[i].value() is not None and x[i].value() > 0.5]
+        squad = df.loc[chosen].sort_values(["position", cols[0]], ascending=[True, False])
+        _clear_diag(label)
+        return {"squad": squad, "total_xpts": round(float(sum(squad[c].sum() for c in cols)), 2),
+                "cost": round(squad["price"].sum(), 1), "data_gap_codes": []}
+    except Exception as exc:  # noqa: BLE001 -- same graceful degradation as solve_squad
+        print(f"[optimizer.solve_squad_xi_weighted] MILP build/solve failed ({len(cols)} weeks, {len(df)} candidates): "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        _diag(label, f"an unexpected exception hit the XI-weighted MILP: {type(exc).__name__}: {exc}")
+        return None
+
+
+@_cache_decorator
 def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col: str,
                           label: str | None = None) -> dict | None:
     """Patch 82 (2026-09-28, manager:

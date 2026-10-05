@@ -3323,5 +3323,8 @@ chip_extended_check:
   include_chip_value: true  # Patch 112: Triple Captain / Bench Boost / Free Hit value counts in the Wildcard decision (manager instruction; DEVIATES from Standing Rule #31 -- pending model-chat approval; false = chain gain without chips)
   replan_for_bb: true  # Patch 112: re-plan the decided Wildcard path once for the Bench Boost week the plan picked (transfers prepare the bench)
   value_tail_gws: 3   # Patch 112: GWs past the shown span used only to value late-week moves
+  wc_objective: weekly_xi  # Patch 114: Wildcard rebuild = squad + a legal starting XI for EACH week (XI in full, bench at transfer.bench_weight_non_bb_gw); sum15 = the Patch 113 plain 15-man sum
+  wc_chip_aware_variant: true  # Patch 114: Extended Check also builds a chip-aware Wildcard (Bench Boost week bench + Triple Captain target) and keeps it only if clearly better than the plain one
+  tc_ft_route: true  # Patch 114: the weekly planner may BUY the Triple Captain target with a free transfer (Rule #31 chip-value deviation, switchable)
   pick_rule: best_horizon  # Patch 113: Triple Captain / Bench Boost = best week across the horizon (exact ties -> earlier; TC+BB chosen as a pair); latest_tied = Patch 112 behaviour
   chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window
