@@ -2746,7 +2746,6 @@ transfer:
   # Team Rating %) — those are whole-squad ongoing-quality assessments, not a
   # specific transfer's marginal net gain, and keep full bench weight.
   bench_weight_non_bb_gw: 0.08
-  planner_captain: false  # Patch 115 fix 2: OFF = Standing Rule #31 (planner values exclude the captain). ON = sensitivity test only: the planner's per-week value adds the XI's top scorer once (Rule #54 reading). Not validated.
   # How many gameweeks ahead to look when checking whether a Wildcard/Free
   # Hit is coming up soon enough that banking a transfer for it beats
   # spending it on an incremental swap now.
@@ -3320,23 +3319,9 @@ chip_advisor_horizon:
 # this span for that one run; normal runs are unchanged.
 chip_extended_check:
   span_gws: 10        # Wildcard detection window in the extended run (Current..Current+9)
-  cap_use_bar: 0.25   # Patch 112 (ESTIMATE-TIER, unvalidated): at the 5-FT bank cap the 6th free transfer would be lost, so the chain SPENDS a free move whose net gain is >= this many xPts instead of Rolling (recommend.plan_transfer_schedule, cap_use_bar)
+  cap_use_bar: 0.25   # Patch 112: at the 5-FT cap, a free move with a real gain >= this is preferred to wasting the transfer (unvalidated)
   include_chip_value: true  # Patch 112: Triple Captain / Bench Boost / Free Hit value counts in the Wildcard decision (manager instruction; DEVIATES from Standing Rule #31 -- pending model-chat approval; false = chain gain without chips)
   replan_for_bb: true  # Patch 112: re-plan the decided Wildcard path once for the Bench Boost week the plan picked (transfers prepare the bench)
-  value_tail_gws: 3   # Patch 112 (ESTIMATE-TIER, unvalidated): GWs past the shown span added ONLY to the valuation of each move (remaining_gws = rest of span + this tail), never planned or shown; late-week moves are valued on 3 extra weeks
-  decay_check: [0.85, 0.95]  # Patch 115 fix 2: re-decide the Wildcard week at these decays from the same solved squads; a flip = low confidence (display only). [] = off
-  wc_objective: weekly_xi  # Patch 114: Wildcard rebuild = squad + a legal starting XI for EACH week (XI in full, bench at transfer.bench_weight_non_bb_gw); sum15 = the Patch 113 plain 15-man sum
-  wc_chip_aware_variant: true  # Patch 114: Extended Check also builds a chip-aware Wildcard (Bench Boost week bench + Triple Captain target) and keeps it only if clearly better than the plain one
-  tc_ft_route: true  # Patch 114: the weekly planner may BUY the Triple Captain target with a free transfer (Rule #31 chip-value deviation, switchable)
-  pick_rule: best_horizon  # Triple Captain / Bench Boost = best week across the horizon (TC+BB chosen as a pair); Patch 115 (model v6.12): exact ties -> the LATER week and the tie set (weeks within Rule #34's band, 2-pt floor) is shown; best_horizon_earlier = Patch 113 (exact ties -> earlier); latest_tied = Patch 112
-  wc_build_decay: 0.9      # Patch 115 (Rule #54, ESTIMATE-TIER): weekly weight of the Wildcard build window = decay^k (k=0 nearest week); 0.9 puts 62% of the total weight on the front four of eight weeks. 1.0 = flat (Patch 114)
-  wc_build_captain_k: 60   # Patch 115 fix: the captain term considers each week's top-K scorers only (K=60 gave the SAME squad and total as all ~700 on 3 test pools and halves the solve time under load; 0 = every player)
-  wc_band_weeks: 4         # Patch 115 fix (Rule #34 / #48(a)): the Wildcard tie band is the Rule #34 band of the FOUR-gameweek total (about 5), whatever the primary window length
-  wc_build_captain: true   # Patch 115 (Rule #54): the build objective counts each week's captain (the XI's top scorer, x1 extra); false = Patch 114 (no captain term)
-  post_chip_weeks: 6       # Patch 115 (v6.12 ruling 3, ESTIMATE-TIER): max post-Wildcard weeks every candidate is valued over (all candidates use the SAME number, never fewer than 4; a candidate without a full window is 'not scored')
-  post_chip_decay: 0.9     # Patch 115 (v6.12 ruling 3b, ESTIMATE-TIER): weekly decay of the post-chip weeks in the chain gain (week k counts decay^k)
-  market_coverage_gws: 5   # Patch 115 (v6.12 ruling 3c): weeks beyond Current+5 are fallback-tier (Rule #46(e)); note: no market-odds feed is wired, so CS% is team-strength fallback for EVERY week
-  wc_scan_objective: weekly_xi   # Patch 115 (v6.12 ruling 7): Rule #48 'Wildcard value if played alone' scan uses the weekly-XI objective (sum15 = Patch 114)
-  tc_week_source: schedule       # Patch 115 (v6.12 ruling 5): the Triple Captain premium in the planner uses the TC week of the Rule #49 harmonized schedule (chain = Patch 114: the chain's own best week)
-  chain_guardrail: true          # Patch 115 (v6.12 ruling 6): Rule #52 squad-health guardrail on the chain comparison before a Wildcard week is shown
+  value_tail_gws: 3   # Patch 112: GWs past the shown span used only to value late-week moves
+  pick_rule: best_horizon  # Patch 113: Triple Captain / Bench Boost = best week across the horizon (exact ties -> earlier; TC+BB chosen as a pair); latest_tied = Patch 112 behaviour
   chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window
