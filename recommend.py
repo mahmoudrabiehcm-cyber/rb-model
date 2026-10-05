@@ -959,48 +959,65 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
                              not_scored: list | None = None, fallback: list | None = None,
                              prev_gw: int | None = None, crosscheck: dict | None = None,
                              band_totals: dict | None = None, unavailable_reason: str | None = None,
-                             extra_lines: list | None = None) -> dict | None:
-    """Patch 115 fix: the tie band is Rule #34 on the FOUR-gameweek total (`band_totals`, about 5) even when the primary
-    window (`window_totals`) is longer -- v6.12 Rules #34 / #48(a). A later-week pick carries `wait_cost` (xPts lost against
-    the best week; display only, the pick is unchanged). `unavailable_reason` says why no chain comparison exists.
+                             extra_lines: list | None = None, gains4: dict | None = None, waiting_used: float = 0.0,
+                             wait_cap_frac: float = 0.5, provisional: str | None = None,
+                             checkpoint_gw: int | None = None) -> dict | None:
+    """Patch 117 (model ruling amending v6.12 Rules #48(a) / #34 after the Patch 116 screen).
 
-    Patch 111 (2026-10-04, manager: compare the squad WITH the Wildcard against the no-chip path over the checked
-    span). `gains` = {candidate GW: decay-weighted xPts gain of playing the Wildcard at that GW vs the no-chip chained plan
-    over the SAME number of post-chip weeks (free transfers only, no hits)}.
+    DECIDING MEASURE: `gains4` = {candidate GW: FOUR-gameweek plain chain gain + chip value}; the tie band (Rule #34, greater
+    of 2 xPts or 2% of the compared four-week total, `band_totals`) is built on the same measure it is compared on. `gains`
+    (the six-week decay-weighted gain) is shown beside it and does not decide. Without `gains4` the old measure decides.
 
-      best gain < floor                     -> HOLD, no week (the chip adds too little)
-      best week == current GW               -> PLAY NOW
-      best week later                       -> HOLD -> GWn (waiting beats playing now)
+    TIE RULE: weeks inside the band of the best form the tie set (flagged low confidence). Inside it the LATER week wins only
+    if waiting costs no more than HALF the band (cost = the best passing week's value minus the later week's) AND the
+    waiting budget holds: `waiting_used` (cost of consecutive earlier deferrals, from the trigger log) + this cost must stay
+    within the band. Otherwise the best-value week is the plan. Pending news is never a reason to defer (`provisional` only
+    labels the card). A later week that scores equal or higher is simply the best week.
 
-    Patch 115 (model v6.12 rulings 2 and 6): ties use Rule #34's BAND over the compared window total (the greater of 2 points
-    or 2% of the total, about 5; `moe_fn(window_totals[best])`; the old fixed 2.0 is only the band's floor) and the LATER
-    week inside the band wins -- the earliest week is not allowed inside it. The Rule #52 squad-health guardrail then checks
-    the in-band weeks (`health` = checkpoint xPts per candidate, `base_health` = the no-chip path, `health_band`); a
-    rejected week is listed with its gain and reason, and if none passes the verdict is HOLD. A later shift against
-    `prev_gw` is a Rule #11 reversal (`shift`, `shift_text`; the app logs it). The 6% trigger (Rule #45) still decides
-    whether this runs. No gains available -> "unverified"."""
+    GUARDRAIL (Rule #52): `health` = checkpoint xPts per candidate at the named `checkpoint_gw`; a week is rejected when it is
+    more than the single-week `health_band` below the healthiest in-band week or below the no-chip path (`base_health`). Every
+    in-band week rejected -> HOLD (`hold_source` 'guardrail'); best gain below `floor` -> HOLD (`hold_source` 'value'). A passing
+    week outside the tie set is context only, never the plan.
+
+    Earlier history (Patch 115 fix): `unavailable_reason` says why no chain comparison exists; a later-week pick carries
+    `wait_cost`. A later shift against `prev_gw` is a Rule #11 reversal (`shift`, `shift_text`). No gains -> 'unverified'."""
     if not trigger_active:
         return None
     today_txt = f"today {today_pct:.0f}%" if today_pct is not None else None
     gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
+    prov = f", provisional ({provisional})" if provisional else ""
 
     def _pack(kind, gw, badge, cls, card_cls, stat, sub, pill, note=None, note_cls="", gains_=None, best=None, **extra):
         d = {"kind": kind, "gw": gw, "badge": badge, "badge_cls": cls, "card_cls": card_cls, "stat": stat,
              "sub": sub, "pill": pill, "note": note, "note_cls": note_cls,
              "gains": dict(gains_ or {}), "best_gain": best, "band": None, "tie_set": [], "shift": wc_shift_label(prev_gw, gw),
              "shift_text": "", "guardrail": None, "not_scored": list(not_scored or []), "fallback_weeks": list(fallback or []),
-             "crosscheck": crosscheck, "detail_lines": [], "wait_cost": None}
+             "crosscheck": crosscheck, "detail_lines": [], "wait_cost": None,
+             "gains4": dict(gains4 or {}), "hold_source": None, "low_confidence": False, "deferred": False,
+             "budget_after": None, "waiting_used": round(float(waiting_used or 0.0), 2)}
         d.update(extra)
         return d
 
-    def _lines(band, tie, guard, gw):
+    def _lines(band, tie, guard, gw, G=None, extra_=None):
         L = []
         if band is not None:
             L.append(f"Tie band (Rule #34) {band:.1f} xPts"
-                     + (f" - tie set " + ", ".join(f"GW{g}" for g in tie) + "; the later week wins inside the band" if len(tie) > 1 else ""))
+                     + (f" - tie set " + ", ".join(f"GW{g}" for g in tie) + "; low confidence" if len(tie) > 1 else ""))
+        if gains4 and gains:
+            L.append("Deciding measure (four-week plain gain + chip value): "
+                     + ", ".join(f"GW{g} {v:+.1f}" for g, v in sorted(gains4.items() if gains4 else []))
+                     + " | six-week decay-weighted, shown beside it: "
+                     + ", ".join(f"GW{g} {v:+.1f}" for g, v in sorted(gains.items())))
+        if health is not None and checkpoint_gw is not None:
+            L.append(f"Squad-health checkpoint: GW{checkpoint_gw} (single-week band {float(health_band if health_band is not None else margin):.1f})")
         if guard and guard.get("rejected"):
             for r_ in guard["rejected"]:
                 L.append(f"Rejected by the squad-health guardrail (Rule #52): GW{r_['gw']} ({r_['gain']:+.1f} xPts) - {r_['reason']}")
+        if float(waiting_used or 0.0) > 0:
+            L.append(f"Waiting budget used by earlier deferrals: {float(waiting_used):.1f} xPts"
+                     + (f" of the {band:.1f} band" if band is not None else ""))
+        for x_ in (extra_ or []):
+            L.append(x_)
         if not_scored:
             L.append("Not scored (window truncated): " + ", ".join(f"GW{g}" for g in not_scored))
         if fallback:
@@ -1012,7 +1029,7 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
             L.append(x_)
         return L
 
-    if not gains:
+    if not (gains or gains4):
         why = f" — {unavailable_reason}" if unavailable_reason else ""
         sub = " · ".join(x for x in [today_txt, "chain comparison unavailable"] if x)
         why_lines = ([f"Chain comparison unavailable: {unavailable_reason}"] if unavailable_reason else []) + list(extra_lines or [])
@@ -1023,56 +1040,131 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
                          detail_lines=why_lines)
         return _pack("unverified", None, "TRIGGER ACTIVE", "active", "is-active", f"{gap_txt} gap", sub,
                      f"Wildcard: trigger active (chain comparison unavailable{why})", detail_lines=why_lines)
-    best = max(gains.values())
-    best_gw0 = max(g for g, v in gains.items() if v == best)
+    G = {int(k): float(v) for k, v in (gains4 or {}).items() if v is not None} or {int(k): float(v) for k, v in gains.items()}
+    show = dict(gains or G)
+    best = max(G.values())
+    best_gw0 = max(g for g, v in G.items() if v == best)
     if best < floor:
-        sub = " · ".join(x for x in [today_txt, f"adds only {best:+.1f} xPts over the window"] if x)
+        sub = " · ".join(x for x in [today_txt, f"adds only {best:+.1f} xPts over the window (below the value floor {floor:.1f})"] if x)
         return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
-                     f"Wildcard: HOLD — adds only {best:+.1f} xPts over the window", None, "", gains, best,
-                     detail_lines=_lines(None, [], None, None))
+                     f"Wildcard: HOLD — adds only {best:+.1f} xPts, below the value floor", None, "", show, best,
+                     detail_lines=_lines(None, [], None, None), hold_source="value")
     ref_total = (band_totals or {}).get(best_gw0)
     if ref_total is None:
         ref_total = (window_totals or {}).get(best_gw0)
     band = float(moe_fn(ref_total)) if (moe_fn is not None and ref_total is not None) else float(margin)
-    tie = sorted(g for g, v in gains.items() if v >= best - band - 1e-9)
+    tie = sorted(g for g, v in G.items() if v >= best - band - 1e-9)
+    cap = band * float(wait_cap_frac)
     guard = None
-    pick_pool = {g: gains[g] for g in tie}
     if health is not None:
-        guard = apply_chain_guardrail(pick_pool, health, base_health, band,
+        guard = apply_chain_guardrail({g: G[g] for g in tie}, health, base_health, band,
                                       float(health_band if health_band is not None else margin))
         if guard["verdict"] == "hold":
             sub = " · ".join(x for x in [today_txt, "every in-band week failed the squad-health guardrail"] if x)
             return _pack("hold", None, "HOLD", "hold", "", f"{best:+.1f} xPts", sub,
-                         "Wildcard: HOLD — the squad-health guardrail (Rule #52) rejected every in-band week", None, "",
-                         gains, best, band=band, tie_set=tie, guardrail=guard, detail_lines=_lines(band, tie, guard, None))
-        best_gw = guard["gw"]
+                         "Wildcard: HOLD — the squad-health guardrail (Rule #52) rejected every in-band week"
+                         + (f" at the GW{checkpoint_gw} checkpoint" if checkpoint_gw is not None else ""), None, "",
+                         show, best, band=band, tie_set=tie, guardrail=guard, hold_source="guardrail",
+                         low_confidence=len(tie) > 1, detail_lines=_lines(band, tie, guard, None))
+        passed = list(guard["passed"])
     else:
-        best_gw = max(tie)
-    gain = gains[best_gw]
+        passed = list(tie)
+    used = max(0.0, float(waiting_used or 0.0))
+    ref_val = max(G[g] for g in passed)
+    ref_gw = max(g for g in passed if G[g] == ref_val)
+
+    def cost(w):
+        return round(ref_val - G[w], 2)
+
+    allowed = [w for w in passed if cost(w) <= 1e-9 or (cost(w) <= cap + 1e-9 and used + cost(w) <= band + 1e-9)]
+    best_gw = max(allowed)
+    gain = G[best_gw]
+    refused = sorted(w for w in passed if w > best_gw)
     shift = wc_shift_label(prev_gw, best_gw)
     shift_text = ""
     if shift == "later" and prev_gw is not None:
         shift_text = (f"Rule #11 reversal: the recommended Wildcard week moved LATER (GW{prev_gw} → GW{best_gw}) since the "
                       f"previous run; logged in the trigger log.")
-    wait = None
-    if best_gw != best_gw0 and gains.get(best_gw0) is not None:
-        wait = {"best_gw": best_gw0, "pick_gw": best_gw, "cost": round(float(gains[best_gw0]) - float(gain), 2)}
-    extra = dict(band=band, tie_set=tie, guardrail=guard, shift=shift, shift_text=shift_text,
-                 detail_lines=_lines(band, tie, guard, best_gw), wait_cost=wait)
+    c_pick = cost(best_gw)
+    deferred = best_gw > planning_gw
+    wait = {"best_gw": ref_gw, "pick_gw": best_gw, "cost": c_pick} if (best_gw != ref_gw and c_pick > 0) else None
+    ex_lines = []
+    why_txt = None
+    if refused:
+        L = min(refused)
+        c_l = cost(L)
+        if c_l > cap + 1e-9:
+            why_txt = (f"GW{best_gw} and GW{L} are inside the tie band ({band:.1f}). Waiting costs {c_l:.1f} xPts, more than "
+                       f"half the band, so the earlier week is kept. Rule #48(a).")
+        else:
+            why_txt = (f"GW{best_gw} and GW{L} are inside the tie band ({band:.1f}). Waiting costs {c_l:.1f} xPts, but the "
+                       f"waiting budget ({used:.1f} already used + {c_l:.1f} > band {band:.1f}) is spent, so the earlier week is kept. Rule #48(a).")
+    elif wait:
+        why_txt = f"Inside the tie band; waiting costs {c_pick:.1f} xPts, within half the band."
     if wait:
-        extra["detail_lines"].insert(1 if extra["detail_lines"] else 0,
-                                     f"Waiting from GW{wait['best_gw']} to GW{wait['pick_gw']} costs about {wait['cost']:.1f} xPts "
-                                     f"against the best week; the later week is the model's tie rule (Rule #48(a)), the date is your call (Rule #32)")
+        ex_lines.append(f"Waiting from GW{ref_gw} to GW{best_gw} costs about {c_pick:.1f} xPts against the best week "
+                        f"(cap {cap:.1f} = half the band); the date is your call (Rule #53(d))")
+    extra = dict(band=band, tie_set=tie, guardrail=guard, shift=shift, shift_text=shift_text, wait_cost=wait,
+                 low_confidence=len(tie) > 1, deferred=bool(deferred), gains4=dict(gains4 or {}),
+                 budget_after=round(used + (c_pick if deferred else 0.0), 2),
+                 detail_lines=_lines(band, tie, guard, best_gw, extra_=ex_lines))
+    six = show.get(best_gw)
+    six_txt = f"; six-week {six:+.1f}" if (gains4 and six is not None) else ""
     if best_gw == planning_gw:
-        sub = " · ".join(x for x in [today_txt, "best week in the window"] if x)
+        sub = " · ".join(x for x in [today_txt, f"Plan GW{best_gw}{prov}." + (f" {why_txt}" if why_txt else " Best week in the window.")] if x)
         return _pack("play_now", best_gw, "PLAY NOW", "play", "is-play", f"{gain:+.1f} xPts", sub,
-                     f"Wildcard: PLAY NOW — {gain:+.1f} xPts over the window",
-                     "Best week is this one", "warn", gains, gain, **extra)
-    now = gains.get(planning_gw)
-    cmp_txt = f"{gain:+.1f} vs {now:+.1f} now" if now is not None else f"{gain:+.1f} xPts"
-    sub = " · ".join(x for x in [today_txt, f"waiting beats playing now ({cmp_txt})"] if x)
+                     f"Wildcard: PLAY NOW — {gain:+.1f} xPts (four-week{six_txt})" + (" · provisional" if provisional else ""),
+                     "Best week is this one", "warn", show, gain, **extra)
+    now = G.get(planning_gw)
+    if wait:
+        verdict_txt = why_txt
+    elif now is not None and now < gain - 1e-9:
+        verdict_txt = f"waiting beats playing now ({gain:+.1f} vs {now:+.1f} now)"
+    else:
+        verdict_txt = "the later week scores at least as high as now"
+    sub = " · ".join(x for x in [today_txt, f"Plan GW{best_gw}{prov}. {verdict_txt}"] if x)
     return _pack("hold_until", best_gw, f"HOLD → GW{best_gw}", "hold", "", f"{gain:+.1f} xPts", sub,
-                 f"Wildcard: HOLD → GW{best_gw} — {cmp_txt}", "Free transfers carry the team", "good", gains, gain, **extra)
+                 f"Wildcard: HOLD → GW{best_gw} — {gain:+.1f} xPts (four-week{six_txt})",
+                 "Free transfers carry the team", "good", show, gain, **extra)
+
+
+def waiting_budget_used(path: str, team_id, planning_gw: int) -> float:
+    """Patch 117 (model ruling, waiting budget): the total cost of the CONSECUTIVE Wildcard deferrals logged before
+    `planning_gw` for this team (trigger-log rows with fired and wc_deferred = 1; the last row of each gameweek counts; the
+    chain stops at the first gameweek that was not a deferral or has no row). 0.0 when there is no usable log. NOTE: on
+    Streamlit Cloud the log lives on an ephemeral disk, so a reboot/redeploy resets this to 0 (the budget then restarts)."""
+    import csv as _csv
+    import os as _os
+    try:
+        if not _os.path.exists(path):
+            return 0.0
+        last = {}
+        with open(path, newline="", encoding="utf-8") as fh:
+            for r in _csv.DictReader(fh):
+                if str(r.get("team_id")) != str(team_id):
+                    continue
+                if str(r.get("fired", "")).strip().lower() not in ("true", "1", "1.0"):
+                    continue
+                try:
+                    g = int(float(r.get("planning_gw")))
+                except Exception:
+                    continue
+                last[g] = r
+        total, g = 0.0, int(planning_gw) - 1
+        while g in last:
+            r = last[g]
+            try:
+                d = int(float(r.get("wc_deferred") or 0))
+                c = float(r.get("wc_wait_cost") or 0.0)
+            except Exception:
+                break
+            if d != 1:
+                break
+            total += c
+            g -= 1
+        return round(total, 2)
+    except Exception:
+        return 0.0
 
 
 def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = None) -> list[str]:
@@ -1105,11 +1197,11 @@ def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = Non
 
 _CAL_COLUMNS = ["logged_at", "team_id", "team_name", "planning_gw", "style", "gap_pct", "rating_pct",
                 "cumulative_gap", "fired", "verdict", "wc_value_xpts", "wc_gw", "transfers_close_gap", "patch",
-                "wc_shift", "wc_band"]
+                "wc_shift", "wc_band", "wc_wait_cost", "wc_deferred"]
 
 
 def calibration_log_row(team_id, team_name, planning_gw, patch, style, gap_pct, rating_pct, cumulative_gap,
-                         active, verdict, wc_value, wc_gw, closes, shift=None, band=None) -> dict:
+                         active, verdict, wc_value, wc_gw, closes, shift=None, band=None, wait_cost=None, deferred=None) -> dict:
     """Patch 108: one row of the Wildcard calibration log -- the data needed
     to validate the (document-flagged "unvalidated") 6% threshold from the
     manager's own weeks."""
@@ -1118,7 +1210,8 @@ def calibration_log_row(team_id, team_name, planning_gw, patch, style, gap_pct, 
             "team_name": team_name, "planning_gw": planning_gw, "style": style, "gap_pct": gap_pct,
             "rating_pct": rating_pct, "cumulative_gap": cumulative_gap, "fired": bool(active),
             "verdict": verdict, "wc_value_xpts": wc_value, "wc_gw": wc_gw,
-            "transfers_close_gap": closes, "patch": patch, "wc_shift": shift, "wc_band": band}
+            "transfers_close_gap": closes, "patch": patch, "wc_shift": shift, "wc_band": band,
+            "wc_wait_cost": wait_cost, "wc_deferred": (None if deferred is None else int(bool(deferred)))}
 
 
 def last_logged_wc_gw(path: str, team_id) -> int | None:
