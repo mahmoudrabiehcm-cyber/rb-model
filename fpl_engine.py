@@ -12,7 +12,6 @@ code change.
 """
 from __future__ import annotations
 import math
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -33,125 +32,22 @@ def load_config(path: Path = CFG_PATH) -> dict:
         return yaml.safe_load(f)
 
 
-_CS_GW_RE = re.compile(r"cs_pct_override for GW(\d+)")
-
-
-def parse_cs_gw(note) -> Optional[int]:
-    """Patch 118: the gameweek a clean-sheet override is valid for, read from the note ("cs_pct_override for GW6 ONLY ...").
-    Older entries stack up inside one note, so the LATEST gameweek mentioned wins. None when the note names none."""
-    if note is None or (isinstance(note, float) and math.isnan(note)):
-        return None
-    try:
-        found = [int(x) for x in _CS_GW_RE.findall(str(note))]
-    except Exception:
-        return None
-    return max(found) if found else None
-
-
 def load_overrides(path: Path = OVERRIDES_PATH) -> pd.DataFrame:
     """Human/Claude-supplied qualitative layer: xM floor confirmations, CS%
     tier-2/3 pastes, BPS profile tags, Manager Tenure Split discounts, and
     Step 2b External Data Rescue rates for tiny-sample players.
     Columns: player_code, xm_override, cs_pct_override, bps_profile,
-             tenure_discount, npxg90_rescue, xa90_rescue, dc90_rescue, note[, cs_gw]
-    Patch 118: `cs_gw` = the gameweek `cs_pct_override` is valid for. A filled column wins; an empty cell is read from the
-    note ("cs_pct_override for GW<n>"); still empty = unscoped (the old behaviour, all weeks).
+             tenure_discount, npxg90_rescue, xa90_rescue, dc90_rescue, note
     Missing file -> empty frame (engine falls back to automatic values)."""
     cols = ["player_code", "xm_override", "cs_pct_override", "bps_profile",
-            "tenure_discount", "npxg90_rescue", "xa90_rescue", "dc90_rescue", "note", "cs_gw"]
+            "tenure_discount", "npxg90_rescue", "xa90_rescue", "dc90_rescue", "note"]
     if path.exists():
         df = pd.read_csv(path)
         for c in cols:
             if c not in df.columns:
                 df[c] = pd.NA
-        parsed = df["note"].map(parse_cs_gw)
-        explicit = pd.to_numeric(df["cs_gw"], errors="coerce")
-        df["cs_gw"] = explicit.where(explicit.notna(), pd.to_numeric(parsed, errors="coerce"))
         return df
     return pd.DataFrame(columns=cols)
-
-
-def override_health(overrides: pd.DataFrame, players: pd.DataFrame, planning_gw: int, cs_diag, divergence: float = 0.10,
-                    cfg: Optional[dict] = None) -> dict:
-    """Patch 118: what is wrong with manual_overrides.csv right now. Counts the clean-sheet rows by gameweek (expired = its
-    gameweek has passed -> the app uses its own formula; current; future; unscoped = no gameweek anywhere, applied to every
-    week), lists overrides on players whose official status is unavailable (the minutes override is ignored) or doubtful
-    (warning only), and the players whose sheet clean-sheet chance differs from the formula by more than `divergence`."""
-    empty = {"cs_rows": 0, "cs_expired": 0, "cs_current": 0, "cs_future": 0, "cs_unscoped": 0,
-             "xm_unavailable": [], "xm_doubtful": [], "divergence": []}
-    if overrides is None or overrides.empty:
-        return empty
-    ov = overrides.copy()
-    cs = ov[pd.to_numeric(ov.get("cs_pct_override"), errors="coerce").notna()] if "cs_pct_override" in ov.columns else ov.iloc[0:0]
-    gw = pd.to_numeric(cs.get("cs_gw"), errors="coerce") if "cs_gw" in cs.columns else pd.Series(np.nan, index=cs.index)
-    out = dict(empty)
-    out["cs_rows"] = int(len(cs))
-    out["cs_unscoped"] = int(gw.isna().sum())
-    out["cs_expired"] = int((gw < planning_gw).sum())
-    out["cs_current"] = int((gw == planning_gw).sum())
-    out["cs_future"] = int((gw > planning_gw).sum())
-    unavailable = set((cfg or {}).get("xm_heuristic", {}).get("unavailable_statuses", ["i", "u", "s", "n"]))
-    if players is not None and not players.empty and "xm_override" in ov.columns:
-        xm = ov[pd.to_numeric(ov["xm_override"], errors="coerce").notna()][["player_code"]]
-        pl = players.merge(xm, left_on="code", right_on="player_code", how="inner")
-        for _, r in pl.iterrows():
-            st_ = str(r.get("status", "a"))
-            cop = pd.to_numeric(r.get("chance_of_playing_next_round"), errors="coerce")
-            rec = {"code": int(r["code"]), "name": r.get("web_name"), "team": r.get("team"), "status": st_,
-                   "chance": None if pd.isna(cop) else float(cop), "news": r.get("news")}
-            if st_ in unavailable:
-                out["xm_unavailable"].append(rec)
-            elif pd.notna(cop) and cop < 100:
-                out["xm_doubtful"].append(rec)
-    if cs_diag is not None and len(cs_diag):
-        d = cs_diag[(cs_diag["event"] == planning_gw) & (cs_diag["applied"])]
-        for _, r in d.iterrows():
-            if pd.notna(r["cs_sheet"]) and pd.notna(r["cs_calc"]) and abs(float(r["cs_sheet"]) - float(r["cs_calc"])) > divergence + 1e-9:
-                out["divergence"].append({"code": int(r["code"]), "sheet": round(float(r["cs_sheet"]), 3),
-                                          "formula": round(float(r["cs_calc"]), 3)})
-    return out
-
-
-def override_banner(h: dict) -> list:
-    """Patch 118: the visible lines for override_health(); empty list = nothing to report."""
-    L = []
-    if h.get("cs_expired"):
-        L.append(f"{h['cs_expired']} expired clean-sheet overrides (their gameweek has passed): the model default formula is "
-                 f"used for them; refresh manual_overrides.csv for the current gameweek")
-    if h.get("cs_unscoped"):
-        L.append(f"{h['cs_unscoped']} clean-sheet overrides are unscoped (no gameweek in cs_gw or the note) and still apply to every week")
-    if h.get("xm_unavailable"):
-        L.append(f"{len(h['xm_unavailable'])} minutes overrides ignored: official status says unavailable ("
-                 + ", ".join(str(x['name']) for x in h["xm_unavailable"][:8]) + ")")
-    if h.get("xm_doubtful"):
-        L.append(f"{len(h['xm_doubtful'])} minutes overrides on doubtful players (warning only, number unchanged): "
-                 + ", ".join(f"{x['name']} {int(x['chance'])}%" for x in h["xm_doubtful"][:8]))
-    if h.get("divergence"):
-        L.append(f"{len(h['divergence'])} players where the sheet and the model formula differ by more than the threshold")
-    return L
-
-
-def append_cs_comparison_log(path: str, diag, planning_gw: int) -> int:
-    """Patch 118: log the sheet's and the formula's clean-sheet chance for every overridden player ONCE per gameweek (for the
-    later Brier comparison against actual clean sheets). Returns the rows written (0 when this gameweek is already logged,
-    the diagnostics are missing, or writing fails). NOTE: the file lives on Streamlit Cloud's ephemeral disk."""
-    import os as _os
-    try:
-        if diag is None or not len(diag):
-            return 0
-        d = diag[(diag["event"] == planning_gw) & diag["cs_sheet"].notna()][["code", "event", "cs_calc", "cs_sheet", "cs_gw", "applied"]]
-        if d.empty:
-            return 0
-        if _os.path.exists(path):
-            old = pd.read_csv(path)
-            if (pd.to_numeric(old.get("event"), errors="coerce") == planning_gw).any():
-                return 0
-            pd.concat([old, d], ignore_index=True).to_csv(path, index=False)
-        else:
-            d.to_csv(path, index=False)
-        return int(len(d))
-    except Exception:
-        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -324,11 +220,7 @@ def estimate_xm_vec(df: pd.DataFrame, cfg: dict) -> pd.Series:
 
     result = base.clip(upper=max_xm)
     result = result.where(~unavailable, 0.0)
-    if heur.get("availability_beats_override", True):
-        # Patch 118: an official unavailable status (i/u/s/n) beats a hand-typed minutes override
-        result = result.where(override.isna() | unavailable, override.astype(float))
-    else:
-        result = result.where(override.isna(), override.astype(float))
+    result = result.where(override.isna(), override.astype(float))
     return result
 
 
@@ -358,14 +250,11 @@ def defcon_probability(dc90: float, position: str, cfg: dict) -> float:
 # xM estimation (Step 4 proxy) — overridable via manual_overrides.csv
 # ---------------------------------------------------------------------------
 def estimate_xm(row: pd.Series, cfg: dict, override: Optional[float]) -> float:
-    heur = cfg["xm_heuristic"]
-    status = str(row.get("status", "a"))
     if override is not None and not pd.isna(override):
-        # Patch 118: an official unavailable status beats the hand-typed override (switch availability_beats_override)
-        if heur.get("availability_beats_override", True) and status in heur["unavailable_statuses"]:
-            return 0.0
         return float(override)
 
+    heur = cfg["xm_heuristic"]
+    status = str(row.get("status", "a"))
     if status in heur["unavailable_statuses"]:
         return 0.0
 
