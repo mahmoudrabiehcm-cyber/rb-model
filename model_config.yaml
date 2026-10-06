@@ -2671,7 +2671,6 @@ xm_heuristic:
   confirmed_current_season_start_floor: 0.88   # Step 4 "xM Floor Rule"
   max_xm: 0.95
   unavailable_statuses: ["i", "u", "s", "n"]    # injured/unavailable/suspended/not-in-squad
-  availability_beats_override: true   # Patch 118: an official unavailable status (i/u/s/n) beats xm_override; False = the old priority (override wins)
   doubtful_status_multiplier_applies: true      # scale by chance_of_playing_next_round
   recency_window_gws: 4   # Patch 14 -- Standing Rule #19 (Bench GK Verification) support.
                            # The confirmed-start xM floor above now also requires a start
@@ -3343,8 +3342,3 @@ chip_extended_check:
   tc_week_source: schedule       # Patch 115 (v6.12 ruling 5): the Triple Captain premium in the planner uses the TC week of the Rule #49 harmonized schedule (chain = Patch 114: the chain's own best week)
   chain_guardrail: true          # Patch 115 (v6.12 ruling 6): Rule #52 squad-health guardrail on the chain comparison before a Wildcard week is shown
   chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window
-
-# Patch 118: manual_overrides.csv fail-safe
-overrides:
-  cs_scope_to_gameweek: true   # a cs_pct_override only applies to the gameweek in cs_gw (or named in the note); False = old behaviour (all weeks)
-  divergence_threshold: 0.10   # flag players whose sheet clean-sheet chance differs from the model formula by more than this (display only)
