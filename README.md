@@ -340,3 +340,11 @@ conceptually separate changes:
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Patch 120 -- per-gameweek clean-sheet columns in manual_overrides.csv
+
+Add columns `cs_pct_gw6`, `cs_pct_gw7`, ... (one per gameweek, filled per player; the same value for every player of a club).
+Each column is used for its own gameweek only. Order of use for a player and a week: `cs_pct_gw<week>` -> the single
+`cs_pct_override` (valid for its `cs_gw`, or the GW named in the note) -> the model's own formula. A week with no value
+therefore uses the formula, and the health panel names the weeks and clubs the sheet does not cover. Values are
+estimate-tier (Section 9); the model chat has not approved a manually entered table for weeks after the current one.

@@ -34,6 +34,24 @@ import setpiece
 # a disclosed scope decision, not the doc's literal GW+1-market/GW+2+-
 # team-strength split, since there is no market leg wired in yet.
 # ---------------------------------------------------------------------------
+
+class CsDiag:
+    """Diagnostics table carried in DataFrame.attrs. pandas compares attrs with == on
+    concat; a bare DataFrame there raises 'truth value is ambiguous', so wrap it."""
+    def __init__(self, df):
+        self.df = df
+    def __eq__(self, other):
+        return isinstance(other, CsDiag)
+    __hash__ = None
+    def __len__(self):
+        return len(self.df)
+    def __getitem__(self, k):
+        return self.df[k]
+    def __getattr__(self, n):
+        if n == "df" or (n.startswith("__") and n.endswith("__")):
+            raise AttributeError(n)  # never delegate dunders (deepcopy/pickle would return a bare DataFrame)
+        return getattr(self.df, n)
+
 def compute_team_fixture_baselines(cfg: dict, team_match_xg: pd.DataFrame,
                                     teams_df: pd.DataFrame) -> dict:
     """Builds, per team `id` (not `code` -- see fetch_team_match_xg's
@@ -609,9 +627,12 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
-                   "dc90_hist", "dc90_cur", "starts", "cs_pct_override",
+                   "dc90_hist", "dc90_cur", "starts", "cs_pct_override", "cs_gw",
                    "penalties_order", "corners_and_indirect_freekicks_order",
                    "direct_freekicks_order"]
+    # Patch 120: per-gameweek clean-sheet columns of manual_overrides.csv (cs_pct_gw6, cs_pct_gw7, ...)
+    _pergw = eng.pergw_columns(pl)
+    player_cols = player_cols + [c for c in _pergw.values() if c not in player_cols]
     for c in player_cols:
         if c not in pl.columns:
             pl[c] = np.nan
@@ -634,7 +655,27 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     cs_pct_calc = eng.cs_pct_poisson_vec(pd.Series(own_att, index=exploded.index),
                                           pd.Series(opp_def, index=exploded.index))
     cs_override = pd.to_numeric(exploded["cs_pct_override"], errors="coerce")
-    cs_pct = cs_override.where(cs_override.notna(), cs_pct_calc)
+    # Patch 118: a clean-sheet override is valid for ONE gameweek (cs_gw). Other weeks use the model's own formula. A row with
+    # no gameweek anywhere (unscoped) keeps the old behaviour. Switch overrides.cs_scope_to_gameweek (False = old behaviour).
+    cs_gw_col = pd.to_numeric(exploded["cs_gw"], errors="coerce") if "cs_gw" in exploded.columns \
+        else pd.Series(np.nan, index=exploded.index)
+    if cfg.get("overrides", {}).get("cs_scope_to_gameweek", True):
+        cs_applies = cs_override.notna() & (cs_gw_col.isna() | (pd.to_numeric(exploded["event"], errors="coerce") == cs_gw_col))
+    else:
+        cs_applies = cs_override.notna()
+    # Patch 120: a per-gameweek value (cs_pct_gw<event>) is used for its OWN gameweek and beats the single-value column; a week
+    # with no value uses the single-value column (scoped as above), then the model formula.
+    _ev = pd.to_numeric(exploded["event"], errors="coerce")
+    cs_pergw = pd.Series(np.nan, index=exploded.index)
+    for _g, _c in _pergw.items():
+        _m = (_ev == _g)
+        if _m.any():
+            cs_pergw = cs_pergw.where(~_m, pd.to_numeric(exploded[_c], errors="coerce"))
+    _pg_applies = cs_pergw.notna()
+    cs_gw_col = cs_gw_col.where(~_pg_applies, _ev)
+    cs_override = cs_pergw.where(_pg_applies, cs_override)
+    cs_applies = cs_applies | _pg_applies
+    cs_pct = cs_override.where(cs_applies, cs_pct_calc)
 
     # --- FDR tier (official difficulty, falling back to strength rating) ---
     tier_official = _fdr_tier_from_official_vec(exploded["official_diff"])
@@ -788,6 +829,17 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     else:
         out["xpts_horizon_sum"] = 0.0
 
+    # Patch 118: sheet-vs-formula clean-sheet diagnostics (only overridden rows), travels with the projection as .attrs
+    try:
+        _d = pd.DataFrame({"_pidx": exploded["_pidx"].values, "event": exploded["event"].values,
+                           "cs_calc": cs_pct_calc.values, "cs_sheet": cs_override.values, "cs_gw": cs_gw_col.values,
+                           "applied": cs_applies.values})
+        _d = _d[_d["cs_sheet"].notna() & _d["event"].notna()].copy()
+        _code = pl.set_index("_pidx")["code"] if "code" in pl.columns else pd.Series(dtype=float)
+        _d["code"] = _d["_pidx"].map(_code)
+        out.attrs["cs_diag"] = CsDiag(_d[["code", "event", "cs_calc", "cs_sheet", "cs_gw", "applied"]].reset_index(drop=True))
+    except Exception:
+        pass
     return out
 
 
