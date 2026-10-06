@@ -3346,5 +3346,5 @@ chip_extended_check:
 
 # Patch 118: manual_overrides.csv fail-safe
 overrides:
-  cs_scope_to_gameweek: true   # a cs_pct_override only applies to the gameweek in cs_gw (or named in the note); False = old behaviour (all weeks)
+  cs_scope_to_gameweek: false   # a cs_pct_override only applies to the gameweek in cs_gw (or named in the note); False = old behaviour (all weeks)
   divergence_threshold: 0.10   # flag players whose sheet clean-sheet chance differs from the model formula by more than this (display only)
