@@ -638,7 +638,8 @@ def wildcard_verdict(trigger_active: bool, seq_scheduled, seq_gw, seq_value, clo
     gap_txt = f"{gap_pct:.1f}%" if gap_pct is not None else "n/a"
     if closes is True:
         return {"badge": "MONITOR", "badge_cls": "hold", "card_cls": "",
-                "stat": f"{gap_txt} gap", "sub": f"transfers close the {gap_txt} gap — no chip needed yet",
+                "stat": f"{gap_txt} gap", "sub": f"transfers close the {gap_txt} gap — no chip needed yet. "
+                f"Measured with the plan's full transfer allowance over the window, not only the free transfers banked now",
                 "note": "Your recommended transfers already close this", "note_cls": "good"}
     if seq_scheduled is True and seq_gw is not None:
         stat = f"{seq_value:+.1f} xPts" if seq_value is not None else f"{gap_txt} gap"
@@ -1954,7 +1955,9 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             plan.append(f"GW{gw}: Roll — no move clears the bar this week.")
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
-            week_moves = [{**_move_row(p, 0.0, chosen["net_gain"], True), "gw": gw} for p in pairs]
+            week_moves = [{**r, "gw": gw} for r in _assign_move_hits(
+                [_move_row(p, 0.0, chosen["net_gain"], True) for p in pairs],
+                chosen.get("hit_cost", 0.0), hit_cost_per)]
             move_bits = ", ".join(
                 f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
                 for p in pairs)
@@ -2986,6 +2989,60 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
                                          bb_play_gw=bb_play_gw)
     return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
             "adjusted": True, "zeroed_names": [n for _, n in non_nailed]}
+
+
+
+def _assign_move_hits(rows: list, total_hit: float, hit_cost_per: float) -> list:
+    """Patch 117a: per-move hit badge for a weekly-plan batch. The batch pays
+    `total_hit` = hit_cost_per x (moves beyond the free transfers). Show the
+    FREE badge on the highest-gain moves and the hit on the lowest-gain ones
+    (the free transfers are best spent on the best moves). Row order is kept;
+    every row's hit_cost is 0 or hit_cost_per. Display only - the batch
+    net_gain and the decision are unchanged."""
+    if not rows or not hit_cost_per or total_hit <= 0:
+        return [{**r, "hit_cost": 0.0} for r in rows]
+    n_hit = min(len(rows), int(round(total_hit / hit_cost_per)))
+    order = sorted(range(len(rows)), key=lambda i: (rows[i].get("xpts_gain", 0.0), -i))
+    hit_idx = set(order[:n_hit])
+    return [{**r, "hit_cost": float(hit_cost_per) if i in hit_idx else 0.0} for i, r in enumerate(rows)]
+
+
+def trigger_detect_window(detect_gw_list, base_size: int) -> list:
+    """Patch 117a: the Wildcard trigger always reads the first `base_size`
+    GWs of the detection list (4 = Rule #48's window). An Extended run widens
+    detect_gw_list to 10 GWs for the reachable table and the cross-check; the
+    trigger must not average over that wider list."""
+    return list(detect_gw_list or [])[:int(base_size)]
+
+
+def scan_alternative_line(rows: list, decision_gw) -> str | None:
+    """Patch 117a: when the Rule #48 one-shot scan's best week differs from the
+    week the chain decision plans, show the scan reading as a LABELLED,
+    low-confidence alternative (it does not decide). Disclosed defect: the scan
+    credits accrued free transfers as free + len(window) - 1 independent of the
+    candidate week (chip_protocol.wildcard_window_value_scan), so later weeks are
+    not penalised for the transfers they would have banked. `rows` = the best-GW
+    table rows (gw, wc_gap)."""
+    scored = [(r["gw"], r["wc_gap"]) for r in (rows or []) if r.get("wc_gap") is not None]
+    if not scored or decision_gw is None:
+        return None
+    best_gw, best_val = max(scored, key=lambda x: (x[1], -x[0]))
+    if best_gw == decision_gw:
+        return None
+    dec_val = dict(scored).get(decision_gw)
+    dec_txt = f" (GW{decision_gw} scores {dec_val:+.1f} on the same scan)" if dec_val is not None else ""
+    return (f"Scan-only reading (Rule #48, Wildcard played alone): best week GW{best_gw} {best_val:+.1f}{dec_txt}. "
+            f"LOW CONFIDENCE, shown as an alternative only - it does not decide. Known defect: the scan counts "
+            f"accrued free transfers independent of the candidate week, which flatters later weeks.")
+
+
+def cs_carry_label(n_cs_override_players: int) -> str:
+    """Patch 117a: disclosure for manual cs_pct_override entries. Patch 117
+    applies one override value per player to EVERY gameweek (no per-GW scoping)."""
+    if not n_cs_override_players:
+        return ""
+    return (f" Clean sheet carried at the GW6 sheet value for every week for {int(n_cs_override_players)} "
+            f"player(s) with a cs_pct_override (one value per player, not per fixture).")
 
 
 def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dict:
