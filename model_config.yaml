@@ -3230,7 +3230,7 @@ solver:
 # into the shape-test.
 # -----------------------------------------------------------------------------
 chip_shape_test:
-  detection_window_gws: 5
+  detection_window_gws: 4  # Patch 117a: back to Rule #48's 4-GW window (Patch 103 had 5)
 
 # Patch 103 (2026-10-01, manager screenshot annotation + confirmation this
 # round): detection_window_gws 4 -> 5, matching the chip_advisor_horizon

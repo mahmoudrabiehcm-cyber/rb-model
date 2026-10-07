@@ -400,6 +400,19 @@ def team_rating_pct(squad_xpts_total: float, ceiling_xpts_total: float,
     }
 
 
+def team_rating_pct_capped(squad_xpts_total: float, ceiling_xpts_total: float,
+                           tier_label: str, cap: float = 100.0) -> dict:
+    """Patch 117a: team_rating_pct capped at `cap`. The Pitch/GW-card ceiling
+    is a solve that can return a squad scoring below the current one (the
+    ceiling solve is not exact), giving >100%. The shown rating is capped;
+    raw_pct and over_ceiling keep the evidence so the screen can flag it."""
+    base = team_rating_pct(squad_xpts_total, ceiling_xpts_total, tier_label)
+    raw = base["rating_pct"]
+    if raw is None:
+        return {**base, "raw_pct": None, "over_ceiling": False}
+    return {"rating_pct": min(raw, cap), "tier": tier_label, "raw_pct": raw, "over_ceiling": raw > cap}
+
+
 # ---------------------------------------------------------------------------
 # Standing Rule #34 — Margin-of-Error Tie Rule (v4.6)
 # ---------------------------------------------------------------------------
