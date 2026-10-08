@@ -830,7 +830,7 @@ def decay_sensitivity(cands: dict, base_score: dict, gws: list, n: int, skip_gw,
             pg = post_chip_gain(c["score"], base_score, t, gws, int(n), float(d), skip_gw=skip_gw)
             if pg is None:
                 continue
-            g[t] = round(pg["gain"] + float(c.get("gain_chips") or 0.0), 2)
+            g[t] = round(pg["gain"] + float(c.get("gain_chips_dec", c.get("gain_chips")) or 0.0), 2)
         if not g:
             continue
         dec = decide_fn(g)
@@ -1005,7 +1005,7 @@ def wildcard_chain_decision(trigger_active: bool, gains: dict | None, planning_g
             L.append(f"Tie band (Rule #34) {band:.1f} xPts"
                      + (f" - tie set " + ", ".join(f"GW{g}" for g in tie) + "; low confidence" if len(tie) > 1 else ""))
         if gains4 and gains:
-            L.append("Deciding measure (four-week plain gain + chip value): "
+            L.append("Deciding measure (four-week gain; chip value counted only if include_chip_value is on, default off): "
                      + ", ".join(f"GW{g} {v:+.1f}" for g, v in sorted(gains4.items() if gains4 else []))
                      + " | six-week decay-weighted, shown beside it: "
                      + ", ".join(f"GW{g} {v:+.1f}" for g, v in sorted(gains.items())))
