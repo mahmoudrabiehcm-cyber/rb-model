@@ -3045,6 +3045,35 @@ def cs_carry_label(n_cs_override_players: int) -> str:
             f"player(s) with a cs_pct_override (one value per player, not per fixture).")
 
 
+def apply_budget_override(bank: float, squad_market_price: float, override) -> tuple:
+    """Patch 117b: the app's budget is bank + the squad's MARKET prices (no selling prices). If the manager types
+    his real budget (squad value + bank from the FPL Transfers page, 0 = off) it replaces that. Returns
+    (bank_effective, team_value, note). bank_effective is chosen so bank_effective + squad market price = the entered
+    budget everywhere the app adds them (Wildcard / Free Hit / chain builds are exact; a single sale still uses the
+    market price of the player sold, which is approximate). Values outside 50-150 are ignored."""
+    market = round(float(bank) + float(squad_market_price), 1)
+    try:
+        ov = float(override) if override is not None else 0.0
+    except (TypeError, ValueError):
+        ov = 0.0
+    if not (50.0 <= ov <= 150.0):
+        return float(bank), market, None
+    gap = round(market - ov, 1)
+    note = (f"Budget set by you: {ov:.1f}m (squad value + bank). The app's market-price figure was {market:.1f}m "
+            f"({gap:+.1f}m difference).")
+    return round(ov - float(squad_market_price), 1), round(ov, 1), note
+
+
+def wildcard_week_conflict(plan_wc_gw, decision_gw):
+    """Patch 117b: the weekly transfer plan is built before the Wildcard decision and uses the chip portfolio's
+    (scan-based) Wildcard week; the Chip Plan decision uses the chain (model ruling M8). When they differ, say so."""
+    if plan_wc_gw is None or decision_gw is None or int(plan_wc_gw) == int(decision_gw):
+        return None
+    return (f"The weekly plan below was built with the Wildcard at GW{plan_wc_gw} (chip portfolio / scan), but the "
+            f"Chip Plan decision is GW{decision_gw} (chain comparison). Follow the Chip Plan: the plan's Wildcard line "
+            f"is out of date, and its earlier weeks were valued against a horizon cut at GW{plan_wc_gw}.")
+
+
 def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dict:
     """One pair (from `_pair_moves`/`_apply_eo_pull`) -> a move-table row.
     `hit_cost`/`net_gain` are the BATCH total for the whole chosen transfer
