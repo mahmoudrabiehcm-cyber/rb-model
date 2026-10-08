@@ -536,7 +536,8 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
                             bonus: dict | None = None, label: str | None = None,
                             week_weights: list | None = None, captain: bool = False,
                             retain_pool_codes: list | None = None, min_retain: int = 0,
-                            captain_k: int = 0, must_include_codes: list | None = None) -> dict | None:
+                            captain_k: int = 0, must_include_codes: list | None = None,
+                            exclude_codes: list | None = None) -> dict | None:
     """Patch 114 (manager: the Wildcard must be the best team over the window, then shaped for the chips). Verified in the
     Patch 113 code: solve_squad() maximises the plain SUM of all 15 players, i.e. every player counts as a starter in
     every week. Here the squad (x_i) and a legal starting XI for EACH week of the window (y_ig) are chosen together:
@@ -566,6 +567,8 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
         return None
     df = players.dropna(subset=["price", "position"] + cols).copy()
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
+    if exclude_codes:                                             # Patch 117j: Excluded players are never candidates
+        df = df[~df["code"].isin(set(exclude_codes) - set(must_include_codes or []))]
     if "status" in df.columns:
         _keep = set(retain_pool_codes or []) if (retain_pool_codes and int(min_retain) > 0) else set()
         _keep |= set(must_include_codes or [])                        # Patch 117d: a locked player stays eligible

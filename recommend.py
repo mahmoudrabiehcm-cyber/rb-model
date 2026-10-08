@@ -1551,20 +1551,22 @@ def _frame_fingerprint(df: pd.DataFrame):
         return None
 
 
-def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain, locks=()):
+def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain, locks=(), excludes=()):
     """Patch 112: opt.solve_squad(...) for the planner's k-loop, memoised on (pool fingerprint, owned codes,
     min_retain, budget). The solve is deterministic in those inputs (objective column fixed), and
     Streamlit's own cache re-hashed the entire player table on every call. Falls back to a plain call."""
     if pool_fp is None:
         return opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                               min_retain=min_retain, must_include_codes=list(locks), objective_col="xpts_horizon_sum")
+                               min_retain=min_retain, must_include_codes=list(locks), exclude_codes=list(excludes),
+                               objective_col="xpts_horizon_sum")
     key = (pool_fp, cfg_fp, tuple(sorted(current_codes)), int(min_retain), round(float(team_value), 3),
-           tuple(sorted(locks)))
+           tuple(sorted(locks)), tuple(sorted(excludes)))
     if key in _PLAN_SOLVE_MEMO:
         res = _PLAN_SOLVE_MEMO[key]
     else:
         res = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                              min_retain=min_retain, must_include_codes=list(locks), objective_col="xpts_horizon_sum")
+                              min_retain=min_retain, must_include_codes=list(locks), exclude_codes=list(excludes),
+                              objective_col="xpts_horizon_sum")
         if len(_PLAN_SOLVE_MEMO) >= _PLAN_SOLVE_MEMO_MAX:
             _PLAN_SOLVE_MEMO.clear()
         _PLAN_SOLVE_MEMO[key] = res
@@ -1838,7 +1840,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         for k in range(1, k_upper + 1):
             min_retain = max(0, 15 - k)
             result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain,
-                                        locks=lock_codes_of(sim_squad))
+                                        locks=lock_codes_of(sim_squad), excludes=exclude_codes_of(full_pool))
             if result is None:
                 continue
             new_squad = result["squad"]
@@ -2205,7 +2207,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
                                   min_retain=min_retain, must_include_codes=lock_codes_of(squad_df),
-                                  objective_col="xpts_horizon_sum")
+                                  exclude_codes=exclude_codes_of(full_pool), objective_col="xpts_horizon_sum")
         if result is None:
             continue
         new_squad = result["squad"]
@@ -2727,6 +2729,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
                                   min_retain=min_retain, must_include_codes=[target_code] + lock_codes_of(squad_df),
+                                  exclude_codes=exclude_codes_of(full_pool),
                                   objective_col="xpts_horizon_sum")
         if result is None:
             continue
@@ -3148,6 +3151,16 @@ def lock_codes_of(df) -> list:
     return sorted(int(c) for c in df.loc[m, "code"].tolist())
 
 
+def exclude_codes_of(df) -> list:
+    """Patch 117j: codes of the manager's Excluded players (never bought, never in a Wildcard rebuild), read from the boolean
+    `_excluded` column carried on the pool frame (absent or NaN = not excluded). Read by the Wildcard rebuild and the
+    transfer planner only, exactly like Locked players; ceilings, the Free Hit optimum and the Rating % never read it."""
+    if df is None or not hasattr(df, "columns") or "_excluded" not in df.columns or "code" not in df.columns:
+        return []
+    m = df["_excluded"].fillna(False).astype(bool)
+    return sorted(int(c) for c in df.loc[m, "code"].tolist())
+
+
 def lock_flags(squad_df, lock_codes) -> list:
     """[(name, status)] for locked players who are not fully available (status != 'a') - the only lock problem possible,
     since locks come from a legal squad and cost their selling price (always affordable)."""
@@ -3203,17 +3216,18 @@ def reconcile_chip_schedule(chip_schedule, decision_gw, planning_gw, rebuild_by_
     return out
 
 
-def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg, overrides_bytes=None) -> bytes:
+def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg, overrides_bytes=None, excluded_codes=None) -> bytes:
     """Patch 117d: one downloadable file with everything needed to reproduce this run offline - the full pool (prices as the
     solver saw them, market price, xPts columns, owned / locked flags), the budget facts, the config, and the manual sheet."""
     import io, json, zipfile
     df = pool.copy()
     df["owned"] = df["code"].isin(set(owned_codes))
     df["locked"] = df["code"].isin(set(locked_codes or []))
-    if "_locked" in df.columns:
-        df = df.drop(columns=["_locked"])
+    df["excluded"] = df["code"].isin(set(excluded_codes or []))
+    df = df.drop(columns=[c for c in ("_locked", "_excluded") if c in df.columns])
     m = dict(meta or {})
     m.update({"bank": float(bank), "budget": float(budget), "locked_codes": [int(c) for c in (locked_codes or [])],
+              "excluded_codes": [int(c) for c in (excluded_codes or [])],
               "owned_codes": [int(c) for c in owned_codes]})
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -3469,7 +3483,7 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
     if mode == "sum15":
         wp["_wc_obj"] = wp[cols].sum(axis=1)
         res = opt.solve_squad(wp, cfg, budget=float(budget), objective_col="_wc_obj", label=label,
-                              must_include_codes=lock_codes_of(wp))
+                              must_include_codes=lock_codes_of(wp), exclude_codes=exclude_codes_of(wp))
     else:
         bw = float(bench_w if bench_w is not None else cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
         bb_col = f"xpts_gw{bb_gw}" if (bb_gw is not None and f"xpts_gw{bb_gw}" in cols) else None
@@ -3483,7 +3497,7 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
         res = opt.solve_squad_xi_weighted(wp, cfg, float(budget), cols, bench_weight=bw, bb_col=bb_col, bonus=bonus,
                                           label=label, week_weights=wts, captain=cap_on,
                                           captain_k=int(ece.get("wc_build_captain_k", 60)),
-                                          must_include_codes=lock_codes_of(wp))
+                                          must_include_codes=lock_codes_of(wp), exclude_codes=exclude_codes_of(wp))
     if res is None or res.get("squad") is None:
         return None
     sq = res["squad"]
