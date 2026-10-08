@@ -3043,12 +3043,12 @@ def scan_alternative_line(rows: list, decision_gw) -> str | None:
 
 
 def cs_carry_label(n_cs_override_players: int) -> str:
-    """Patch 117a: disclosure for manual cs_pct_override entries. Patch 117
-    applies one override value per player to EVERY gameweek (no per-GW scoping)."""
+    """Patch 117k: disclosure for manual clean-sheet entries. GW6-GW10 use the sheet's per-gameweek value
+    (cs_pct_gw6..cs_pct_gw10, estimate tier); from GW11 the GW6 value is carried (a blank cell also uses it)."""
     if not n_cs_override_players:
         return ""
-    return (f" Clean sheet carried at the GW6 sheet value for every week for {int(n_cs_override_players)} "
-            f"player(s) with a cs_pct_override (one value per player, not per fixture).")
+    return (f" Clean sheet per gameweek GW6-GW10 from the sheet; carried at the GW6 sheet value from GW11 "
+            f"for {int(n_cs_override_players)} player(s) with a cs_pct_override.")
 
 
 def apply_budget_override(bank: float, squad_market_price: float, override) -> tuple:

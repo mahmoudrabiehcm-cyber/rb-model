@@ -7,6 +7,7 @@ on the exact same pipeline — this is the one place that logic lives.
 from __future__ import annotations
 import math
 
+import re
 import numpy as np
 import pandas as pd
 
@@ -610,6 +611,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
                    "dc90_hist", "dc90_cur", "starts", "cs_pct_override",
+                   *sorted(c for c in pl.columns if re.fullmatch(r"cs_pct_gw\d+", str(c))),   # Patch 117k: per-GW sheet values
                    "penalties_order", "corners_and_indirect_freekicks_order",
                    "direct_freekicks_order"]
     for c in player_cols:
@@ -634,6 +636,13 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     cs_pct_calc = eng.cs_pct_poisson_vec(pd.Series(own_att, index=exploded.index),
                                           pd.Series(opp_def, index=exploded.index))
     cs_override = pd.to_numeric(exploded["cs_pct_override"], errors="coerce")
+    # Patch 117k (manager-directed): the sheet's per-gameweek clean-sheet columns cs_pct_gw6..cs_pct_gw10 drive THEIR gameweek;
+    # a blank cell, a gameweek without a column (GW11+) or an older sheet without the columns uses cs_pct_override as before.
+    for _c in [c for c in exploded.columns if re.fullmatch(r"cs_pct_gw\d+", str(c))]:
+        _g = int(str(_c)[9:])
+        _v = pd.to_numeric(exploded[_c], errors="coerce")
+        _m = (exploded["event"] == _g) & _v.notna()
+        cs_override = cs_override.where(~_m, _v)
     cs_pct = cs_override.where(cs_override.notna(), cs_pct_calc)
 
     # --- FDR tier (official difficulty, falling back to strength rating) ---
