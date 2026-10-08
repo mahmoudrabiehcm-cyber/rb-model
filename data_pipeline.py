@@ -911,6 +911,12 @@ def solve_free_hit_optimal_squad(cfg: dict, proj: pd.DataFrame, total_value: flo
     return opt.solve_xi_first_squad(proj, cfg, budget=total_value, gw_col=col, label="free_hit_optimal")
 
 
+# Patch 117h: the rating counts a bench slot at about exposure x autosub curve (roughly 0.1-0.3 of its points), not a flat
+# 0.08; the ceiling therefore also tries the XI+captain+bench solver at heavier bench weights and keeps the best by the
+# rating's own scoring (live: a Wildcard-path squad read 100.6% of the old ceiling).
+CEILING_BENCH_WEIGHTS = (0.08, 0.15, 0.25)
+
+
 def solve_best_gw_squad(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
     """Patch 117g: ONE 'best possible squad for this GW' used by the Pitch rating, the header rating and the chip
     table. Three solvers, scored by the SAME realized-value rule the ratings use (best XI, captain doubled, bench
@@ -937,12 +943,14 @@ def solve_best_gw_squad(cfg: dict, proj: pd.DataFrame, total_value: float, gw: i
             cands.append(_as_frame(alt["squad"]))
     except Exception:  # noqa: BLE001 -- an extra candidate must never break the rating
         pass
-    try:
-        cap = opt.solve_squad_xi_weighted(proj, cfg, float(total_value), [col], captain=True, label="best_gw_captain")
-        if cap is not None and cap.get("squad") is not None:
-            cands.append(_as_frame(cap["squad"]))
-    except Exception:  # noqa: BLE001
-        pass
+    for _w in CEILING_BENCH_WEIGHTS:
+        try:
+            cap = opt.solve_squad_xi_weighted(proj, cfg, float(total_value), [col], bench_weight=_w, captain=True,
+                                              label=f"best_gw_captain_{_w}")
+            if cap is not None and cap.get("squad") is not None:
+                cands.append(_as_frame(cap["squad"]))
+        except Exception:  # noqa: BLE001
+            pass
     for sq in cands:
         if len(sq) != 15:
             continue

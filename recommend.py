@@ -3239,6 +3239,15 @@ def ui_chip(text, kind="info", sub=None, tip=None) -> str:
     return s
 
 
+def capped_note(raw_by_gw) -> str | None:
+    """'Capped at 100% in N weeks - raw up to X% (GWn)'; None when nothing was capped."""
+    over = {g: float(v) for g, v in (raw_by_gw or {}).items() if v is not None and float(v) > 100.0}
+    if not over:
+        return None
+    g, v = max(over.items(), key=lambda kv: kv[1])
+    return f"Capped at 100% in {len(over)} week{'s' if len(over) != 1 else ''} - raw up to {v:.1f}% (GW{g})"
+
+
 def strip_md(text) -> str:
     """Plain text from light markdown (for tooltips)."""
     import re
