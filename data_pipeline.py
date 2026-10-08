@@ -739,6 +739,8 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "team_id": pl["team"].values,
         "position": pl["position"].values,
         "price": price_vals.values,
+        "cost_change_start": (pd.to_numeric(pl["cost_change_start"], errors="coerce").values
+                              if "cost_change_start" in pl.columns else np.nan),
         "status": pl["status"].values if "status" in pl.columns else None,
         "news": pl["news"].values if "news" in pl.columns else None,
         # Patch 67 (manager question: "can we fetch the latest news from the

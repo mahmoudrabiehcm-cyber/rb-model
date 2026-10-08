@@ -137,6 +137,18 @@ def fetch_entry_picks_official(entry_id: int, gw: int) -> Optional[dict]:
         return None
 
 
+def fetch_entry_transfers_official(entry_id: int) -> Optional[list]:
+    """Patch 117c: the manager's full transfer list (element_in/out, costs in tenths, event, time). Used to
+    work out each owned player's selling price."""
+    r = _get(f"{FPL_API}/entry/{entry_id}/transfers/")
+    if r is None:
+        return None
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        return None
+
+
 def fetch_entry_history_official(entry_id: int) -> Optional[dict]:
     """Per-GW points/rank/value/event_transfers/event_transfers_cost/points_on_bench
     for the current season, plus `chips` (name + played gameweek) and `past`

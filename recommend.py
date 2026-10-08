@@ -3064,6 +3064,70 @@ def apply_budget_override(bank: float, squad_market_price: float, override) -> t
     return round(ov - float(squad_market_price), 1), round(ov, 1), note
 
 
+def sell_price_tenths(buy: int, now: int) -> int:
+    """Patch 117c: FPL selling price in tenths of a million. If the price rose, you keep half the rise rounded DOWN
+    to 0.1; if it fell or is unchanged you get the current price."""
+    buy, now = int(buy), int(now)
+    return buy + (now - buy) // 2 if now > buy else now
+
+
+def selling_prices(squad_df, transfers, skip_events=None) -> dict:
+    """Patch 117c: per-player selling price for the current squad from the manager's transfer history.
+    Buy price = the player's LATEST purchase in `transfers` (element_in_cost, tenths); events in `skip_events`
+    (Free Hit weeks, whose squad is reverted) are ignored. No purchase -> start-of-season price
+    (now_cost - cost_change_start). No usable data -> market price, counted in n_estimated.
+    Returns {"rows": [...], "total": float or None, "n_estimated": int}. total is None when the squad is empty."""
+    skip = set(skip_events or [])
+    latest = {}
+    for t in sorted(transfers or [], key=lambda x: (str(x.get("time", "")), x.get("event", 0))):
+        if t.get("event") in skip or t.get("element_in") is None or t.get("element_in_cost") is None:
+            continue
+        latest[int(t["element_in"])] = int(t["element_in_cost"])
+    rows, n_est = [], 0
+    for _, r in squad_df.iterrows():
+        pid = r.get("id")
+        now = int(round(float(r["price"]) * 10))
+        buy, src = None, "market"
+        if pid is not None and pd.notna(pid) and int(pid) in latest:
+            buy, src = latest[int(pid)], "transfer"
+        else:
+            ccs = r.get("cost_change_start") if "cost_change_start" in squad_df.columns else None
+            if ccs is not None and pd.notna(ccs):
+                buy, src = now - int(ccs), "start_price"
+        if buy is None:
+            sell = now
+            n_est += 1
+        else:
+            sell = sell_price_tenths(buy, now)
+        rows.append({"id": pid, "buy": None if buy is None else round(buy / 10.0, 1), "now": round(now / 10.0, 1),
+                     "sell": round(sell / 10.0, 1), "source": src})
+    total = round(sum(x["sell"] for x in rows), 1) if rows else None
+    return {"rows": rows, "total": total, "n_estimated": n_est}
+
+
+def resolve_budget(bank: float, squad_market_price: float, selling_total, override, n_estimated: int = 0) -> tuple:
+    """Patch 117c: budget = bank + selling prices (auto). A typed override (Advanced box) wins. If the selling total
+    is unavailable, fall back to market prices and say so. Returns (bank_effective, team_value, note, source) with
+    source in {"manual", "auto", "market"}; bank_effective + squad market price = team_value everywhere the app adds them."""
+    try:
+        ov = float(override) if override is not None else 0.0
+    except (TypeError, ValueError):
+        ov = 0.0
+    market = round(float(bank) + float(squad_market_price), 1)
+    if 50.0 <= ov <= 150.0:
+        b, tv, note = apply_budget_override(bank, squad_market_price, ov)
+        return b, tv, note, "manual"
+    if selling_total is None:
+        return float(bank), market, ("Budget from market prices: %.1fm (selling prices unavailable - the FPL transfers "
+                                     "feed could not be read)." % market), "market"
+    tv = round(float(bank) + float(selling_total), 1)
+    note = ("Budget %.1fm (auto: bank %.1fm + selling prices %.1fm; market-price figure was %.1fm, %+.1fm difference)."
+            % (tv, float(bank), float(selling_total), market, round(market - tv, 1)))
+    if n_estimated:
+        note += " %d player(s) had no buy price in the feed and were estimated at market price." % int(n_estimated)
+    return round(tv - float(squad_market_price), 1), tv, note, "auto"
+
+
 def wildcard_week_conflict(plan_wc_gw, decision_gw):
     """Patch 117b: the weekly transfer plan is built before the Wildcard decision and uses the chip portfolio's
     (scan-based) Wildcard week; the Chip Plan decision uses the chain (model ruling M8). When they differ, say so."""
