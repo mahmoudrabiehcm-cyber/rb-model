@@ -1551,19 +1551,20 @@ def _frame_fingerprint(df: pd.DataFrame):
         return None
 
 
-def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain):
+def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain, locks=()):
     """Patch 112: opt.solve_squad(...) for the planner's k-loop, memoised on (pool fingerprint, owned codes,
     min_retain, budget). The solve is deterministic in those inputs (objective column fixed), and
     Streamlit's own cache re-hashed the entire player table on every call. Falls back to a plain call."""
     if pool_fp is None:
         return opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                               min_retain=min_retain, objective_col="xpts_horizon_sum")
-    key = (pool_fp, cfg_fp, tuple(sorted(current_codes)), int(min_retain), round(float(team_value), 3))
+                               min_retain=min_retain, must_include_codes=list(locks), objective_col="xpts_horizon_sum")
+    key = (pool_fp, cfg_fp, tuple(sorted(current_codes)), int(min_retain), round(float(team_value), 3),
+           tuple(sorted(locks)))
     if key in _PLAN_SOLVE_MEMO:
         res = _PLAN_SOLVE_MEMO[key]
     else:
         res = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                              min_retain=min_retain, objective_col="xpts_horizon_sum")
+                              min_retain=min_retain, must_include_codes=list(locks), objective_col="xpts_horizon_sum")
         if len(_PLAN_SOLVE_MEMO) >= _PLAN_SOLVE_MEMO_MAX:
             _PLAN_SOLVE_MEMO.clear()
         _PLAN_SOLVE_MEMO[key] = res
@@ -1836,7 +1837,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         k_upper = max(ft_bank, 5) if allow_hits else ft_bank
         for k in range(1, k_upper + 1):
             min_retain = max(0, 15 - k)
-            result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain)
+            result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain,
+                                        locks=lock_codes_of(sim_squad))
             if result is None:
                 continue
             new_squad = result["squad"]
@@ -2202,7 +2204,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             continue
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                  min_retain=min_retain, objective_col="xpts_horizon_sum")
+                                  min_retain=min_retain, must_include_codes=lock_codes_of(squad_df),
+                                  objective_col="xpts_horizon_sum")
         if result is None:
             continue
         new_squad = result["squad"]
@@ -2723,7 +2726,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     for k in range(1, 6):
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                  min_retain=min_retain, must_include_codes=[target_code],
+                                  min_retain=min_retain, must_include_codes=[target_code] + lock_codes_of(squad_df),
                                   objective_col="xpts_horizon_sum")
         if result is None:
             continue
@@ -3105,7 +3108,8 @@ def selling_prices(squad_df, transfers, skip_events=None) -> dict:
     return {"rows": rows, "total": total, "n_estimated": n_est}
 
 
-def resolve_budget(bank: float, squad_market_price: float, selling_total, override, n_estimated: int = 0) -> tuple:
+def resolve_budget(bank: float, squad_market_price: float, selling_total, override, n_estimated: int = 0,
+                   market_sum=None) -> tuple:
     """Patch 117c: budget = bank + selling prices (auto). A typed override (Advanced box) wins. If the selling total
     is unavailable, fall back to market prices and say so. Returns (bank_effective, team_value, note, source) with
     source in {"manual", "auto", "market"}; bank_effective + squad market price = team_value everywhere the app adds them."""
@@ -3121,11 +3125,132 @@ def resolve_budget(bank: float, squad_market_price: float, selling_total, overri
         return float(bank), market, ("Budget from market prices: %.1fm (selling prices unavailable - the FPL transfers "
                                      "feed could not be read)." % market), "market"
     tv = round(float(bank) + float(selling_total), 1)
+    if market_sum is not None:        # Patch 117d: the squad is already priced at selling prices, the bank stays the real bank
+        market = round(float(bank) + float(market_sum), 1)
     note = ("Budget %.1fm (auto: bank %.1fm + selling prices %.1fm; market-price figure was %.1fm, %+.1fm difference)."
             % (tv, float(bank), float(selling_total), market, round(market - tv, 1)))
     if n_estimated:
         note += " %d player(s) had no buy price in the feed and were estimated at market price." % int(n_estimated)
     return round(tv - float(squad_market_price), 1), tv, note, "auto"
+
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Patch 117d helpers: owned players at selling price, Locked players, chained plan, snapshot, short UI chips.
+# --------------------------------------------------------------------------------------------------------------------
+def lock_codes_of(df) -> list:
+    """Codes of the manager's Locked players, read from the boolean `_locked` column carried on the squad / pool frame
+    (absent or NaN = not locked). Only the Wildcard rebuild and the transfer planner read it; ceilings, the Free Hit
+    optimum and the Rating % yardstick never do."""
+    if df is None or not hasattr(df, "columns") or "_locked" not in df.columns or "code" not in df.columns:
+        return []
+    m = df["_locked"].fillna(False).astype(bool)
+    return sorted(int(c) for c in df.loc[m, "code"].tolist())
+
+
+def lock_flags(squad_df, lock_codes) -> list:
+    """[(name, status)] for locked players who are not fully available (status != 'a') - the only lock problem possible,
+    since locks come from a legal squad and cost their selling price (always affordable)."""
+    out = []
+    want = set(lock_codes or [])
+    for _, r in squad_df.iterrows():
+        if r["code"] in want and str(r.get("status", "a")) != "a":
+            out.append((r.get("web_name"), str(r.get("status"))))
+    return out
+
+
+def lock_cost(free_sq, locked_sq, window_gws, cfg) -> float:
+    """xPts the locks cost: the unlocked Wildcard squad's window value minus the locked one's, same measure for both
+    (realized value per week incl. bench and captain, summed over the window)."""
+    def _v(sq):
+        return sum(opt.rating_gw_value(sq, f"xpts_gw{g}", cfg)["total_realized"] for g in window_gws
+                   if f"xpts_gw{g}" in sq.columns)
+    return float(_v(free_sq) - _v(locked_sq))
+
+
+def apply_sell_prices(pool, sp):
+    """Owned players priced at what you would RECEIVE (selling price), everyone else at the live price. Keeping an owned
+    player then costs his selling price, selling returns it, buying costs the live price. The market price is kept in
+    `market_price`. Returns a copy; unknown ids are ignored."""
+    out = pool.copy()
+    if "id" not in out.columns:
+        return out
+    sell = {int(r["id"]): float(r["sell"]) for r in (sp or {}).get("rows", []) if r.get("id") is not None and pd.notna(r.get("id"))}
+    if not sell:
+        return out
+    ids = out["id"]
+    mask = ids.notna() & ids.fillna(-1).astype(int).isin(sell.keys())
+    out["market_price"] = out["price"]
+    out.loc[mask, "price"] = [sell[int(i)] for i in ids[mask]]
+    return out
+
+
+def reconcile_chip_schedule(chip_schedule, decision_gw, planning_gw, rebuild_by_gw):
+    """Patch 117d: the weekly transfer plan must follow the Chip Plan decision. Wildcard decided NOW -> the plain list is the
+    no-Wildcard alternative (no wildcard line). Wildcard decided for a later week -> the plan rolls to that week and
+    rebuilds there (`rebuild_by_gw[week]`); with no squad for that week, no wildcard line. No decision -> unchanged."""
+    if chip_schedule is None or decision_gw is None:
+        return chip_schedule
+    cur = chip_schedule.get("wildcard_gw")
+    if cur is not None and int(cur) == int(decision_gw) and int(decision_gw) != int(planning_gw):
+        return chip_schedule
+    out = {k: v for k, v in chip_schedule.items() if k not in ("wildcard_gw", "wildcard_rebuild_squad")}
+    if int(decision_gw) != int(planning_gw):
+        rb = (rebuild_by_gw or {}).get(int(decision_gw))
+        if rb is not None and not getattr(rb, "empty", False):
+            out["wildcard_gw"] = int(decision_gw)
+            out["wildcard_rebuild_squad"] = rb
+    return out
+
+
+def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg, overrides_bytes=None) -> bytes:
+    """Patch 117d: one downloadable file with everything needed to reproduce this run offline - the full pool (prices as the
+    solver saw them, market price, xPts columns, owned / locked flags), the budget facts, the config, and the manual sheet."""
+    import io, json, zipfile
+    df = pool.copy()
+    df["owned"] = df["code"].isin(set(owned_codes))
+    df["locked"] = df["code"].isin(set(locked_codes or []))
+    if "_locked" in df.columns:
+        df = df.drop(columns=["_locked"])
+    m = dict(meta or {})
+    m.update({"bank": float(bank), "budget": float(budget), "locked_codes": [int(c) for c in (locked_codes or [])],
+              "owned_codes": [int(c) for c in owned_codes]})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("pool.csv", df.to_csv(index=False))
+        z.writestr("meta.json", json.dumps(m, indent=1, default=str))
+        z.writestr("config.json", json.dumps(cfg, indent=1, default=str))
+        if overrides_bytes is not None:
+            z.writestr("manual_overrides.csv", overrides_bytes)
+    return buf.getvalue()
+
+
+_CHIP_COL = {"ok": ("#1b6b3a", "#e3f3e8"), "warn": ("#8a5a00", "#fff1d6"), "bad": ("#9b1c1c", "#fde4e4"), "info": ("#33506b", "#e6eef5")}
+
+
+def ui_chip(text, kind="info", sub=None, tip=None) -> str:
+    """One short coloured chip (HTML). Text and tooltip are escaped; the long explanation goes in `tip` (hover)."""
+    import html
+    fg, bg = _CHIP_COL.get(kind, _CHIP_COL["info"])
+    t = f' title="{html.escape(str(tip), quote=True)}"' if tip else ""
+    s = f'<span{t} style="background:{bg};color:{fg};border-radius:10px;padding:2px 9px;font-size:12px;font-weight:600;">{html.escape(str(text))}</span>'
+    if sub:
+        s += f' <span style="color:{fg};font-size:11px;opacity:.8;">{html.escape(str(sub))}</span>'
+    return s
+
+
+def budget_chip_text(budget, source, gap) -> str:
+    """e.g. 'Budget 99.8m (auto, -0.8)'. gap = budget minus the live-price figure."""
+    tag = {"auto": "auto", "manual": "manual", "market": "live prices"}.get(source, source)
+    g = "" if source == "market" or abs(float(gap)) < 0.05 else f", {float(gap):+.1f}"
+    return f"Budget {float(budget):.1f}m ({tag}{g})"
+
+
+def plan_conflict_chip(plan_wc_gw, decision_gw):
+    """Short flag when the weekly plan and the Chip Plan name different Wildcard weeks; None when they agree."""
+    if plan_wc_gw is None or decision_gw is None or int(plan_wc_gw) == int(decision_gw):
+        return None
+    return f"Plan WC GW{plan_wc_gw} vs Chip Plan GW{decision_gw}"
 
 
 def wildcard_week_conflict(plan_wc_gw, decision_gw):
@@ -3242,7 +3367,8 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
     wp = pool.copy()
     if mode == "sum15":
         wp["_wc_obj"] = wp[cols].sum(axis=1)
-        res = opt.solve_squad(wp, cfg, budget=float(budget), objective_col="_wc_obj", label=label)
+        res = opt.solve_squad(wp, cfg, budget=float(budget), objective_col="_wc_obj", label=label,
+                              must_include_codes=lock_codes_of(wp))
     else:
         bw = float(bench_w if bench_w is not None else cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08))
         bb_col = f"xpts_gw{bb_gw}" if (bb_gw is not None and f"xpts_gw{bb_gw}" in cols) else None
@@ -3255,7 +3381,8 @@ def wc_rebuild_squad(pool: pd.DataFrame, cfg: dict, budget: float, window_gws: l
         cap_on = bool(ece.get("wc_build_captain", True)) if captain is None else bool(captain)
         res = opt.solve_squad_xi_weighted(wp, cfg, float(budget), cols, bench_weight=bw, bb_col=bb_col, bonus=bonus,
                                           label=label, week_weights=wts, captain=cap_on,
-                                          captain_k=int(ece.get("wc_build_captain_k", 60)))
+                                          captain_k=int(ece.get("wc_build_captain_k", 60)),
+                                          must_include_codes=lock_codes_of(wp))
     if res is None or res.get("squad") is None:
         return None
     sq = res["squad"]

@@ -536,7 +536,7 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
                             bonus: dict | None = None, label: str | None = None,
                             week_weights: list | None = None, captain: bool = False,
                             retain_pool_codes: list | None = None, min_retain: int = 0,
-                            captain_k: int = 0) -> dict | None:
+                            captain_k: int = 0, must_include_codes: list | None = None) -> dict | None:
     """Patch 114 (manager: the Wildcard must be the best team over the window, then shaped for the chips). Verified in the
     Patch 113 code: solve_squad() maximises the plain SUM of all 15 players, i.e. every player counts as a starter in
     every week. Here the squad (x_i) and a legal starting XI for EACH week of the window (y_ig) are chosen together:
@@ -568,6 +568,7 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
     df = df[df["position"].isin(["GK", "DEF", "MID", "FWD"])]
     if "status" in df.columns:
         _keep = set(retain_pool_codes or []) if (retain_pool_codes and int(min_retain) > 0) else set()
+        _keep |= set(must_include_codes or [])                        # Patch 117d: a locked player stays eligible
         df = df[(df["status"] == "a") | df["code"].isin(_keep)]       # a retained player stays eligible (as solve_squad)
     if df.empty:
         _diag(label, "empty candidate pool for the XI-weighted solve (nothing survived the price/projection/position/"
@@ -618,6 +619,9 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
         if retain_pool_codes and int(min_retain) > 0:
             _ret = set(retain_pool_codes)
             prob += pulp.lpSum(x[i] for i in I if CODE[i] in _ret) >= int(min_retain)
+        for _mi in I:                                                 # Patch 117d: Locked players are always in the squad
+            if must_include_codes and CODE[_mi] in set(must_include_codes):
+                prob += x[_mi] == 1
         prob += pulp.lpSum(x[i] * PRICE[i] for i in I) <= budget
         prob += pulp.lpSum(x[i] for i in I) == cfg["squad_rules"]["squad_size"]
         for pos, count in cfg["squad_rules"]["formation"].items():
