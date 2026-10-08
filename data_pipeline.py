@@ -909,3 +909,46 @@ def solve_free_hit_optimal_squad(cfg: dict, proj: pd.DataFrame, total_value: flo
                                                  f"GW{gw} may be outside the projected horizon this run.")
         return None
     return opt.solve_xi_first_squad(proj, cfg, budget=total_value, gw_col=col, label="free_hit_optimal")
+
+
+def solve_best_gw_squad(cfg: dict, proj: pd.DataFrame, total_value: float, gw: int):
+    """Patch 117g: ONE 'best possible squad for this GW' used by the Pitch rating, the header rating and the chip
+    table. Three solvers, scored by the SAME realized-value rule the ratings use (best XI, captain doubled, bench
+    autosub-discounted); the highest wins, so a rating can never be flattered by a weak ceiling:
+      (1) XI-first (the old Pitch yardstick), (2) plain 15-man sum, (3) XI + captain + bench at the planner weight
+      (the only one that knows the armband's extra x1 -- live GW6: a Wildcard-path squad reached 100.6% of (1)/(2)).
+    Same keys as solve_xi_first_squad ('squad' always present; other keys None when (2)/(3) win).
+    None if the GW column is missing or nothing solves."""
+    col = f"xpts_gw{gw}"
+    best = solve_free_hit_optimal_squad(cfg, proj, total_value, gw)
+    if col not in proj.columns:
+        return best
+    best_val = opt.rating_gw_value(best["squad"], col, cfg)["total_realized"] if best else None
+
+    def _as_frame(sq):
+        if isinstance(sq, pd.DataFrame):
+            return sq
+        return proj[proj["code"].isin([p["code"] for p in sq])]
+
+    cands = []
+    try:
+        alt = opt.solve_squad(proj, cfg, budget=float(total_value), objective_col=col, label="best_gw_alt")
+        if alt is not None and alt.get("squad") is not None:
+            cands.append(_as_frame(alt["squad"]))
+    except Exception:  # noqa: BLE001 -- an extra candidate must never break the rating
+        pass
+    try:
+        cap = opt.solve_squad_xi_weighted(proj, cfg, float(total_value), [col], captain=True, label="best_gw_captain")
+        if cap is not None and cap.get("squad") is not None:
+            cands.append(_as_frame(cap["squad"]))
+    except Exception:  # noqa: BLE001
+        pass
+    for sq in cands:
+        if len(sq) != 15:
+            continue
+        v = opt.rating_gw_value(sq, col, cfg)["total_realized"]
+        if best_val is None or v > best_val + 1e-9:
+            best_val = v
+            best = {"squad": sq, "xi_codes": None, "shape": None, "xi_total": None,
+                    "bench_cost": None, "total_cost": round(float(sq["price"].sum()), 1)}
+    return best

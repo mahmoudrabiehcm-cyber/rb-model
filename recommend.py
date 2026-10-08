@@ -3269,6 +3269,23 @@ def details_html(summary_html, body_html) -> str:
             f'<span style="color:#778;font-size:12px;">ⓘ</span></summary>{body_html}</details>')
 
 
+def table_formats(columns) -> dict:
+    """Column name -> display kind ('money' | 'num1' | 'bar'); text columns are left out."""
+    out = {}
+    for c in columns:
+        s = str(c)
+        low = s.lower()
+        if "£" in s or low in ("price", "cost £m"):
+            out[c] = "money"
+        elif "–" in s or "total" in low or "horizon" in low or "window" in low:
+            out[c] = "bar"
+        elif low.startswith("xpts") or "gain" in low or low in ("net", "hit", "cost (xpts)") or "net" in low.split():
+            out[c] = "num1"
+        elif "xpts" in low or low.startswith("cost"):
+            out[c] = "num1"
+    return out
+
+
 def chips_row_html(items) -> str:
     """Several chip/detail html fragments laid out in one wrapping row; '' when empty."""
     items = [i for i in (items or []) if i]
