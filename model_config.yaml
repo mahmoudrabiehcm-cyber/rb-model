@@ -3328,6 +3328,7 @@ chip_extended_check:
   wc_wait_cap_frac: 0.5  # Patch 117 (model ruling, no backtest behind 'half'): inside the tie band the later week wins only if waiting costs no more than this fraction of the band
   decay_check: [0.85, 0.95]  # Patch 115 fix 2: re-decide the Wildcard week at these decays from the same solved squads; a flip = low confidence (display only). [] = off
   wc_objective: weekly_xi  # Patch 114: Wildcard rebuild = squad + a legal starting XI for EACH week (XI in full, bench at transfer.bench_weight_non_bb_gw); sum15 = the Patch 113 plain 15-man sum
+  wc_decide_with_fh_week: false  # Patch 117l (model M29): false = the Wildcard week is decided before chips (the joint sequence's Free Hit week is not removed from the candidates' gains); true = the Patch 115-117k behaviour
   wc_chip_aware_variant: false  # Patch 117i (model M29): off until the variant test is built. Was true (Patch 114: Extended Check also builds a chip-aware Wildcard (Bench Boost week bench + Triple Captain target) and keeps it only if clearly better than the plain one
   tc_ft_route: true  # Patch 114: the weekly planner may BUY the Triple Captain target with a free transfer (Rule #31 chip-value deviation, switchable)
   pick_rule: best_horizon  # Triple Captain / Bench Boost = best week across the horizon (TC+BB chosen as a pair); Patch 115 (model v6.12): exact ties -> the LATER week and the tie set (weeks within Rule #34's band, 2-pt floor) is shown; best_horizon_earlier = Patch 113 (exact ties -> earlier); latest_tied = Patch 112
