@@ -1086,6 +1086,11 @@ def _note(label, body, kind="info"):
     st.markdown(recommend.note_html(label, kind, body), unsafe_allow_html=True)
 
 
+def _dm(summary, body_html, unsafe_allow_html=True):
+    """Short summary line; the original longer html block opens on tap."""
+    st.markdown(recommend.details_html(html.escape(str(summary)), body_html), unsafe_allow_html=True)
+
+
 def _nc(label, body, help=None):
     _note(label, body, "info")
 
@@ -2049,12 +2054,12 @@ if not st.session_state.unlocked:
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
     if st.button("Unlock →", use_container_width=True):
         if not entry_input.strip().isdigit():
-            st.error("Team ID should be numbers only — find it in the URL when you open 'Points' on the official FPL site.")
+            _ne("Team ID: numbers only", "Team ID should be numbers only — find it in the URL when you open 'Points' on the official FPL site.")
         else:
             with st.spinner("Checking team ID against the official API..."):
                 test_entry = fpl_data.fetch_entry_official(int(entry_input.strip()))
             if test_entry is None or "id" not in test_entry:
-                st.error("Couldn't find that team ID on the official FPL API. Double-check it and try again.")
+                _ne("Team ID not found", "Couldn't find that team ID on the official FPL API. Double-check it and try again.")
             else:
                 st.session_state.unlocked = True
                 st.session_state.team_id = int(entry_input.strip())
@@ -3743,7 +3748,7 @@ with tab_captain:
             '<div class="alt-sub">' + _c_cap + '</div>'
             '</div>', unsafe_allow_html=True)
     else:
-        st.info("No captaincy pick yet this run — check back once the model has computed your starting XI.")
+        _ni("No captain pick yet", "No captaincy pick yet this run — check back once the model has computed your starting XI.")
 
     # Patch 113 (manager: the Captaincy tab must mention the current squad AND the pick after the recommended chip):
     # one small table -- armband now (current squad), after the Wildcard, and the Triple Captain week. All three read the
@@ -4069,7 +4074,7 @@ with tab_news:
                     '<div class="ts">' + _n_ts_txt + '</div>'
                     '</div></div>', unsafe_allow_html=True)
             if len(_news_rows) > _NEWS_CAP:
-                st.caption(f"Showing the {_NEWS_CAP} most recently updated of {len(_news_rows)} flagged players "
+                _nc(f"Top {_NEWS_CAP} of {len(_news_rows)} flagged", f"Showing the {_NEWS_CAP} most recently updated of {len(_news_rows)} flagged players "
                            f"across your squad + the transfer pool.")
             _nc("Source: FPL API", "Source: official FPL API (status/news/chance-of-playing-next-round), the same data shown "
                        "on a player's page in the official app/site — refreshed every model run, not scraped "
@@ -4594,7 +4599,7 @@ with tab_chips:
                 # still re-evaluated over the wider window.
                 _chips_reached = max(chip_adv_gw_list) if chip_adv_gw_list else None
                 if _chips_reached is not None and _chips_reached < _chip_target_gw:
-                    st.warning(f"⚠️ Finished short — chips re-evaluated over GW{planning_gw}–GW{_chips_reached} "
+                    _nw(f"⚠️ Chips checked to GW{_chips_reached} only", f"⚠️ Finished short — chips re-evaluated over GW{planning_gw}–GW{_chips_reached} "
                                f"(no projection data beyond that).")
                 else:
                     st.success(f"✅ Done — all chips re-evaluated over GW{planning_gw}–GW{_chip_target_gw}.")
@@ -4710,7 +4715,7 @@ with tab_chips:
                 st.markdown("🔁 **Moved vs your last normal run:** " + " · ".join(
                     f"{chip_protocol.CHIP_LABELS.get(k, k)} — {v}" for k, v in _chip_tags.items()))
             elif st.session_state.get("_chip_baseline") is None:
-                st.caption("Run the model normally once, then extend, to see which cards moved.")
+                _nc("Run normally, then extend", "Run the model normally once, then extend, to see which cards moved.")
             else:
                 st.caption("No chip moved vs your last normal run.")
             if _wc_check_note:
@@ -4772,15 +4777,16 @@ with tab_chips:
         # panel for the whole tab, not two.
         if chip_portfolio is not None and chip_portfolio.get("assignment"):
             st.markdown("---")
-            st.markdown(f"**🗓️ Chip sequence (Rules #48-49)** — combined **{chip_portfolio['total_gain']:+.1f} xPts** "
-                        f"vs. the best transfer path across the {_seq_n} chips scheduled on the cards above (tie "
-                        f"band ±{chip_portfolio['tie_band']:.1f} xPts, {chip_portfolio['near_tie_count']} "
-                        f"sequence(s) inside it, later commitment preferred).")
+            st.markdown(recommend.ui_chip(f"🗓️ Chip sequence {chip_portfolio['total_gain']:+.1f} xPts", "ok" if chip_portfolio['total_gain'] > 0 else "info",
+                                          tip=f"vs the best transfer path, {_seq_n} chips scheduled; tie band ±{chip_portfolio['tie_band']:.1f} xPts, {chip_portfolio['near_tie_count']} sequence(s) inside it, later commitment preferred (Rules #48-49)")
+                        + " " + recommend.ui_chip(f"{_seq_n} chips", "info")
+                        + " " + recommend.ui_chip(f"band ±{chip_portfolio['tie_band']:.1f}", "info"),
+                        unsafe_allow_html=True)
             # Patch 89 — (d) and (f) are now partially modeled (see
             # chip_protocol.py's _reachable_bb_tc_tables() and the
             # bench_term disclosure), so this bullet list states their real
             # scope instead of claiming "not yet modeled."
-            st.markdown(
+            _nc("How chips are valued (Rules #49)",
                 "- Bench Boost/Triple Captain values switch to the Wildcard's own rebuild squad for any week at or "
                 "after a scheduled Wildcard (Rule #49b) — verified in code, not assumed.\n"
                 "- Free Hit's value is a full rebuild vs. your own best XI that week, and doesn't depend on squad "
@@ -4846,9 +4852,10 @@ with tab_chips:
             if not _rc_result["feasible"]:
                 st.info(_rc_result.get("reason", "Couldn't reconcile this run."))
             else:
-                st.markdown(f"**This app's own gain: {_rc_result['model_gap']:+.1f} xPts** vs. the other tool's "
-                            f"**{_rc_result['other_gain']:+.1f} xPts** — a **{_rc_result['gap_to_explain']:+.1f} "
-                            f"xPts** difference to explain.")
+                st.markdown(recommend.ui_chip(f"App {_rc_result['model_gap']:+.1f}", "info") + " "
+                            + recommend.ui_chip(f"Other tool {_rc_result['other_gain']:+.1f}", "info") + " "
+                            + recommend.ui_chip(f"Gap {_rc_result['gap_to_explain']:+.1f} xPts", "warn"),
+                            unsafe_allow_html=True)
                 if _rc_result["components"]:
                     _rc_rows = pd.DataFrame([
                         {"Input tested": c["input"], "Gain under that input": f"{c['variant_gap']:+.1f}",
@@ -4857,10 +4864,10 @@ with tab_chips:
                     st.dataframe(_rc_rows, hide_index=True, use_container_width=True)
                     for c in _rc_result["components"]:
                         st.caption(f"• **{c['input']}**: {c['note']}")
-                st.markdown(f"**Explained so far: {_rc_result['explained_total']:+.1f} xPts · "
-                            f"Residual unexplained: {_rc_result['residual_unexplained']:+.1f} xPts** — per Rule "
-                            f"#51, a difference that can't be reproduced is reported as unexplained, with its "
-                            f"size, never guessed at.")
+                st.markdown(recommend.ui_chip(f"Explained {_rc_result['explained_total']:+.1f}", "ok",
+                                              tip="Rule #51: a difference that can't be reproduced is reported as unexplained, with its size, never guessed at.")
+                            + " " + recommend.ui_chip(f"Unexplained {_rc_result['residual_unexplained']:+.1f}", "warn"),
+                            unsafe_allow_html=True)
                 with st.expander("Not yet automated (Rule #51 scope)"):
                     for item in _rc_result["not_modeled"]:
                         st.markdown(f"- {item}")
@@ -4892,9 +4899,9 @@ with tab_transfers:
                     unsafe_allow_html=True)
 
         if _chip_headline_text:
-            st.caption("🔗 " + _chip_headline_text + " — same plan as the Chip Plan tab and the Pitch navigator.")
+            _nc("🔗 Same as Chip Plan + Pitch", "🔗 " + _chip_headline_text + " — same plan as the Chip Plan tab and the Pitch navigator.")
         if _adv_diff:
-            st.caption("🔗 Chip weeks follow the Chip Plan (joint sequence). Standalone scans differ — " + " · ".join(_adv_diff))
+            _nc("🔗 Weeks follow Chip Plan", "🔗 Chip weeks follow the Chip Plan (joint sequence). Standalone scans differ — " + " · ".join(_adv_diff))
         if _wc_active:
             wc_rebuild_gw = detect_gw_list[0] if detect_gw_list else planning_gw
             _wc_col = f"xpts_gw{wc_rebuild_gw}"
@@ -4926,7 +4933,7 @@ with tab_transfers:
                                 f"HOLD · reference GW{wc_rebuild_gw}" if _rb_codes else
                                 f"trigger active, shown for GW{wc_rebuild_gw} onward"), expanded=False):
                 if not wc_eval_auto["feasible"]:
-                    st.info("Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
+                    _ni("No auto-rebuild solved", "Couldn't solve an auto-rebuild this run (projection data may not reach far enough).")
                 else:
                     if _rb_codes:
                         _cc = _wc_chain["cands"][_rb_t]
@@ -4978,7 +4985,7 @@ with tab_transfers:
                     # formatter states that plainly plus horizon/variant/
                     # tier, instead of this caption's own ad hoc wording.
                     if _rb_codes:
-                        st.caption("Date remains your own call (Standing Rule #32).")
+                        _nc("Date = your call", "Date remains your own call (Standing Rule #32).")
                     else:
                       _nc("Rebuild vs hold", f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
                                f"{wc_eval_auto['hold_total']:.1f} xPts holding your current squad over this window "
@@ -5020,7 +5027,7 @@ with tab_transfers:
                                     st.dataframe(pd.DataFrame([{"Out": x["out"], "In (style)": x["in"], "Cost (xPts)": x["cost"]}
                                                                for x in _style_swaps]), hide_index=True, use_container_width=True)
                                 else:
-                                    st.caption(f"{style_name}: no style swaps — the plain squad is also the styled squad.")
+                                    _nc("No style swaps", f"{style_name}: no style swaps — the plain squad is also the styled squad.")
                                 _tl_wc = recommend.plan_timeline_lines(
                                     _wc_chain["cands"][_rb_t]["plan"],
                                     first_week=(None if _rb_t == planning_gw else
@@ -5036,7 +5043,7 @@ with tab_transfers:
             fh_res_auto = _fh_optimal_calc(cfg, _fh_proj_auto, team_value, _fh_gw)
             with st.expander(f"🎟️ Free Hit — PLAY GW{_fh_gw}, optimal squad", expanded=False):
                 if fh_res_auto is None:
-                    st.info("Couldn't solve an optimal Free Hit squad this run.")
+                    _ni("No Free Hit squad solved", "Couldn't solve an optimal Free Hit squad this run.")
                 else:
                     fh_sq, fh_xi = fh_res_auto["squad"], None
                     fh_xi = fh_sq[fh_sq["code"].isin(fh_res_auto["xi_codes"])]
@@ -5120,7 +5127,7 @@ with tab_transfers:
                                     if any(m.get("in_code") == _tgt.get("code") for m in (w.get("moves") or []))), None)
                         _buy = (f"Planned for: {_tgt.get('name')} ({_tgt.get('xpts', 0):.1f} xPts in GW{_tc_gw}) is "
                                 + (f"bought in GW{_bw}." if _bw is not None else "part of the Wildcard squad.") + " ")
-                    st.caption(f"{_tc_lab} "
+                    _nc("Triple Captain", f"{_tc_lab} "
                                + (_edge_txt(_tcv, _cc.get("tc_best"), _cc.get("tc_gap"), "Triple Captain week",
                                             _cc.get("tc_conf") or "near-tie", _cc.get("tc_yield"),
                                             tie_set=_cc.get("tc_tie_set")) + " " if _tc_same else "")
@@ -5307,7 +5314,7 @@ def _render_scenario_results():
     the button's one-shot True state, so results stay visible until the
     manager explicitly clears them or evaluates a different scenario."""
     if st.session_state.get("scenario_nothing_selected"):
-        st.info("Nothing selected — pick a target player, a Wildcard gameweek, and/or a Free Hit "
+        _ni("Pick a player / GW first", "Nothing selected — pick a target player, a Wildcard gameweek, and/or a Free Hit "
                 "gameweek above first.")
 
     t_cache = st.session_state.get("scenario_target_cache")
@@ -5331,7 +5338,7 @@ def _render_scenario_results():
         wc_gw_choice = wc_cache["wc_gw_choice"]
         st.markdown(f"**Wildcard what-if — GW{wc_gw_choice}**")
         if not wc_cache["feasible"]:
-            st.info(f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
+            _ni(f"No rebuild solved for GW{wc_gw_choice}", f"Couldn't solve a rebuild for GW{wc_gw_choice} this run (projection data may not "
                     f"reach that far yet).")
         else:
             if wc_cache["wc_horizon"] != horizon:
@@ -5344,14 +5351,14 @@ def _render_scenario_results():
             # decision basis" treatment as the auto-rebuild caption above:
             # this is a hold-squad baseline, not the best no-chip transfer
             # path.
-            st.markdown(f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
+            _dm(f"🧪 GW{wc_gw_choice}: rebuild {wc_cache['rebuild_total']:.1f} vs hold {wc_cache['hold_total']:.1f} ({wc_cache['gap']:+.1f} xPts)", f'<div class="tx-reco">🧪 If played at GW{wc_gw_choice}: a full rebuild projects '
                         f'{wc_cache["rebuild_total"]:.1f} xPts vs {wc_cache["hold_total"]:.1f} xPts holding your '
                         f'current squad, over the same {len(wc_cache["future_gw_list"])}-GW window ({gap:+.1f} '
                         f'xPts) {chip_protocol.gain_disclosure("hold_squad", wc_cache["future_gw_list"], cfg)}. '
                         f'Informational only — this candidate GW is your own choice, and the model never '
                         f'names a single "play" date (Standing Rule #32); see Chip Rack above for whether '
                         f'v6.4\'s own Wildcard trigger is currently active.</div>', unsafe_allow_html=True)
-            st.caption("📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
+            _nc("📍 Also in Pitch Navigator", "📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
 
             styled_squad = wc_cache["styled_squad"]
             wc_gw_col = wc_cache["wc_gw_col"]
@@ -5370,7 +5377,7 @@ def _render_scenario_results():
                 st.dataframe(xi_show, hide_index=True, use_container_width=True)
                 if not xi_df.empty:
                     cap_row = xi_df.sort_values(wc_gw_col, ascending=False).iloc[0]
-                    st.caption(f"Suggested captain for GW{wc_gw_choice}: **{cap_row['web_name']}** "
+                    _nc(f"© {cap_row['web_name']} GW{wc_gw_choice} ({cap_row[wc_gw_col]:.1f})", f"Suggested captain for GW{wc_gw_choice}: **{cap_row['web_name']}** "
                                f"({cap_row[wc_gw_col]:.1f} projected xPts that week).")
                 st.markdown("**Bench**")
                 bench_show = wc_bench_df.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
@@ -5391,13 +5398,13 @@ def _render_scenario_results():
         st.markdown(f"**Free Hit optimal squad — GW{fh_gw_choice}**")
         if not fh_cache["feasible"]:
             if fh_cache["reason"] == "no_projection":
-                st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
+                _ni(f"No projection for GW{fh_gw_choice} yet", f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
             else:
                 _ni(f"No Free Hit squad solved for GW{fh_gw_choice}", f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
                         f"(projection data may not reach that far yet, or no feasible squad fit the "
                         f"budget/club constraints).")
         else:
-            st.caption("📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
+            _nc("📍 Also in Pitch Navigator", "📍 Also available in the Pitch Navigator above, right now — no extra click needed.")
             fh_col = fh_cache["fh_col"]
             fh_squad = fh_cache["fh_squad"]
             fh_result = fh_cache["fh_result"]
@@ -5415,14 +5422,14 @@ def _render_scenario_results():
             st.dataframe(fh_xi_show, hide_index=True, use_container_width=True)
             if not fh_xi.empty:
                 fh_cap_row = fh_xi.sort_values(fh_col, ascending=False).iloc[0]
-                st.caption(f"Suggested captain for GW{fh_gw_choice}: **{fh_cap_row['web_name']}** "
+                _nc(f"© {fh_cap_row['web_name']} GW{fh_gw_choice} ({fh_cap_row[fh_col]:.1f})", f"Suggested captain for GW{fh_gw_choice}: **{fh_cap_row['web_name']}** "
                            f"({fh_cap_row[fh_col]:.1f} projected xPts that week).")
-            st.markdown("**Bench** (deliberately cheap — a Free Hit's bench only matters if an "
-                        "autosub fires, so budget is routed to the XI above instead)")
+            st.markdown("**Bench**")
+            _nc("Cheap by design", "A Free Hit's bench only matters if an autosub fires, so budget is routed to the XI above instead.")
             fh_bench_show = fh_bench.sort_values(["position", fh_col], ascending=[True, False])[fh_show_cols] \
                 .rename(columns=fh_col_rename)
             st.dataframe(fh_bench_show, hide_index=True, use_container_width=True)
-            st.caption(f"Optimized for GW{fh_gw_choice} only — re-run closer to the date",
+            _nc(f"Optimized for GW{fh_gw_choice} only", f"Optimized for GW{fh_gw_choice} only — re-run closer to the date",
                        help=f"Optimized for GW{fh_gw_choice} only (a Free Hit squad reverts after this "
                             f"gameweek, per Rule #25) — this is the model's single best squad for that "
                             f"week, not season-shaping, so no Style Profile differential pull is applied. "
@@ -5430,7 +5437,8 @@ def _render_scenario_results():
                             f"this closer to the date rather than treating it as locked in.")
             st.markdown("**Your squad vs. this Free Hit optimal**")
             if fh_cache["fh_rating"]["rating_pct"] is not None:
-                st.markdown(f"Your current squad's best XI this GW: **{fh_cache['fh_current_val']:.1f} xPts** vs. "
+                st.markdown(recommend.rating_bar_html(fh_cache['fh_rating']['rating_pct'], f"Now {fh_cache['fh_current_val']:.1f} vs FH {fh_cache['fh_optimal_val']:.1f} xPts"), unsafe_allow_html=True)
+                _nc(f"Gap {fh_cache['fh_gap']:.1f} (noise bar {fh_cache['fh_moe']:.1f})", f"Your current squad's best XI this GW: **{fh_cache['fh_current_val']:.1f} xPts** vs. "
                             f"Free Hit optimal: **{fh_cache['fh_optimal_val']:.1f} xPts** → "
                             f"**{fh_cache['fh_rating']['rating_pct']}%** (gap: {fh_cache['fh_gap']:.1f} xPts, "
                             f"margin-of-error threshold: {fh_cache['fh_moe']:.1f} xPts)")
@@ -5438,7 +5446,7 @@ def _render_scenario_results():
                     _nc("✓ Gap = noise — FH upside small", "✓ That gap is inside normal weekly noise — your squad is already "
                                "effectively at this week's ceiling; a Free Hit's upside here is limited.")
             else:
-                st.info("Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
+                _ni("No valid XI to compare", "Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
 
 
 @st.fragment
@@ -5728,7 +5736,7 @@ def _render_pitch_navigator():
         return
     nav_xi_result = opt.best_starting_xi(nav_squad, nav_col)
     if nav_xi_result is None:
-        st.caption(f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
+        _nc(f"No valid XI GW{nav_gw} (blank?)", f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
         return
 
     nav_starters = nav_xi_result["xi"]
@@ -5739,7 +5747,7 @@ def _render_pitch_navigator():
     if (_wc_decision or {}).get("gw") == nav_gw:
         _chips_here.insert(0, "Wildcard")
     if _chips_here:
-        st.caption("🎴 Chip Plan for GW" + str(nav_gw) + ": **" + " + ".join(_chips_here) + "**"
+        _nc(f"🎴 Chip Plan GW{nav_gw}: {' + '.join(_chips_here)}", "🎴 Chip Plan for GW" + str(nav_gw) + ": **" + " + ".join(_chips_here) + "**"
                    + (" — switch the Squad view to the Chip Plan path to see the squad it fields."
                       if (_chain_label and nav_mode != _chain_label) else ""))
 
@@ -5841,9 +5849,7 @@ def _render_pitch_navigator():
     nav_html += '</div>'
     st.markdown(nav_html, unsafe_allow_html=True)
     if nav_show_ticker:
-        st.markdown('<p class="side-note">Fixture ticker: one dot per GW in your horizon — '
-                    'easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the '
-                    'table below.</p>', unsafe_allow_html=True)
+        _nc("● easy · mid · hard (hover)", "Fixture ticker: one dot per GW in your horizon — easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the table below.")
 with tab_pitch:
     # Patch 68 — moved here (was inside tab_transfers, Patch 66) so the Pitch
     # Navigator is the app's default-open view (see the Patch 68 note above
@@ -5882,8 +5888,7 @@ with tab_transfers:
             row["Horizon total"] = f"{(0.0 if pd.isna(total) else total):.1f}"
             breakdown_rows.append(row)
         st.dataframe(pd.DataFrame(breakdown_rows), hide_index=True, use_container_width=True)
-        st.markdown('<p class="side-note">Each GW cell: opponent (H/A) · projected xPts for that gameweek specifically.</p>',
-                    unsafe_allow_html=True)
+        _nc("Cell = opp (H/A) · xPts", "Each GW cell: opponent (H/A) · projected xPts for that gameweek specifically.")
 
     # ---------------------------------------------------------------------------
     # Transfer recommendations
@@ -5921,7 +5926,7 @@ with tab_transfers:
     # starting disrupted player instead of only the single highest-projected
     # one -- loop and show all of them, not just the first.
     for _entry in free_fix.get("entries", []):
-        st.markdown(f'<div class="tx-preview">⚠️ Worst case if <b>{_entry["player"]}</b> scores 0 this GW '
+        _dm(f"⚠️ If {_entry['player']} scores 0: {_entry['worst_case_total']:.1f} xPts (now {_entry['current_total']:.1f})", f'<div class="tx-preview">⚠️ Worst case if <b>{_entry["player"]}</b> scores 0 this GW '
                     f'(currently started; his own projection already reflects a live chance-of-playing discount, '
                     f'this is the harsher case): best XI with <b>{_entry["worst_case_replacement"] or "—"}</b> '
                     f'instead — <b>{_entry["worst_case_total"]:.1f}</b> xPts (vs {_entry["current_total"]:.1f} '
@@ -6052,7 +6057,7 @@ with tab_transfers:
         _new_rating = eng.team_rating_pct(_new_current_val, fh_auto_optimal_val, "")
 
         if _new_gw_xpts is not None and _new_rating["rating_pct"] is not None:
-            st.markdown(f'<div class="tx-preview">📈 If you make this move — new GW{planning_gw} xPts: '
+            _dm(f"📈 After move: {_new_gw_xpts:.1f} xPts (was {gw_xpts_total:.1f}) · rating {_new_rating['rating_pct']}%", f'<div class="tx-preview">📈 If you make this move — new GW{planning_gw} xPts: '
                         f'<b>{_new_gw_xpts:.1f}</b> (was {gw_xpts_total:.1f}) · new Team Rating: '
                         f'<b>{_new_rating["rating_pct"]}%</b> (was {fh_auto_rating["rating_pct"]}%, vs. the same '
                         f'GW{planning_gw} Free Hit optimal shown at the top). Local preview only — the header stats '
@@ -6192,7 +6197,7 @@ with tab_style:
                             f"gameweek aren't finalized yet, so both can still move. Past rows are each GW's own "
                             f"confirmed, finalized value and won't change.")
     else:
-        st.caption("No season history yet — nothing finished before GW1.")
+        _nc("No season history yet", "No season history yet — nothing finished before GW1.")
 
     # ---------------------------------------------------------------------------
     # Manager style fit
@@ -6258,6 +6263,6 @@ with tab_style:
                        "them at a glance. Uses the same live-corrected GW figure as the Season Ledger table "
                        "above, so the two never disagree on the current, not-yet-finalized gameweek.")
         else:
-            st.caption("No overall-rank data yet this season — chart will populate once a gameweek finishes.")
+            _nc("No rank data yet", "No overall-rank data yet this season — chart will populate once a gameweek finishes.")
     else:
-        st.caption("No season history yet — nothing finished before GW1.")
+        _nc("No season history yet", "No season history yet — nothing finished before GW1.")

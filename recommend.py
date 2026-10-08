@@ -3263,6 +3263,12 @@ def note_html(label, kind="info", body=None) -> str:
             f'<div style="font-size:12px;color:#556;padding:4px 2px 2px 6px;">{html.escape(strip_md(body))}</div></details>')
 
 
+def details_html(summary_html, body_html) -> str:
+    """Summary line (already html) that opens the full html block on tap."""
+    return (f'<details style="margin:2px 0;"><summary style="cursor:pointer;">{summary_html} '
+            f'<span style="color:#778;font-size:12px;">ⓘ</span></summary>{body_html}</details>')
+
+
 def rating_bar_html(pct, label="") -> str:
     """Thin horizontal bar 0-100 % (clamped); '' when pct is None."""
     import html
