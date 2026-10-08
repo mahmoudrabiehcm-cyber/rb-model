@@ -3269,6 +3269,38 @@ def details_html(summary_html, body_html) -> str:
             f'<span style="color:#778;font-size:12px;">ⓘ</span></summary>{body_html}</details>')
 
 
+def chips_row_html(items) -> str:
+    """Several chip/detail html fragments laid out in one wrapping row; '' when empty."""
+    items = [i for i in (items or []) if i]
+    if not items:
+        return ""
+    return '<div style="display:flex;flex-wrap:wrap;gap:6px 8px;align-items:flex-start;margin:2px 0 4px 0;">' + "".join(items) + "</div>"
+
+
+def chance_bar_html(pct) -> str:
+    """Small 'chance of playing' bar with the % beside it; '' when unknown."""
+    if pct is None:
+        return ""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return ""
+    if v != v:
+        return ""
+    p = max(0.0, min(100.0, v))
+    col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 50 else "#d64545")
+    return (f'<span style="display:inline-flex;align-items:center;gap:5px;" title="Chance of playing next round">'
+            f'<span style="display:inline-block;width:46px;height:6px;background:#e8ecf0;border-radius:4px;">'
+            f'<span style="display:block;height:6px;width:{p:.0f}%;background:{col};border-radius:4px;"></span></span>'
+            f'<span style="font-size:11px;color:{col};font-weight:600;">{p:.0f}%</span></span>')
+
+
+def strip_chance_suffix(text) -> str:
+    """Remove a trailing ' - NN% chance of playing' (the bar shows it)."""
+    import re
+    return re.sub(r"\s*[-–—]\s*\d+%\s*chance of playing\s*$", "", str(text or "").strip()).strip()
+
+
 def rating_bar_html(pct, label="") -> str:
     """Thin horizontal bar 0-100 % (clamped); '' when pct is None."""
     import html
@@ -3276,7 +3308,7 @@ def rating_bar_html(pct, label="") -> str:
         return ""
     p = max(0.0, min(100.0, float(pct)))
     col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 75 else "#d64545")
-    return (f'<div style="margin:2px 0 6px 0;"><div style="font-size:11px;color:#556;">{html.escape(str(label))} '
+    return (f'<div style="margin:2px 0 6px 0;max-width:320px;"><div style="font-size:11px;color:#556;">{html.escape(str(label))} '
             f'<b>{float(pct):.1f}%</b></div>'
             f'<div style="background:#e8ecf0;border-radius:6px;height:8px;width:100%;">'
             f'<div style="background:{col};border-radius:6px;height:8px;width:{p:.0f}%;"></div></div></div>')
