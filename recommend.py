@@ -3239,6 +3239,43 @@ def ui_chip(text, kind="info", sub=None, tip=None) -> str:
     return s
 
 
+def strip_md(text) -> str:
+    """Plain text from light markdown (for tooltips)."""
+    import re
+    t = str(text)
+    t = re.sub(r"[*`]", "", t)
+    t = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", t)
+    return t
+
+
+def note_chip(label, kind="info", body=None) -> str:
+    """Short chip for a message; the full text rides along as a hover tooltip."""
+    return ui_chip(label, kind, tip=strip_md(body) if body else None)
+
+
+def note_html(label, kind="info", body=None) -> str:
+    """Chip + tap-to-open details (native <details>, no layout nesting). No body -> chip only."""
+    import html
+    if not body:
+        return note_chip(label, kind)
+    return (f'<details style="margin:2px 0;"><summary style="cursor:pointer;list-style:none;">'
+            f'{note_chip(label, kind, body)} <span style="color:#778;font-size:12px;">ⓘ</span></summary>'
+            f'<div style="font-size:12px;color:#556;padding:4px 2px 2px 6px;">{html.escape(strip_md(body))}</div></details>')
+
+
+def rating_bar_html(pct, label="") -> str:
+    """Thin horizontal bar 0-100 % (clamped); '' when pct is None."""
+    import html
+    if pct is None:
+        return ""
+    p = max(0.0, min(100.0, float(pct)))
+    col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 75 else "#d64545")
+    return (f'<div style="margin:2px 0 6px 0;"><div style="font-size:11px;color:#556;">{html.escape(str(label))} '
+            f'<b>{float(pct):.1f}%</b></div>'
+            f'<div style="background:#e8ecf0;border-radius:6px;height:8px;width:100%;">'
+            f'<div style="background:{col};border-radius:6px;height:8px;width:{p:.0f}%;"></div></div></div>')
+
+
 def budget_chip_text(budget, source, gap) -> str:
     """e.g. 'Budget 99.8m (auto, -0.8)'. gap = budget minus the live-price figure."""
     tag = {"auto": "auto", "manual": "manual", "market": "live prices"}.get(source, source)

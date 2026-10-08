@@ -38,7 +38,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("Patch 117d (2026-10-08, manager: owned players must cost what you receive, a Locked players list, one chained plan, shorter messages): (1) every solve now prices your owned players at their SELLING price (live price kept as market_price) with your real bank, so keeping a risen player costs what you would receive, selling returns it, buying costs the live price; Wildcard budget unchanged (99.8 this week). (2) sidebar 'Locked players': the Wildcard rebuild and the weekly transfer planner must keep them and never sell them; ceilings, the Rating % and the Free Hit optimum ignore locks; a chip shows what the locks cost in xPts on the Wildcard card. (3) after the Wildcard decision the weekly plan is rebuilt on the decided week (Wildcard now = the plain list is the no-Wildcard alternative), the Pitch opens on the Chip Plan path when the Wildcard is now. (4) sidebar 'Download run snapshot' (pool, prices, flags, config, sheet) so a live run can be reproduced offline. (5) budget, plan-conflict and lock notes are short coloured chips. NOT validated on live data (FPL API blocked here); the first-week move of non-Wildcard chain paths still comes from the first plan. " "Patch 117c (2026-10-08, manager: type the budget by hand is not wanted; badge showed 117 for 117b): (1) the budget is now read automatically: bank + the selling price of each owned player, worked out from your FPL transfer history (latest purchase price; start-of-season price if never transferred in; Free Hit weeks ignored; half of any price rise kept, rounded down to 0.1). Buying still uses live prices. If the feed cannot be read the app falls back to market prices and says so on the Transfers tab. The Budget box moved into Advanced and is only a manual override (0 = auto). (2) version badge keeps the letter (Patch 117c). (3) Wildcard rebuild table label says 15-man squad total, not Starting XI. NOT validated on live data here (FPL API blocked from the sandbox); rule checked on the manager's own figures. " "Patch 117b (2026-10-07, manager: Wildcard squad 0.7m over budget; transfer plan said Wildcard GW8 while the Chip Plan said GW6): (1) sidebar box 'Budget £m' - type squad value + bank from the FPL Transfers page; it replaces the app's market-price budget for every build (Wildcard, Free Hit, chain), 0 = old behaviour; a single sale still uses the sold player's market price (approximate); selling prices are NOT read from the FPL site. (2) the Transfers tab now warns when the weekly plan's Wildcard week (chip portfolio / scan) differs from the Chip Plan decision (chain) - display only, the plan itself is not rebuilt. NOT changed: Bogle-type small-sample goal rates (model-chat question), clean sheet values. 492 tests pass; live browser run not possible here. " "Patch 117a (2026-10-07, model chat GW6 run vs app screens; display and window fixes, no change to the Wildcard decision logic): (1) provisional label now cites Rule #48(c) (was Rule #53(d)). (2) weekly-plan move cards: the -4 hit badge goes on the lowest-gain move(s), FREE on the highest (was FREE on every card even when the plan paid a hit); set-level gate unchanged. (3) Pitch and GW Rating capped at 100% with a flag showing the raw value when the ceiling solve returns a squad below yours. (4) Wildcard trigger window 5 -> 4 GWs (Rule #48); Extended runs still project 10 GWs but the trigger reads only the first 4. (5) MONITOR says it uses the plan's full transfer allowance. (6) cards say clean sheets with a manual override are carried at the sheet value for every week. (7) when the scan-only best week differs from the planned week it is shown as a labelled low-confidence alternative with the accrual defect named. NOT changed (switch left as is): chip value inside the Wildcard decision (include_chip_value). NOT validated: synthetic data; 486 tests pass, browser driver tests not runnable in this sandbox. " "Patch 117 (2026-10-05, model ruling amending v6.12 Rules #48(a) / #34 after the Patch 116 screen: GW6 +31.6, GW7 +26.6 but the card said 'waiting beats playing now'): (1) cap: inside the tie band the later week wins only if waiting costs no more than half the band (cost = best week's value minus the later week's, on the deciding measure; wc_wait_cap_frac 0.5, a judgement with no backtest); otherwise the best-value week is the plan, tie set shown, low confidence. (2) waiting budget: the cost of consecutive deferrals since the trigger fired (trigger log columns wc_wait_cost / wc_deferred) must stay within the band; on Streamlit Cloud the log is on an ephemeral disk, so a reboot resets the budget to 0. (3) deciding measure: the four-gameweek plain gain + chip value (wc_decide_weeks 4); the band is built on the same four-week total; the six-week decay-weighted gain is shown beside it and no longer decides, so the 0.9 decay no longer moves the week (decay check is skipped). (4) The card says 'waiting beats playing now' only when the later week really scores higher; the cards read 'Plan GWn, provisional' and pending news is never a reason to defer (Rule #53(d)). (5) GUARDRAIL: the checkpoint gameweek is named, HOLD names its source (value floor or guardrail), the rejected best week and reason are shown, and a passing week outside the tie set is context only. Rule #48(a) stays the cited rule. NOT validated: sandbox/synthetic data; half-band cap and band-sized budget are the model's judgement, not backtested. " "Patch 116 (2026-10-05): re-issue of Patch 115 + fix + fix 2 under a new number so the repo is unambiguous (the host stalled while starting the Patch 115 upload; the same files start fine in a clean folder, peak memory 305 MB with the Extended Check, so the cause was NOT found in the code). Contents are exactly the three blocks below; upload ALL 17 core files together. " "Patch 115 FIX 2 (2026-10-05): (1) decay sensitivity - the Wildcard week is re-decided at decay 0.85 and 0.95 from the same solved squads (config chip_extended_check.decay_check); a flip marks the verdict low confidence, the pick is unchanged. (2) planner_captain switch (transfer.planner_captain, default OFF = Rule #31 unchanged) so the planner-captain question (Rule #31 vs #54) can be measured instead of argued. " "Patch 115 FIX (2026-10-05, live failure: Wildcard chain comparison unavailable / HOLD with no week): cause = the captain term made each Wildcard rebuild ~3x slower and four ran in parallel past the 12 s solver cap, so no squad came back and the column was dropped silently. Fixed: (a) captain is exact but only for the top 60 scorers per week (wc_build_captain_k; same squad and total on 3 test pools); (b) parallel solves capped to the cores (parallel_workers); (c) ladder weekly XI + captain -> weekly XI without captain (labelled 'Rule #54(a) not met') -> unavailable; NEVER the plain 15-man sum; (d) the tie band is Rule #34 on the four-gameweek total (wc_band_weeks 4, about 5), as v6.12 says, not on the 6-week total; (e) when no comparison exists the card now says WHY (unavailable reason, Rule #54 ladder) instead of a bare HOLD; (f) the decision shows the cost of waiting one more week. OPEN for the model chat: the planner objective (Rule #31) still excludes the captain, while Rule #54 asks the no-chip comparison path to include it - disclosed, not changed; band window 4 vs 6 weeks, guardrail 'none passes' reading, decay 0.9, Rule #53(a) ceiling. captain_k 60 is estimate-tier. " "Patch 115 (2026-10-05, model v6.12 rulings on Patches 111-114): (1) TRIPLE CAPTAIN / BENCH BOOST: planned week = best week in the horizon; EXACT ties now go to the LATER week (was earlier); the tie set (weeks inside Rule #34's band of the best, one-week compared horizon = the 2-point floor) is shown and the pick is flagged low confidence; switch pick_rule (best_horizon_earlier = Patch 113, latest_tied = Patch 112). (2) WILDCARD WEEK: ties use Rule #34's band over the compared window total (greater of 2 points or 2%, about 5; the old fixed 2.0 is only its floor) and the LATER week inside it wins; a later shift vs the previous logged run is a Rule #11 reversal (warning + trigger-log columns wc_shift / wc_band). (3) WINDOW: every Wildcard candidate is valued over the SAME number of post-chip weeks (min(post_chip_weeks 6, fewest weeks left), never below 4), decay-weighted (post_chip_decay 0.9, estimate-tier); a candidate without a full window is NOT scored; weeks beyond Current+5 flagged fallback-tier (no market-odds feed is wired, so every week is fallback-tier CS%); the Rule #48 four-GW value is always shown as a cross-check and a disagreement is reported. (4) BUILD OBJECTIVE (new Rule #54): weekly XI + each week's CAPTAIN (exact, continuous c_ig variables) + bench 0.08 (1.0 in the BB week) + decay weights 0.9 (wc_build_decay, estimate-tier) actually passed to the solve; switches wc_build_captain / wc_build_decay / wc_objective. Cost: sandbox 700-player 8-week rebuild 3.2s -> 5.8s (candidates solve in parallel). (5) TC TARGET IN THE PLANNER: the premium (the named captain's points in the TC week, counted once) is used only when TC is scheduled in the Rule #49 harmonized assignment, in THAT week (tc_week_source: schedule; chain = Patch 114); the ranking without it (plain) and with it is shown; a flip inside the band stays chip-agnostic; hits: the chain planner runs hit_stance 'No hits' so Rule #13's 6.0 bar cannot be crossed by the premium. (6) SQUAD-HEALTH GUARDRAIL (Rule #52) on the chain comparison (chain_guardrail): in-band weeks whose checkpoint xPts fall more than the band below the healthiest in-band week, or below the no-chip path, are rejected and listed with their gain and reason; none passes -> HOLD. (7) Rule #48 SCAN ('Wildcard value if played alone') now uses the weekly-XI objective (wc_scan_objective; sum15 = Patch 114), candidates solved in parallel. HOUSEKEEPING: Chip Timing Harmony relabelled Rule #52 in code comments and history text; cap_use_bar and value_tail_gws are defined in model_config.yaml and tagged estimate-tier, and every Wildcard verdict says so. NOT validated: synthetic/sandbox data only; model v6.12 document not available in the project files (v6.11 PDF only) - rulings applied as written in the manager's message. " "Patch 114 (2026-10-05, manager review of the Patch 113 screens: Bench Boost squad was the Wildcard squad): (1) WILDCARD REBUILD = the best team over its 8-week window: the squad and a legal starting XI for EACH week are chosen together (XI in full, bench at the planner's own bench weight 0.08), instead of the Patch 113 plain 15-man sum that counted every player as a starter every week. MEASURED before shipping on 3 sandbox scenarios (GW6-13): the new build beats the 15-man sum on realized value in all 3 (+2.7 to +6.7 xPts); a first idea (one fixed XI for the whole window) was WORSE in 2 of 3 and was dropped, so the earlier claim that the old squad wasted budget on the bench was not supported. Not inside the solve (applied when the squad is scored): captain doubling and the autosub curve. Switch chip_extended_check.wc_objective (sum15 = Patch 113). (2) CHIPS SHAPE THE TRANSFERS (Extended Check): for the best Wildcard week the model builds the plain squad and, if a better Triple Captain target exists in the TC week, two variants - chip-aware (Bench Boost week bench + the target's tripled week inside the Wildcard build) and FT-route (the weekly planner may BUY the target with a free transfer) - and keeps one only if it beats the plain squad by more than the margin of error; with no Wildcard the planner can still buy the target (base path). The Wildcard rebuild and Triple Captain cards say which variant won and when the target is bought. Switches wc_chip_aware_variant, tc_ft_route. DEVIATIONS for the model chat: Rule #31 (TC extra counted by the planner; same family as Patch 112/113 chip value). Speed: candidate rebuilds solve in parallel; sandbox chain (700 players, 4 Wildcard candidates, cold) 8.5s -> 11.9s, cached afterwards; variants add ~4s only in the Extended Check and only when a better TC target exists; NOT live-measured. " "Patch 113 (2026-10-04, manager review of the Patch 112 screens; chips + captaincy display only, planner unchanged): (1) TRIPLE CAPTAIN / BENCH BOOST WEEK = the best week across the whole horizon (Patch 112 moved ties to the LATEST week, which is why the TC card said GW16 while its caption said GW8 was best); exact ties go to the earlier week; a near-tie is shown as low confidence instead of moving the chip; switch chip_extended_check.pick_rule (latest_tied = Patch 112). (2) TC and BB are chosen as a PAIR (best combined value, different weeks) instead of BB first. (3) The Triple Captain names ONE player in ONE week, read by the Chip Plan headline, the Transfer page card and the Captaincy tab. (4) Captaincy tab: new table - armband NOW (current squad), AFTER the Wildcard, and the Triple Captain week (tripled). (5) A first-half chip is picked inside its earliest still-available window (it lapses at the deadline). (6) Caption punctuation fixed (no more \"GW16.;\"); one sentence builder recommend.chip_edge_text. DEVIATIONS for the model chat: Rule #31 (chip value counted; unchanged from Patch 112), Rule #34/#49 tie deferral replaced by best-week-in-horizon for TC/BB (switchable). NOT validated: sandbox/synthetic data only. " "Patch 112 (2026-10-04, manager decisions after Patch 111; chain comparison only, planner defaults unchanged): (1) at the 5-FT cap the chain now USES a transfer when its gain clears cap_use_bar 0.25 xPts instead of letting it be lost; (2) late-week moves are valued 3 GWs past the shown span (value_tail_gws); (3) the Free Hit week is excluded from the chain gain sum; (4) timeline shows banked FTs per week; (5) GW reconciliation line under the table (current squad vs after-move vs reference xPts) because the Pitch Rating and the table % use different bases. CHIPS IN THE WILDCARD DECISION (manager instruction; DEVIATES from Standing Rule #31 -> model chat must approve; switch: chip_extended_check.include_chip_value): each Wildcard candidate's gain = chain xPts gain + (Triple Captain + Bench Boost + Free Hit value on that chain's squads minus the same on the no-chip chain); TC = best-XI top scorer xPts (extra x1), BB = bench xPts, FH = gap to the GW-only optimum at the sequence's FH week; a chip cannot share the Wildcard/FH week. SCREEN REVIEW FIXES: a scheduled chip worth less than the 2.0 floor (Free Hit +0.0) is now HELD instead of 'PLAY'; a chip tie resolved to the latest week is shown as 'no real edge' (no more '-0.2 clear'); the chip-table % uses the better of two per-GW optima and is capped at 100 (it read 101-103%); chip/Wildcard tables show all rows. FOLLOW-UPS: the Captaincy tab picks the armband from the Wildcard squad when the plan says Wildcard this GW; chip ties (within the margin of error) go to the LATEST week (Rule #34/#49 deferral; the first cut took the earliest); every % in the chip table is now measured against the best possible squad for THAT GW (the Pitch tab's yardstick) instead of one fixed squad for the span (which flattered a static squad to ~100%); the decided Wildcard path is re-planned once when the plan's Bench Boost week differs from the one the transfers were prepared for (replan_for_bb, +~2s). ONE LINKED PLAN: Triple Captain / Bench Boost / Free Hit weeks are now picked on the squads the plan fields each week (PLAIN Wildcard rebuild + later free transfers; chain squads carried to the chip window's end) and written into the same chip schedule the cards, Chip Plan, Transfer page and Pitch read (DEVIATION from Rule #49b's 4-GW rebuild without later transfers -> model chat); Bench Boost / Triple Captain tables now show that squad (they printed the CURRENT squad before); the Wildcard is decided and scored PLAIN, style shown as a list of swaps with xPts cost (not applied); Pitch navigator gains a 'Chip Plan path' squad mode + chip badge; Transfer list carries the Wildcard decision. Free Hit week still from the joint sequence (per-week optimum too slow). LINKS: Transfer page Free Hit/Bench Boost/Triple Captain now read the Chip Plan's joint sequence (they read standalone advisors before: Free Hit GW9 vs GW13); the Wildcard rebuild expander shows the chain's own squad for the decision week (HOLD = best candidate as reference); chips are re-picked on the chosen Wildcard week's squad. cap_use_bar and value_tail_gws are NOT validated. Speed: lossless caches (best_starting_xi rewrite 24ms to 1.2ms per call, plan-solve memo), golden-parity tested vs Patch 108; sandbox extended chain ~7s, normal ~3.9s, synthetic data, NOT live-measured. " "Patch 111 (2026-10-04, manager decisions after Patch 110): (1) WILDCARD CHAIN COMPARISON replaces the Patch 110 94% bridge rule — the table's % was the NO-CHIP path (verified: _wc_bridge_calc ran with chip_schedule=None); it now shows No chip % beside With Wildcard GWn %, and the Wildcard week is the candidate (current GW, sequence GW, top Rule #48 weeks) with the biggest summed xPts gain over the whole checked span (free transfers only, no hits, chains start from your recommended GW move, Wildcard team rebuilt for 8 GWs); earliest week within the 2.0 margin of error of the best wins, best gain below the 2.0 materiality bar = HOLD. Thresholds borrowed, NOT validated; Rule #48's own 4-GW window value stays visible as \"if played alone\". Free Hit/Bench Boost/Triple Captain are not modelled inside the chain. SYNTHETIC-squad tested only. (2) GW-by-GW plan timeline + gain-per-candidate bars. (3) PERFORMANCE — chain plans skip the tie-break scan (93% of planner time); optimizer.realized_gw_value is memoised (89% of calls were exact repeats; lossless, golden-parity tested vs Patch 108); the hit-inclusive 10-GW cross-check no longer runs in the Extended Check. Sandbox: extended chain (10 GWs, 4 Wildcard candidates) 7s, normal 3.4s; NOT live-measured. (4) Fixes: \"Done\" message named GW15 while the button said GW17; latent KeyError in recommend._position_tie_break when the model's own pick sat outside the tied set. "
+PATCH_VERSION = ("Patch 117e (2026-10-08, manager: minimal words, more visuals on all screens): display only - 40 long captions/notes/warnings on every tab are now a short coloured chip with a tap-for-details arrow (full text kept inside); a rating bar above the GW rating. No numbers or decisions changed. NOT validated on live data. " "Patch 117d (2026-10-08, manager: owned players must cost what you receive, a Locked players list, one chained plan, shorter messages): (1) every solve now prices your owned players at their SELLING price (live price kept as market_price) with your real bank, so keeping a risen player costs what you would receive, selling returns it, buying costs the live price; Wildcard budget unchanged (99.8 this week). (2) sidebar 'Locked players': the Wildcard rebuild and the weekly transfer planner must keep them and never sell them; ceilings, the Rating % and the Free Hit optimum ignore locks; a chip shows what the locks cost in xPts on the Wildcard card. (3) after the Wildcard decision the weekly plan is rebuilt on the decided week (Wildcard now = the plain list is the no-Wildcard alternative), the Pitch opens on the Chip Plan path when the Wildcard is now. (4) sidebar 'Download run snapshot' (pool, prices, flags, config, sheet) so a live run can be reproduced offline. (5) budget, plan-conflict and lock notes are short coloured chips. NOT validated on live data (FPL API blocked here); the first-week move of non-Wildcard chain paths still comes from the first plan. " "Patch 117c (2026-10-08, manager: type the budget by hand is not wanted; badge showed 117 for 117b): (1) the budget is now read automatically: bank + the selling price of each owned player, worked out from your FPL transfer history (latest purchase price; start-of-season price if never transferred in; Free Hit weeks ignored; half of any price rise kept, rounded down to 0.1). Buying still uses live prices. If the feed cannot be read the app falls back to market prices and says so on the Transfers tab. The Budget box moved into Advanced and is only a manual override (0 = auto). (2) version badge keeps the letter (Patch 117c). (3) Wildcard rebuild table label says 15-man squad total, not Starting XI. NOT validated on live data here (FPL API blocked from the sandbox); rule checked on the manager's own figures. " "Patch 117b (2026-10-07, manager: Wildcard squad 0.7m over budget; transfer plan said Wildcard GW8 while the Chip Plan said GW6): (1) sidebar box 'Budget £m' - type squad value + bank from the FPL Transfers page; it replaces the app's market-price budget for every build (Wildcard, Free Hit, chain), 0 = old behaviour; a single sale still uses the sold player's market price (approximate); selling prices are NOT read from the FPL site. (2) the Transfers tab now warns when the weekly plan's Wildcard week (chip portfolio / scan) differs from the Chip Plan decision (chain) - display only, the plan itself is not rebuilt. NOT changed: Bogle-type small-sample goal rates (model-chat question), clean sheet values. 492 tests pass; live browser run not possible here. " "Patch 117a (2026-10-07, model chat GW6 run vs app screens; display and window fixes, no change to the Wildcard decision logic): (1) provisional label now cites Rule #48(c) (was Rule #53(d)). (2) weekly-plan move cards: the -4 hit badge goes on the lowest-gain move(s), FREE on the highest (was FREE on every card even when the plan paid a hit); set-level gate unchanged. (3) Pitch and GW Rating capped at 100% with a flag showing the raw value when the ceiling solve returns a squad below yours. (4) Wildcard trigger window 5 -> 4 GWs (Rule #48); Extended runs still project 10 GWs but the trigger reads only the first 4. (5) MONITOR says it uses the plan's full transfer allowance. (6) cards say clean sheets with a manual override are carried at the sheet value for every week. (7) when the scan-only best week differs from the planned week it is shown as a labelled low-confidence alternative with the accrual defect named. NOT changed (switch left as is): chip value inside the Wildcard decision (include_chip_value). NOT validated: synthetic data; 486 tests pass, browser driver tests not runnable in this sandbox. " "Patch 117 (2026-10-05, model ruling amending v6.12 Rules #48(a) / #34 after the Patch 116 screen: GW6 +31.6, GW7 +26.6 but the card said 'waiting beats playing now'): (1) cap: inside the tie band the later week wins only if waiting costs no more than half the band (cost = best week's value minus the later week's, on the deciding measure; wc_wait_cap_frac 0.5, a judgement with no backtest); otherwise the best-value week is the plan, tie set shown, low confidence. (2) waiting budget: the cost of consecutive deferrals since the trigger fired (trigger log columns wc_wait_cost / wc_deferred) must stay within the band; on Streamlit Cloud the log is on an ephemeral disk, so a reboot resets the budget to 0. (3) deciding measure: the four-gameweek plain gain + chip value (wc_decide_weeks 4); the band is built on the same four-week total; the six-week decay-weighted gain is shown beside it and no longer decides, so the 0.9 decay no longer moves the week (decay check is skipped). (4) The card says 'waiting beats playing now' only when the later week really scores higher; the cards read 'Plan GWn, provisional' and pending news is never a reason to defer (Rule #53(d)). (5) GUARDRAIL: the checkpoint gameweek is named, HOLD names its source (value floor or guardrail), the rejected best week and reason are shown, and a passing week outside the tie set is context only. Rule #48(a) stays the cited rule. NOT validated: sandbox/synthetic data; half-band cap and band-sized budget are the model's judgement, not backtested. " "Patch 116 (2026-10-05): re-issue of Patch 115 + fix + fix 2 under a new number so the repo is unambiguous (the host stalled while starting the Patch 115 upload; the same files start fine in a clean folder, peak memory 305 MB with the Extended Check, so the cause was NOT found in the code). Contents are exactly the three blocks below; upload ALL 17 core files together. " "Patch 115 FIX 2 (2026-10-05): (1) decay sensitivity - the Wildcard week is re-decided at decay 0.85 and 0.95 from the same solved squads (config chip_extended_check.decay_check); a flip marks the verdict low confidence, the pick is unchanged. (2) planner_captain switch (transfer.planner_captain, default OFF = Rule #31 unchanged) so the planner-captain question (Rule #31 vs #54) can be measured instead of argued. " "Patch 115 FIX (2026-10-05, live failure: Wildcard chain comparison unavailable / HOLD with no week): cause = the captain term made each Wildcard rebuild ~3x slower and four ran in parallel past the 12 s solver cap, so no squad came back and the column was dropped silently. Fixed: (a) captain is exact but only for the top 60 scorers per week (wc_build_captain_k; same squad and total on 3 test pools); (b) parallel solves capped to the cores (parallel_workers); (c) ladder weekly XI + captain -> weekly XI without captain (labelled 'Rule #54(a) not met') -> unavailable; NEVER the plain 15-man sum; (d) the tie band is Rule #34 on the four-gameweek total (wc_band_weeks 4, about 5), as v6.12 says, not on the 6-week total; (e) when no comparison exists the card now says WHY (unavailable reason, Rule #54 ladder) instead of a bare HOLD; (f) the decision shows the cost of waiting one more week. OPEN for the model chat: the planner objective (Rule #31) still excludes the captain, while Rule #54 asks the no-chip comparison path to include it - disclosed, not changed; band window 4 vs 6 weeks, guardrail 'none passes' reading, decay 0.9, Rule #53(a) ceiling. captain_k 60 is estimate-tier. " "Patch 115 (2026-10-05, model v6.12 rulings on Patches 111-114): (1) TRIPLE CAPTAIN / BENCH BOOST: planned week = best week in the horizon; EXACT ties now go to the LATER week (was earlier); the tie set (weeks inside Rule #34's band of the best, one-week compared horizon = the 2-point floor) is shown and the pick is flagged low confidence; switch pick_rule (best_horizon_earlier = Patch 113, latest_tied = Patch 112). (2) WILDCARD WEEK: ties use Rule #34's band over the compared window total (greater of 2 points or 2%, about 5; the old fixed 2.0 is only its floor) and the LATER week inside it wins; a later shift vs the previous logged run is a Rule #11 reversal (warning + trigger-log columns wc_shift / wc_band). (3) WINDOW: every Wildcard candidate is valued over the SAME number of post-chip weeks (min(post_chip_weeks 6, fewest weeks left), never below 4), decay-weighted (post_chip_decay 0.9, estimate-tier); a candidate without a full window is NOT scored; weeks beyond Current+5 flagged fallback-tier (no market-odds feed is wired, so every week is fallback-tier CS%); the Rule #48 four-GW value is always shown as a cross-check and a disagreement is reported. (4) BUILD OBJECTIVE (new Rule #54): weekly XI + each week's CAPTAIN (exact, continuous c_ig variables) + bench 0.08 (1.0 in the BB week) + decay weights 0.9 (wc_build_decay, estimate-tier) actually passed to the solve; switches wc_build_captain / wc_build_decay / wc_objective. Cost: sandbox 700-player 8-week rebuild 3.2s -> 5.8s (candidates solve in parallel). (5) TC TARGET IN THE PLANNER: the premium (the named captain's points in the TC week, counted once) is used only when TC is scheduled in the Rule #49 harmonized assignment, in THAT week (tc_week_source: schedule; chain = Patch 114); the ranking without it (plain) and with it is shown; a flip inside the band stays chip-agnostic; hits: the chain planner runs hit_stance 'No hits' so Rule #13's 6.0 bar cannot be crossed by the premium. (6) SQUAD-HEALTH GUARDRAIL (Rule #52) on the chain comparison (chain_guardrail): in-band weeks whose checkpoint xPts fall more than the band below the healthiest in-band week, or below the no-chip path, are rejected and listed with their gain and reason; none passes -> HOLD. (7) Rule #48 SCAN ('Wildcard value if played alone') now uses the weekly-XI objective (wc_scan_objective; sum15 = Patch 114), candidates solved in parallel. HOUSEKEEPING: Chip Timing Harmony relabelled Rule #52 in code comments and history text; cap_use_bar and value_tail_gws are defined in model_config.yaml and tagged estimate-tier, and every Wildcard verdict says so. NOT validated: synthetic/sandbox data only; model v6.12 document not available in the project files (v6.11 PDF only) - rulings applied as written in the manager's message. " "Patch 114 (2026-10-05, manager review of the Patch 113 screens: Bench Boost squad was the Wildcard squad): (1) WILDCARD REBUILD = the best team over its 8-week window: the squad and a legal starting XI for EACH week are chosen together (XI in full, bench at the planner's own bench weight 0.08), instead of the Patch 113 plain 15-man sum that counted every player as a starter every week. MEASURED before shipping on 3 sandbox scenarios (GW6-13): the new build beats the 15-man sum on realized value in all 3 (+2.7 to +6.7 xPts); a first idea (one fixed XI for the whole window) was WORSE in 2 of 3 and was dropped, so the earlier claim that the old squad wasted budget on the bench was not supported. Not inside the solve (applied when the squad is scored): captain doubling and the autosub curve. Switch chip_extended_check.wc_objective (sum15 = Patch 113). (2) CHIPS SHAPE THE TRANSFERS (Extended Check): for the best Wildcard week the model builds the plain squad and, if a better Triple Captain target exists in the TC week, two variants - chip-aware (Bench Boost week bench + the target's tripled week inside the Wildcard build) and FT-route (the weekly planner may BUY the target with a free transfer) - and keeps one only if it beats the plain squad by more than the margin of error; with no Wildcard the planner can still buy the target (base path). The Wildcard rebuild and Triple Captain cards say which variant won and when the target is bought. Switches wc_chip_aware_variant, tc_ft_route. DEVIATIONS for the model chat: Rule #31 (TC extra counted by the planner; same family as Patch 112/113 chip value). Speed: candidate rebuilds solve in parallel; sandbox chain (700 players, 4 Wildcard candidates, cold) 8.5s -> 11.9s, cached afterwards; variants add ~4s only in the Extended Check and only when a better TC target exists; NOT live-measured. " "Patch 113 (2026-10-04, manager review of the Patch 112 screens; chips + captaincy display only, planner unchanged): (1) TRIPLE CAPTAIN / BENCH BOOST WEEK = the best week across the whole horizon (Patch 112 moved ties to the LATEST week, which is why the TC card said GW16 while its caption said GW8 was best); exact ties go to the earlier week; a near-tie is shown as low confidence instead of moving the chip; switch chip_extended_check.pick_rule (latest_tied = Patch 112). (2) TC and BB are chosen as a PAIR (best combined value, different weeks) instead of BB first. (3) The Triple Captain names ONE player in ONE week, read by the Chip Plan headline, the Transfer page card and the Captaincy tab. (4) Captaincy tab: new table - armband NOW (current squad), AFTER the Wildcard, and the Triple Captain week (tripled). (5) A first-half chip is picked inside its earliest still-available window (it lapses at the deadline). (6) Caption punctuation fixed (no more \"GW16.;\"); one sentence builder recommend.chip_edge_text. DEVIATIONS for the model chat: Rule #31 (chip value counted; unchanged from Patch 112), Rule #34/#49 tie deferral replaced by best-week-in-horizon for TC/BB (switchable). NOT validated: sandbox/synthetic data only. " "Patch 112 (2026-10-04, manager decisions after Patch 111; chain comparison only, planner defaults unchanged): (1) at the 5-FT cap the chain now USES a transfer when its gain clears cap_use_bar 0.25 xPts instead of letting it be lost; (2) late-week moves are valued 3 GWs past the shown span (value_tail_gws); (3) the Free Hit week is excluded from the chain gain sum; (4) timeline shows banked FTs per week; (5) GW reconciliation line under the table (current squad vs after-move vs reference xPts) because the Pitch Rating and the table % use different bases. CHIPS IN THE WILDCARD DECISION (manager instruction; DEVIATES from Standing Rule #31 -> model chat must approve; switch: chip_extended_check.include_chip_value): each Wildcard candidate's gain = chain xPts gain + (Triple Captain + Bench Boost + Free Hit value on that chain's squads minus the same on the no-chip chain); TC = best-XI top scorer xPts (extra x1), BB = bench xPts, FH = gap to the GW-only optimum at the sequence's FH week; a chip cannot share the Wildcard/FH week. SCREEN REVIEW FIXES: a scheduled chip worth less than the 2.0 floor (Free Hit +0.0) is now HELD instead of 'PLAY'; a chip tie resolved to the latest week is shown as 'no real edge' (no more '-0.2 clear'); the chip-table % uses the better of two per-GW optima and is capped at 100 (it read 101-103%); chip/Wildcard tables show all rows. FOLLOW-UPS: the Captaincy tab picks the armband from the Wildcard squad when the plan says Wildcard this GW; chip ties (within the margin of error) go to the LATEST week (Rule #34/#49 deferral; the first cut took the earliest); every % in the chip table is now measured against the best possible squad for THAT GW (the Pitch tab's yardstick) instead of one fixed squad for the span (which flattered a static squad to ~100%); the decided Wildcard path is re-planned once when the plan's Bench Boost week differs from the one the transfers were prepared for (replan_for_bb, +~2s). ONE LINKED PLAN: Triple Captain / Bench Boost / Free Hit weeks are now picked on the squads the plan fields each week (PLAIN Wildcard rebuild + later free transfers; chain squads carried to the chip window's end) and written into the same chip schedule the cards, Chip Plan, Transfer page and Pitch read (DEVIATION from Rule #49b's 4-GW rebuild without later transfers -> model chat); Bench Boost / Triple Captain tables now show that squad (they printed the CURRENT squad before); the Wildcard is decided and scored PLAIN, style shown as a list of swaps with xPts cost (not applied); Pitch navigator gains a 'Chip Plan path' squad mode + chip badge; Transfer list carries the Wildcard decision. Free Hit week still from the joint sequence (per-week optimum too slow). LINKS: Transfer page Free Hit/Bench Boost/Triple Captain now read the Chip Plan's joint sequence (they read standalone advisors before: Free Hit GW9 vs GW13); the Wildcard rebuild expander shows the chain's own squad for the decision week (HOLD = best candidate as reference); chips are re-picked on the chosen Wildcard week's squad. cap_use_bar and value_tail_gws are NOT validated. Speed: lossless caches (best_starting_xi rewrite 24ms to 1.2ms per call, plan-solve memo), golden-parity tested vs Patch 108; sandbox extended chain ~7s, normal ~3.9s, synthetic data, NOT live-measured. " "Patch 111 (2026-10-04, manager decisions after Patch 110): (1) WILDCARD CHAIN COMPARISON replaces the Patch 110 94% bridge rule — the table's % was the NO-CHIP path (verified: _wc_bridge_calc ran with chip_schedule=None); it now shows No chip % beside With Wildcard GWn %, and the Wildcard week is the candidate (current GW, sequence GW, top Rule #48 weeks) with the biggest summed xPts gain over the whole checked span (free transfers only, no hits, chains start from your recommended GW move, Wildcard team rebuilt for 8 GWs); earliest week within the 2.0 margin of error of the best wins, best gain below the 2.0 materiality bar = HOLD. Thresholds borrowed, NOT validated; Rule #48's own 4-GW window value stays visible as \"if played alone\". Free Hit/Bench Boost/Triple Captain are not modelled inside the chain. SYNTHETIC-squad tested only. (2) GW-by-GW plan timeline + gain-per-candidate bars. (3) PERFORMANCE — chain plans skip the tie-break scan (93% of planner time); optimizer.realized_gw_value is memoised (89% of calls were exact repeats; lossless, golden-parity tested vs Patch 108); the hit-inclusive 10-GW cross-check no longer runs in the Extended Check. Sandbox: extended chain (10 GWs, 4 Wildcard candidates) 7s, normal 3.4s; NOT live-measured. (4) Fixes: \"Done\" message named GW15 while the button said GW17; latent KeyError in recommend._position_tie_break when the model's own pick sat outside the tied set. "
                   "Patch 110 (2026-10-04, manager decisions after Patch 109): (1) ONE LINKED WILDCARD DECISION — the card, the top pill and the best-GW table now read the same object (recommend.wildcard_final_decision); verified cause of the old mismatch: the card badge came from the hit-inclusive \"transfers close the gap\" check, the table's Chips column from the joint sequence, and the \"Best Wildcard GW\" headline from the isolated Rule #48 window scan. (2) BRIDGE TEST — free transfers only (no hits), flagged players benched, squad vs a full-rebuild squad each GW: HOLD -> GWn while it stays at/above 94% (the document's 6% gap reused, UNVALIDATED), PLAY at the first GW that starts 2 consecutive weeks below it, PLAY NOW if that is the current GW. Prototype on SYNTHETIC squads only: compared against the reachable ceiling it could not tell a dead team from a healthy one (plan and ceiling share the same transfer budget); compared against a full rebuild it separated them. The 88%-style trigger number stays as a label (today). (3) Extended Check now reaches Wildcard Current+9 and BB/TC/FH Current+11 (button \"Extended Check GW{Current+11}\"). (4) Table: Wildcard value column renamed \"if played alone\"; Rating % column replaced by the bridge rating; Wildcard week shown only at the decision GW. "
                   "Patch 109 (2026-10-04): Extended check ran >6 minutes live. Measured: ~93% of the weekly-plan cost was pandas re-sorting inside optimizer.best_starting_xi and the bench-autosub loop (via recommend._position_tie_break), not the solver; both rewritten losslessly (parity-tested vs the Patch 108 code). UI: the extend button is now just \"Extended Check GW{n}\"; the intro/caption text and the calibration-log expander are removed (the log still records silently). "
                   "Patch 108 (2026-10-04): (1) LIVE CRASH FIX — team 4984023 \"Spurs\" (Wildcard already used) hit \"NameError: _wc_extend_chip_driven is not defined\": the always-visible extend-button section read variables that were only assigned inside `if wc_flag and reachable_by_gw ...`, which is skipped for any team whose Wildcard trigger isn't evaluated. Present in deployed Patch 106 (and 107). All such names are now bound before the block; the confirmation also handles teams with no Wildcard cross-check. (2) Wildcard card now leads with the DECISION — PLAY GWn / MONITOR / HOLD plus net xPts vs best transfers — instead of a bare alarm %; the 6% trigger (Standing Rule #45) is unchanged. (3) Wildcard calibration log (CSV, one row per normal run + download) so the document-flagged \"unvalidated\" 6% can be judged from real weeks; the server disk is temporary, so download regularly. (4) Less text, more visual: shorter pill and intro, per-GW table with a bar for Wildcard value. Includes everything in Patch 107. Previously, "
@@ -1077,6 +1077,33 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _note(label, body, kind="info"):
+    """Short chip + tap-for-details (replaces long caption/info/warning text)."""
+    if callable(getattr(body, "__str__", None)):
+        body = str(body)
+    st.markdown(recommend.note_html(label, kind, body), unsafe_allow_html=True)
+
+
+def _nc(label, body, help=None):
+    _note(label, body, "info")
+
+
+def _ni(label, body, help=None):
+    _note(label, body, "info")
+
+
+def _nw(label, body, help=None):
+    _note(label, body, "warn")
+
+
+def _ne(label, body, help=None):
+    _note(label, body, "bad")
+
+
+def _ns(label, body, help=None):
+    _note(label, body, "ok")
 
 
 def _team_color(short_name: str) -> str:
@@ -2167,7 +2194,7 @@ if run_clicked:
 if not st.session_state.get("has_run"):
     st.markdown(f'<div class="brand-row">{_CREST_SVG}<div class="brand-mark">RB <span class="b2">Model</span></div></div>',
                 unsafe_allow_html=True)
-    st.info("Set your style and hit stance in the sidebar, then click **Run Model** to fetch live data and build your recommendations.")
+    _ni("Set style + stance → Run Model", "Set your style and hit stance in the sidebar, then click **Run Model** to fetch live data and build your recommendations.")
     st.stop()
 
 with st.spinner("Fetching live data and computing xPts..."):
@@ -2176,7 +2203,7 @@ with st.spinner("Fetching live data and computing xPts..."):
                                                 recency_window)
 
     if snap is None or entry is None or history is None:
-        st.error("Couldn't reach the official FPL API right now. It's normally free and open with no key required — this is "
+        _ne("FPL API unreachable — retry", "Couldn't reach the official FPL API right now. It's normally free and open with no key required — this is "
                   "most likely a transient outage or a network policy on wherever this app is currently running. Try again shortly.")
         st.stop()
 
@@ -3687,7 +3714,7 @@ with tab_captain:
     _c_row, _c_alt, _c_cap, _c_xp = ((cap_plan["row"], cap_plan["alt"], cap_plan["caption"], cap_plan["xp"]) if cap_plan
                                       else (cap_pick_row, cap_alt_row, cap_caption, cap_xp if cap_pick_row is not None else None))
     if cap_plan:
-        st.info("🃏 Chip Plan: play the Wildcard this GW — the armband below is picked from the **Wildcard squad**. "
+        _ni("🃏 Wildcard this GW — armband from WC squad", "🃏 Chip Plan: play the Wildcard this GW — the armband below is picked from the **Wildcard squad**. "
                 + (f"With your current squad it would be {cap_pick_row['web_name']} ({cap_xp:.1f} xPts)." if cap_pick_row is not None else ""))
     if _c_cap and _c_row is not None:
         _cap_alt_xp = _c_alt.get("xpts_this_gw") if _c_alt is not None else None
@@ -3745,7 +3772,7 @@ with tab_captain:
                                   "xPts": (f"{r['xpts']:.1f}" if r["kind"] != "triple_captain"
                                            else f"{r['xpts']:.1f} x3 = {r['total']:.1f}")} for r in _cap_rows])
             st.dataframe(_tbl, hide_index=True, use_container_width=True, height=_tbl_h(len(_tbl)))
-            st.caption("Same plan as the Chip Plan tab. The armband protocol runs for this GW only; later rows show each "
+            _nc("Same plan as Chip Plan tab", "Same plan as the Chip Plan tab. The armband protocol runs for this GW only; later rows show each "
                        "week's top scorer on the squad the plan fields (current squad = what you hold today).")
     except Exception:
         pass
@@ -3916,18 +3943,20 @@ with tab_news:
                 f'style profile: <b>{style_name}</b></div>', unsafe_allow_html=True)
     fh_at_ceiling = fh_auto_optimal_val > 0 and fh_auto_gap < fh_auto_moe
     if fh_auto_rating["rating_pct"] is not None:
+        st.markdown(recommend.rating_bar_html(fh_auto_rating["rating_pct"], f"GW{planning_gw} rating"),
+                    unsafe_allow_html=True)
         if fh_at_ceiling:
             st.caption("✓ Already at this GW's optimal",
                        help=f"The {fh_auto_gap:.1f} xPts gap is inside normal weekly noise (threshold "
                             f"{fh_auto_moe:.1f} xPts), not real room left on the table.")
         with st.expander(f"{fh_auto_label} — single-GW, EST — full breakdown"):
             st.markdown(tier_label)
-            st.caption(f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
+            _nc("Current vs optimal xPts", f"GW{planning_gw} xPts (your current squad's best XI, captain doubled, bench autosub-discounted): "
                        f"{fh_auto_current_val:.1f} · GW{planning_gw} optimal (a genuinely unconstrained best-possible "
                        f"squad from the full player pool, £{team_value}m proxy budget, no free-transfer limit): "
                        f"{fh_auto_optimal_val:.1f} · gap: {fh_auto_gap:.1f} xPts (margin-of-error threshold: "
                        f"{fh_auto_moe:.1f} xPts)")
-            st.caption(f"Patch 24 methodology (2026-09-08): {fh_auto_label} = current squad GW xPts / GW-optimal xPts, "
+            _nc("Rating method", f"Patch 24 methodology (2026-09-08): {fh_auto_label} = current squad GW xPts / GW-optimal xPts, "
                        "both sides using the same best-legal-Starting-XI-plus-captain-bonus-plus-Rule-#12-bench-value "
                        "calculation (Rule #22 Systematic Application) — replacing the prior reachable-ceiling version, "
                        "which the manager flagged as tautologically high whenever few free transfers are banked. This "
@@ -3955,14 +3984,14 @@ with tab_news:
                                 f"{compliant_moe:.1f} xPts), not real room left on the table.")
             with st.expander(f"Team Rating % (GW{compliant_gw_start}-{compliant_gw_end}) — full breakdown"):
                 st.markdown(tier_label)
-                st.caption(f"GW{compliant_gw_start}-GW{compliant_gw_end} Squad_xPts (your current 15, best-XI-per-GW, "
+                _nc("Squad vs ceiling xPts", f"GW{compliant_gw_start}-GW{compliant_gw_end} Squad_xPts (your current 15, best-XI-per-GW, "
                            f"captain doubled, bench autosub-discounted, summed across all {len(compliant_gw_list)} "
                            f"GWs): {compliant_squad_total:.1f} · GW{compliant_gw_start}-GW{compliant_gw_end} "
                            f"Ceiling_xPts (a genuinely unconstrained, full-player-pool, complete 15-man £100m squad "
                            f"solve — same theoretical_ceiling squad used elsewhere in this app, re-summed over this "
                            f"fixed window, no second solve): {compliant_ceiling_total:.1f} · gap: "
                            f"{compliant_gap:.1f} xPts (margin-of-error threshold: {compliant_moe:.1f} xPts)")
-                st.caption(f"Patch 51 methodology (2026-09-16): Team Rating % = Squad_xPts(horizon "
+                _nc("Rating method", f"Patch 51 methodology (2026-09-16): Team Rating % = Squad_xPts(horizon "
                            f"{len(compliant_gw_list)}) / Ceiling_xPts(horizon {len(compliant_gw_list)}) × 100, per the "
                            f"model doc's §1a clause — a FIXED 3-4 GW horizon (never the sidebar horizon slider) against "
                            f"a full-player-pool, unconstrained, complete 15-man £100m squad ceiling (never a bounded/"
@@ -4042,15 +4071,15 @@ with tab_news:
             if len(_news_rows) > _NEWS_CAP:
                 st.caption(f"Showing the {_NEWS_CAP} most recently updated of {len(_news_rows)} flagged players "
                            f"across your squad + the transfer pool.")
-            st.caption("Source: official FPL API (status/news/chance-of-playing-next-round), the same data shown "
+            _nc("Source: FPL API", "Source: official FPL API (status/news/chance-of-playing-next-round), the same data shown "
                        "on a player's page in the official app/site — refreshed every model run, not scraped "
                        "from anywhere else. \"IN YOUR SQUAD\" = one of your 15; \"WATCHLIST\" = anyone else in "
                        "the transfer pool, so a target's injury shows up here before you'd notice it manually.")
         else:
-            st.caption("No live injury/status news for your squad or the transfer pool right now — every "
+            _nc("✓ No injury news", "No live injury/status news for your squad or the transfer pool right now — every "
                        "scanned player is currently 'a' (available) with no doubt flag from FPL.")
     else:
-        st.caption("News feed unavailable this run — player status/news columns weren't present in this run's "
+        _nc("News feed unavailable", "News feed unavailable this run — player status/news columns weren't present in this run's "
                    "data (see any staleness warning below).")
 
 with tab_chips:
@@ -4576,7 +4605,7 @@ with tab_chips:
                 else:
                     st.warning(f"⚠️ Finished short. {_reach_msg}")
             else:
-                st.warning("The transfer-plan cross-check didn't complete (a solve failed) — the chip cards are "
+                _nw("Cross-check incomplete", "The transfer-plan cross-check didn't complete (a solve failed) — the chip cards are "
                            "still re-evaluated over the wider window.")
             # Patch 107/108: best-GW answer + what changed, visual first.
             _span_gws = list(range(planning_gw, _chip_target_gw + 1))
@@ -4593,7 +4622,7 @@ with tab_chips:
                 _chips_by_gw, _wc_decision, tc_player=((_chain_path or {}).get("chips") or {}).get("tc_player")) + "**")
             if _chips_repicked and _chips_repicked["changed"]:
                 _nm = {"3xc": "Triple Captain", "bboost": "Bench Boost", "freehit": "Free Hit"}
-                st.caption("🔗 chips re-picked on the Wildcard squad: " + " · ".join(
+                _nc("🔗 Chips re-picked on WC squad", "🔗 chips re-picked on the Wildcard squad: " + " · ".join(
                     f"{_nm.get(k, k)} GW{_chips_repicked['old'].get(k, '—')} → GW{v}"
                     for k, v in _chips_repicked["new"].items() if _chips_repicked["old"].get(k) != v)
                     + "".join(f" · {_nm.get(k, k)} GW{g} → HOLD (no real edge on the Wildcard path)"
@@ -4640,13 +4669,13 @@ with tab_chips:
                 st.caption("ℹ️ " + _scan_alt)
             if _wc_chain and _wc_chain.get("diag"):
                 _d = _wc_chain["diag"]
-                st.caption(
+                _nc(f"GW{_d['gw']}: now {_d['current']} → after {_d['after_move']} · best {_d['reference']}", 
                     f"GW{_d['gw']} (xPts, best XI): current squad **{_d['current']}** → after your recommended move "
                     f"**{_d['after_move']}**; the best possible GW{_d['gw']} squad scores **{_d['reference']}**. "
                     f"Every % in this table is measured against the best possible squad for THAT GW — the same yardstick "
                     f"as the Pitch tab's GW Rating — so a squad that drifts away from the best team shows up as a lower %.")
                 if _d["n_after"] != _d["n_current"]:
-                    st.warning(f"Squad size changed after the recommended move ({_d['n_current']} → {_d['n_after']}): "
+                    _nw("Squad size changed — % unreliable", f"Squad size changed after the recommended move ({_d['n_current']} → {_d['n_after']}): "
                                "a recommended incoming player was missing from the pool. Table % is unreliable.")
             if _wc_chain and _wc_decision and _wc_decision.get("detail_lines"):
                 # Patch 115 (v6.12): band, tie set, guardrail rejections, not-scored weeks, fallback tier, 4-GW cross-check
@@ -4659,11 +4688,11 @@ with tab_chips:
                 _g_df = pd.DataFrame({"Wildcard at": [f"GW{t}" for t in sorted(_wc_chain["cands"])],
                                       _gcol: [_wc_chain["cands"][t]["gain"] for t in sorted(_wc_chain["cands"])]})
                 if _wc_decision and _wc_decision.get("gains4"):
-                    st.caption("Deciding measure (Patch 117, four-week plain gain + chip value): "
+                    _nc("4-week gain decides", "Deciding measure (Patch 117, four-week plain gain + chip value): "
                                + " · ".join(f"GW{t} {v:+.1f}" for t, v in sorted(_wc_decision["gains4"].items()))
                                + " — the bars below are the six-week decay-weighted gain, shown beside it.")
                 if _wc_chain.get("not_scored"):
-                    st.caption("Not scored (window truncated): " + ", ".join(f"GW{g}" for g in _wc_chain["not_scored"])
+                    _nc("Not scored: short window", "Not scored (window truncated): " + ", ".join(f"GW{g}" for g in _wc_chain["not_scored"])
                                + f" — every scored week is valued over the same {_pw} post-chip weeks (Rule #48(a)).")
                 st.dataframe(_g_df, hide_index=True, use_container_width=True, column_config={
                     _gcol: st.column_config.ProgressColumn(
@@ -4731,7 +4760,7 @@ with tab_chips:
     with st.expander("Full chip analysis — combined narrative, rule-by-rule"):
         for line in strategy_lines:
             st.markdown(f"- {line}")
-        st.caption("A synthesis of the Wildcard trigger, shape-test, Chip Advisor verdicts and any disruption notes "
+        _nc("Synthesis — nothing new computed", "A synthesis of the Wildcard trigger, shape-test, Chip Advisor verdicts and any disruption notes "
                    "above — computes nothing new itself. Wildcard's trigger is mechanical (Patch 30) but never names "
                    "a single play GW — the date stays a rolling re-test (Standing Rule #32).")
         # Patch 87b (v6.9 Rules #48-49, manager: cards + a separate sequence
@@ -4765,7 +4794,7 @@ with tab_chips:
                 "- Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32).")
         elif chip_portfolio is not None:
             st.markdown("---")
-            st.caption("🗓️ Sequencing your available chips together finds no positive combined assignment this "
+            _nc("🗓️ No chip combo adds value — hold", "🗓️ Sequencing your available chips together finds no positive combined assignment this "
                        "run — holding all for now (Rule #32).")
 
     # Patch 89 (v6.9 Standing Rule #51, Cross-Tool Reconciliation Rule) —
@@ -4782,7 +4811,7 @@ with tab_chips:
     # doc's six listed inputs are automated here (4 of 6) vs. disclosed as
     # not yet modeled (2 of 6 — formula variant, availability assumptions).
     with st.expander("🔍 Cross-Tool Reconciliation (Rule #51) — compare against another tool's Wildcard figure"):
-        st.caption("Enter another tool's quoted Wildcard gain for a candidate week, and this decomposes the "
+        _nc("Compare another tool's gain", "Enter another tool's quoted Wildcard gain for a candidate week, and this decomposes the "
                    "difference from this app's own figure one input at a time — captain doubling, free-transfer "
                    "accrual, horizon length, and team value — instead of either number being accepted at face "
                    "value.")
@@ -4901,17 +4930,17 @@ with tab_transfers:
                 else:
                     if _rb_codes:
                         _cc = _wc_chain["cands"][_rb_t]
-                        st.caption(f"Same squad the Chip Plan scored for a Wildcard at GW{_rb_t} (built for GW{_rb_t}–"
+                        _nc("Same squad as Chip Plan", f"Same squad the Chip Plan scored for a Wildcard at GW{_rb_t} (built for GW{_rb_t}–"
                                    f"GW{_rb_t + 7}, current data). Chain gain {_cc['gain_chain']:+.1f} xPts"
                                    + (f" + chips {_cc['gain_chips']:+.1f}" if _cc.get("chips") else "")
                                    + f" = {_cc['gain']:+.1f}.")
                         # Patch 114: say how it was built and which variant won
                         _bw_txt = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
                         if _cc.get("objective") == "sum15":
-                            st.caption("Built on the plain 15-man sum (wc_objective = sum15, the Patch 113 setting): "
+                            _nc("15-man sum build", "Built on the plain 15-man sum (wc_objective = sum15, the Patch 113 setting): "
                                        "the bench counts like the starting XI.")
                         else:
-                            st.caption(f"Built week by week: the squad and a legal starting XI for each of the 8 weeks are chosen together "
+                            _nc("Built week-by-week (8 GWs)", f"Built week by week: the squad and a legal starting XI for each of the 8 weeks are chosen together "
                                        f"(the XI counts in full, the bench at {_bw_txt:g}, the planner's own bench weight; each week's captain "
                                        f"is counted and nearer weeks weigh more, decay {float(cfg.get('chip_extended_check', {}).get('wc_build_decay', 0.9)):g} — Rule #54, estimate-tier), so a "
                                        f"bench player only earns his place by starting some weeks. The autosub curve is not "
@@ -4920,7 +4949,7 @@ with tab_transfers:
                         if _vt:
                             _bits = [f"{k} {v:+.1f}" for k, v in _vt.items() if v is not None]
                             _tg = _cc.get("tc_target_considered") or {}
-                            st.caption("Chip-aware check (Bench Boost bench + Triple Captain target"
+                            _nc("Chip-aware check", "Chip-aware check (Bench Boost bench + Triple Captain target"
                                        + (f" {_tg.get('name')}, GW{_tg.get('gw')}" if _tg else "")
                                        + f"): {' · '.join(_bits)} xPts gain vs the no-chip chain (the plain figure is the "
                                        f"ranking WITHOUT the Triple Captain premium; a flip inside the "
@@ -4951,7 +4980,7 @@ with tab_transfers:
                     if _rb_codes:
                         st.caption("Date remains your own call (Standing Rule #32).")
                     else:
-                      st.caption(f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
+                      _nc("Rebuild vs hold", f"Rebuild projects {wc_eval_auto['rebuild_total']:.1f} xPts vs "
                                f"{wc_eval_auto['hold_total']:.1f} xPts holding your current squad over this window "
                                f"({gap:+.1f} xPts) "
                                f"{chip_protocol.gain_disclosure('hold_squad', detect_gw_list or gw_list, cfg)}. "
@@ -5057,7 +5086,7 @@ with tab_transfers:
                     _cc = (_chain_path or {}).get("chips") or {}
                     _bbv = _cc.get("bb")
                     _bb_same = bool(_bbv and _bbv[0] == _bb_gw)
-                    st.caption(f"{_bb_lab} "
+                    _nc("Bench Boost", f"{_bb_lab} "
                                + (f"Bench adds {_bbv[1]:.1f} xPts. "
                                   + _edge_txt(_bbv, _cc.get("bb_best"), _cc.get("bb_gap"), "Bench Boost week",
                                               _cc.get("bb_conf") or "near-tie", _cc.get("bb_yield"),
@@ -5307,7 +5336,7 @@ def _render_scenario_results():
         else:
             if wc_cache["wc_horizon"] != horizon:
                 fgl = wc_cache["future_gw_list"]
-                st.caption(f"Evaluated over GW{fgl[0]}–GW{fgl[-1]} ({wc_cache['wc_horizon']} GWs) — "
+                _nc(f"Window GW{fgl[0]}–{fgl[-1]}", f"Evaluated over GW{fgl[0]}–GW{fgl[-1]} ({wc_cache['wc_horizon']} GWs) — "
                            f"a 3-GW minimum applies to Wildcard rebuilds regardless of the sidebar horizon "
                            f"(currently {horizon} GW).")
             gap = wc_cache["gap"]
@@ -5352,7 +5381,7 @@ def _render_scenario_results():
                 full_show = styled_squad.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
                     .rename(columns=col_rename) if wc_gw_col in styled_squad.columns else styled_squad
                 st.dataframe(full_show, hide_index=True, use_container_width=True)
-            st.caption(f"Style profile **{wc_cache['style_name']}** applied to this rebuild (same EO-pull "
+            _nc(f"Style: {wc_cache['style_name']}", f"Style profile **{wc_cache['style_name']}** applied to this rebuild (same EO-pull "
                        f"tie-break as ordinary transfers). Prices, injuries and fixtures can move before "
                        f"GW{wc_gw_choice} — re-run this closer to the date rather than treating it as locked in.")
 
@@ -5364,7 +5393,7 @@ def _render_scenario_results():
             if fh_cache["reason"] == "no_projection":
                 st.info(f"No projection reaches GW{fh_gw_choice} yet this run — try a nearer gameweek.")
             else:
-                st.info(f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
+                _ni(f"No Free Hit squad solved for GW{fh_gw_choice}", f"Couldn't solve an optimal Free Hit squad for GW{fh_gw_choice} this run "
                         f"(projection data may not reach that far yet, or no feasible squad fit the "
                         f"budget/club constraints).")
         else:
@@ -5406,7 +5435,7 @@ def _render_scenario_results():
                             f"**{fh_cache['fh_rating']['rating_pct']}%** (gap: {fh_cache['fh_gap']:.1f} xPts, "
                             f"margin-of-error threshold: {fh_cache['fh_moe']:.1f} xPts)")
                 if fh_cache["fh_gap"] < fh_cache["fh_moe"]:
-                    st.caption("✓ That gap is inside normal weekly noise — your squad is already "
+                    _nc("✓ Gap = noise — FH upside small", "✓ That gap is inside normal weekly noise — your squad is already "
                                "effectively at this week's ceiling; a Free Hit's upside here is limited.")
             else:
                 st.info("Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
@@ -5435,10 +5464,10 @@ def _render_pitch_navigator():
             _tiers.append(recommend.ui_chip(f"Sheet CS: {_n_cs_override}", "warn", tip=recommend.cs_carry_label(_n_cs_override).strip()))
         st.markdown(" ".join(_tiers), unsafe_allow_html=True)
     else:
-        st.caption("⚙️ Fixture-adjusted attack: **no adjustment this run** (Rule #46) — "
+        _nc("⚙️ Fixture adjust: none", "⚙️ Fixture-adjusted attack: **no adjustment this run** (Rule #46) — "
                    f"{opt.get_diagnostic('fixture_adjustment') or 'no finished-match data yet.'}")
     if starters_df.empty:
-        st.warning("No squad data returned for this team ID / gameweek yet (common right after a deadline, or if "
+        _nw("No squad data yet", "No squad data returned for this team ID / gameweek yet (common right after a deadline, or if "
                    "this is a brand-new team). Transfer targets and captaincy below still use the full player pool.")
         return
 
@@ -5766,7 +5795,7 @@ def _render_pitch_navigator():
                     unsafe_allow_html=True)
     if nav_rating["rating_pct"] is None:
         _nav_rating_diag = opt.get_diagnostic("free_hit_optimal")
-        st.caption(f"⚠ GW{nav_gw} Rating: no result this run — "
+        _nc(f"⚠ GW{nav_gw} Rating: no result", f"⚠ GW{nav_gw} Rating: no result this run — "
                    + (_nav_rating_diag if _nav_rating_diag else
                       "no specific reason was recorded — please report this exact combination so it can be added."))
     if not at_planning_gw:
@@ -5900,7 +5929,7 @@ with tab_transfers:
                     f'any transfer recommended below.</div>', unsafe_allow_html=True)
 
     if transfer_error:
-        st.error(f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
+        _ne("Transfer suggestions failed", f"Couldn't compute transfer suggestions this run ({transfer_error}). Everything else on this page "
                  f"is unaffected — try Run Model again, and if it repeats, this is worth reporting with that message.")
 
     # Patch 5 — simplified primary display: just the recommendation, in plain
@@ -6030,7 +6059,7 @@ with tab_transfers:
                         f'above are unaffected until you actually make the transfer and re-run.</div>',
                         unsafe_allow_html=True)
 
-    st.caption(f"Gated by a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar and a "
+    _nc(f"Gate: {rec['minimum_meaningful_gain_free']} xPts bar + {rec.get('margin_of_error', 2.0):.1f} MoE", f"Gated by a **{rec['minimum_meaningful_gain_free']} xPts** materiality bar and a "
                f"**{rec.get('margin_of_error', 2.0):.1f} xPts** margin-of-error floor — both must clear.",
                help=f"Two separate bars gate a transfer: a **{rec['minimum_meaningful_gain_free']} xPts** materiality "
                     f"bar (is the gain worth spending a free transfer at all) and a "
@@ -6041,7 +6070,7 @@ with tab_transfers:
                     f"doesn't hide behind a good net number.")
 
     with st.expander("Why — full trace, rule references, and move-by-move detail"):
-        st.caption(f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
+        _nc(f"{style_name} · hit {rec['hit_cost_threshold']} · bar {rec['minimum_meaningful_gain_free']}", f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
                    f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
                    f"margin-of-error floor **{rec.get('margin_of_error', 2.0):.1f} xPts** · "
                    f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
@@ -6051,11 +6080,11 @@ with tab_transfers:
         # floor this run is on the pre-Patch-14 season-total basis only.
         checked_gws = getattr(snap, "recent_start_checked_gws", None)
         if checked_gws:
-            st.caption(f"Recency check (Standing Rule #19, Bench GK Verification): confirmed-start xM floors this run "
+            _nc("Recency check on", f"Recency check (Standing Rule #19, Bench GK Verification): confirmed-start xM floors this run "
                        f"required an actual start in GW{checked_gws[0]}–GW{checked_gws[-1]} — a player who started "
                        f"earlier this season but not recently no longer gets an automatic 'nailed' floor.")
         else:
-            st.caption("⚠️ Recency check (Standing Rule #19) unavailable this run — the per-gameweek live data needed "
+            _nc("⚠️ Recency check unavailable", "⚠️ Recency check (Standing Rule #19) unavailable this run — the per-gameweek live data needed "
                        "to confirm RECENT starts couldn't be fetched, so any 'confirmed start' xM floor this run falls "
                        "back to season-total starts only (pre-Patch-14 behavior). Treat a bench/backup-tier transfer "
                        "candidate's projection with extra caution until this resolves.")
@@ -6091,7 +6120,7 @@ with tab_transfers:
     # (unchanged in behavior) plus the call that displays whatever is cached.
     # ---------------------------------------------------------------------------
     with st.expander("Evaluate your own scenario — a specific target, a candidate Wildcard date, or a Free Hit GW"):
-        st.caption("Optional. Pick a target player, a candidate Wildcard gameweek, and/or a candidate Free Hit "
+        _nc("Optional what-if", "Optional. Pick a target player, a candidate Wildcard gameweek, and/or a candidate Free Hit "
                    "gameweek below, then click Evaluate. Leave all on \"— none —\" and nothing changes — the "
                    "recommendation above stays the model's own default full-pool pick.")
         scen_col1, scen_col2, scen_col3 = st.columns(3)
@@ -6224,7 +6253,7 @@ with tab_style:
             _rank_df = pd.DataFrame(_rank_rows)
             _rank_chart = build_season_rank_chart(_rank_df)
             st.altair_chart(_rank_chart, use_container_width=True)
-            st.caption("Overall rank by gameweek — log scale, reversed (best rank at the top), with reference "
+            _nc("Rank by GW (log, best on top)", "Overall rank by gameweek — log scale, reversed (best rank at the top), with reference "
                        "lines at the Top 1K/10K/50K/100K/500K/1M tiers so you can read your position against "
                        "them at a glance. Uses the same live-corrected GW figure as the Season Ledger table "
                        "above, so the two never disagree on the current, not-yet-finalized gameweek.")
