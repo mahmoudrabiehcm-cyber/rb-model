@@ -907,15 +907,25 @@ def _reachable_bb_tc_tables(squad_df: pd.DataFrame, pool_df: pd.DataFrame | None
     team_value = round(float(pd.to_numeric(squad_df["price"], errors="coerce").sum(skipna=True) or 0.0), 1)
     base = base_gw if base_gw is not None else gw_list[0]
     bb_by_gw, tc_by_gw = dict(flat_bb), dict(flat_tc)
-    for gw in gw_list:
-        col = f"xpts_gw{gw}"
-        if col not in full_pool.columns:
-            continue
+    _gws_run = [gw for gw in gw_list if f"xpts_gw{gw}" in full_pool.columns]
+
+    def _solve_one(gw):
         accrued_ft = min(5, max(0, free_transfers) + max(0, gw - base))
         min_retain = max(0, min(15, 15 - accrued_ft))
-        reachable = opt.solve_squad(full_pool, cfg, budget=team_value, objective_col=col,
-                                     retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
-                                     label=f"chip_portfolio_prep_gw{gw}")
+        return opt.solve_squad(full_pool, cfg, budget=team_value, objective_col=f"xpts_gw{gw}",
+                               retain_pool_codes=list(squad_df["code"]), min_retain=min_retain,
+                               label=f"chip_portfolio_prep_gw{gw}")
+    # R2 Patch 4 (performance, lossless): the per-week solves are independent, so they run side by side (CBC is a
+    # subprocess); results are applied in week order exactly as before.
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        import os as _os
+        with ThreadPoolExecutor(max_workers=max(1, min(len(_gws_run) or 1, (_os.cpu_count() or 2)))) as _ex:
+            _solved = dict(zip(_gws_run, _ex.map(_solve_one, _gws_run)))
+    except Exception:
+        _solved = {gw: _solve_one(gw) for gw in _gws_run}
+    for gw in _gws_run:
+        reachable = _solved.get(gw)
         if reachable is None or reachable.get("squad") is None or reachable["squad"].empty:
             continue
         rbb, rtc = _bb_tc_tables_for_squad(reachable["squad"], [gw])

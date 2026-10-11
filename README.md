@@ -6,7 +6,7 @@ captaincy and chip timing. It is built to help any team; it is not tuned to one 
 
 - Model document: FPL Maverick v6.13 (project PDF). The app follows its rules; departures are named in the app text
   and in `logs/LOG_APP.md`.
-- Current release: **Release 2, Patch 2** (badge "r2 patch 2"). Release 1 ended at Patch 117l. The full history is
+- Current release: **Release 2, Patch 4** (badge "r2 patch 4"). Release 1 ended at Patch 117l. The full history is
   the `PATCH_VERSION` string at the top of `app.py`.
 - How to host it: see `DEPLOY.md`.
 
@@ -53,5 +53,5 @@ pip install -r requirements.txt -r requirements-dev.txt
 python3 -m pytest -q -p no:cacheprovider $(ls test_*.py | grep -v "driver\|playwright\|harness")
 ```
 
-Release 2 Patch 2: 612 tests, all passing on PuLP 3.3.2 and on PuLP 4.0.0 (with the repo's Turf Green `config.toml`).
+Release 2 Patch 4: 636 tests, all passing on PuLP 3.3.2 and on PuLP 4.0.0 (with the repo's Turf Green `config.toml`).
 Rule: write the failing test first, then the fix, then the full regression.

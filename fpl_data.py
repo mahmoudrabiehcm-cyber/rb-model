@@ -208,8 +208,16 @@ def fetch_recent_start_ids(last_completed_gw: int, window: int) -> dict:
     started = set()
     checked_gws = []
     window_start = max(1, last_completed_gw - window + 1)
-    for gw in range(window_start, last_completed_gw + 1):
-        live = fetch_event_live_official(gw)
+    _gws = list(range(window_start, last_completed_gw + 1))
+    # R2 Patch 4 (performance, lossless): the per-GW live payloads are fetched side by side, processed in GW order.
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, min(6, len(_gws) or 1))) as _ex:
+            _live = dict(zip(_gws, _ex.map(fetch_event_live_official, _gws)))
+    except Exception:
+        _live = {gw: fetch_event_live_official(gw) for gw in _gws}
+    for gw in _gws:
+        live = _live.get(gw)
         if live is None or "elements" not in live:
             continue
         checked_gws.append(gw)
@@ -251,8 +259,15 @@ def load_snapshot(season: str = "2026-27", recency_window: int = 4) -> FplSnapsh
     on the official-API path — the mirror path has no per-gameweek live
     endpoint, so the recency signal is left unavailable there (disclosed via
     empty `recent_start_checked_gws`, not silently assumed)."""
-    boot = fetch_bootstrap_official()
-    fixtures_json = fetch_fixtures_official()
+    # R2 Patch 4 (performance, lossless): the two independent official calls run side by side
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _fb, _ff = _ex.submit(fetch_bootstrap_official), _ex.submit(fetch_fixtures_official)
+            boot, fixtures_json = _fb.result(), _ff.result()
+    except Exception:
+        boot = fetch_bootstrap_official()
+        fixtures_json = fetch_fixtures_official()
 
     if boot is not None:
         players = pd.DataFrame(boot["elements"])
@@ -417,9 +432,16 @@ def fetch_team_match_xg(season_slug: str, gw_list: list[int]) -> tuple[pd.DataFr
     cols = ["team_code", "opp_code", "is_home", "gameweek", "xg_for", "xg_against"]
     frames = []
     missing_gws = []
+    # R2 Patch 4 (performance, lossless): fetch every GW's file side by side, then process in GW order as before.
+    _urls = {gw: f"{OLBAUDAY_RAW}/{season_slug}/By%20Gameweek/GW{gw}/matches.csv" for gw in gw_list}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(_urls) or 1))) as _ex:
+            _resp = dict(zip(_urls, _ex.map(lambda g: _get(_urls[g], timeout=15), _urls)))
+    except Exception:
+        _resp = {gw: _get(u, timeout=15) for gw, u in _urls.items()}
     for gw in gw_list:
-        url = f"{OLBAUDAY_RAW}/{season_slug}/By%20Gameweek/GW{gw}/matches.csv"
-        r = _get(url, timeout=15)
+        r = _resp.get(gw)
         if r is None:
             missing_gws.append(gw)
             continue

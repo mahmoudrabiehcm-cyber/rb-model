@@ -981,11 +981,19 @@ def _bench_autosub_total(squad: pd.DataFrame, xi: pd.DataFrame, gw_col: str, xm_
     avg_xm = float(xm_vals.mean()) if not xm_vals.empty else 0.8
     exposure = max(0.03, min(0.6, 1.0 - avg_xm))
     pos_arr = bench["position"].to_numpy()
+    # R2 Patch 4 (performance, lossless): per-position ranking on plain arrays instead of a pandas sort per position.
+    # Descending by points with NaN last (pandas' order); equal points give the same term sequence whatever their tie
+    # order, so the running sum is bit-identical (parity-tested on 200 random benches with ties and NaN).
+    vals = pd.to_numeric(bench[gw_col], errors="coerce").to_numpy(dtype=float)
     total = 0.0
     for pos in ["GK", "DEF", "MID", "FWD"]:
-        pos_bench = bench[pos_arr == pos].sort_values(gw_col, ascending=False)
-        for rank, pts in enumerate(pos_bench[gw_col].to_numpy()):
-            pts = 0.0 if pd.isna(pts) else float(pts)
+        v = vals[pos_arr == pos]
+        if v.size == 0:
+            continue
+        key = np.where(np.isnan(v), -np.inf, v)
+        order = np.argsort(-key, kind="stable")
+        for rank, pts in enumerate(v[order]):
+            pts = 0.0 if np.isnan(pts) else float(pts)
             if pos == "GK":
                 prob = gk_prob
             else:

@@ -1838,6 +1838,18 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # uses for its "Hit if worth it" k_range) so a paid-for move can be
         # considered too, not just free ones.
         k_upper = max(ft_bank, 5) if allow_hits else ft_bank
+        # R2 Patch 4 (performance, lossless): the k = 1..k_upper solves are independent; warm the memo side by side
+        # (CBC runs as a subprocess), then the loop below reads the same memoised results in the same order.
+        if full_pool_fp is not None and k_upper > 1:
+            try:
+                from concurrent.futures import ThreadPoolExecutor
+                _locks_w, _excl_w = lock_codes_of(sim_squad), exclude_codes_of(full_pool)
+                with ThreadPoolExecutor(max_workers=parallel_workers(k_upper)) as _exw:
+                    list(_exw.map(lambda kk: _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value,
+                                                                current_codes, max(0, 15 - kk), locks=_locks_w,
+                                                                excludes=_excl_w), range(1, k_upper + 1)))
+            except Exception:
+                pass
         for k in range(1, k_upper + 1):
             min_retain = max(0, 15 - k)
             result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain,
@@ -1876,8 +1888,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # hit_cost_threshold bar (same as suggest_transfers()'s own
         # `bar = threshold if hit_cost > 0 else meaningful_bar` rule) — a
         # free move only needs the lower meaningful_bar.
+        # R2 Patch 4 (model M10): a candidate that pays a hit must beat the best FREE-ONLY candidate by the hit
+        # threshold and every paid move must earn more than its own hit (m10_hit_gate); a free move keeps its bar.
         viable = [k for k in tied_ks if k == 0
-                  or candidates[k]["net_gain"] >= (threshold if candidates[k]["hit_cost"] > 0 else meaningful_bar)]
+                  or (m10_hit_gate(candidates, k, ft_bank, threshold, hit_cost_per) if candidates[k]["hit_cost"] > 0
+                      else candidates[k]["net_gain"] >= meaningful_bar)]
         # Patch 112 (chain only; `cap_use_bar=None` keeps the old behaviour): with the FT bank AT THE CAP a Roll
         # throws a transfer away (ft_after is capped at transfers.MAX_BANK), so any free move with a real gain
         # >= cap_use_bar is preferred over Rolling. It still has to pass the Starting-XI impact check below, and
@@ -2327,8 +2342,10 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         def clears_bar(c):
             if c["actual_k"] == 0:
                 return True
-            bar = threshold if c["hit_cost"] > 0 else meaningful_bar
-            return c["net_gain"] >= bar
+            if c["hit_cost"] > 0:
+                # R2 Patch 4 (model M10): marginal hit gate (see m10_hit_gate)
+                return m10_hit_gate(candidates, c["actual_k"], free_transfers, threshold, hit_cost_per)
+            return c["net_gain"] >= meaningful_bar
 
         tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
         viable = [k for k in tied_ks if clears_bar(candidates[k])]
@@ -3731,9 +3748,11 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
         tables[slot] = {g: v[slot] for g, v in tabs.items() if v.get(slot) is not None}
     allowed_s = ({want[k]: tuple(v) for k, v in allowed.items() if k in want} if allowed else None)
     sel = select_chip_weeks(tables, covered=set(m30.get("covered") or ()), special=set(m30.get("special") or ()),
-                            band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s)
+                            band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s,
+                            floor=m30.get("floor"))
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
-           "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ())}
+           "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
+           "held": dict(sel.get("held") or {})}
     for slot in ("tc", "bb", "fh"):
         cand = tables.get(slot) or {}
         out[slot + "_by_gw"] = {g: round(v, 2) for g, v in cand.items()}
@@ -3755,6 +3774,191 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
         out["tc_player"] = (tabs.get(out["tc"][0]) or {}).get("tc_player")
     out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
     return out
+
+
+def merge_path_held(portfolio: dict | None, path_chips: dict | None) -> dict | None:
+    """R2 Patch 3: after the plan/chain path's chips replace the joint sequence's weeks, the held-below-the-bar note uses
+    the PATH's best below-bar week (was the old sequence's week/value). Input not mutated."""
+    if portfolio is None:
+        return None
+    held = dict(portfolio.get("held_below_floor") or {})
+    detail = {k: dict(v) for k, v in (portfolio.get("detail") or {}).items()}
+    for slot, key in (("tc", "3xc"), ("bb", "bboost"), ("fh", "freehit")):
+        h = ((path_chips or {}).get("held") or {}).get(slot)
+        if h:
+            held[key] = (int(h[0]), float(h[1]))
+            # R2 Patch 4: the path valued this chip and found no week above the bar -> the old sequence's week goes
+            if not (path_chips or {}).get(slot):
+                detail.pop(key, None)
+    out = dict(portfolio)
+    out["held_below_floor"] = held
+    out["detail"] = detail
+    if "assignment" in portfolio:
+        out["assignment"] = {k: v for k, v in (portfolio.get("assignment") or {}).items() if k in detail or k == "wildcard"}
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# R2 Patch 4 -- model rulings M10 (marginal hit gate), M29(5) (no-Wildcard chip-aware plan variants), M31(6) (chip
+# tables show the adjusted value) and the transfer-chain strip.
+# ---------------------------------------------------------------------------------------------------------------------
+def m10_hit_gate(cands: dict, k: int, ft_bank: int, threshold: float, hit_cost_per: float) -> bool:
+    """M10 (Rule #13, marginal). A candidate with no hit passes (free moves keep their own bar). A candidate that pays a
+    hit must (1) beat the best FREE-ONLY candidate's net gain by at least `threshold` after all hits, and (2) for every
+    paid move m = ft_bank+1..k, add more than `hit_cost_per` in GROSS gain over the (m-1)-move solution (the nested
+    solution stands in for "that move dropped"; the nearest smaller solved k is used when one is missing).
+    Disclosed approximation: each k is its own optimal solve, so 'dropping a move' = the best (k-1)-move squad."""
+    c = cands.get(k)
+    if c is None:
+        return False
+    if float(c.get("hit_cost", 0.0) or 0.0) <= 0.0:
+        return True
+    free = [float(v["net_gain"]) for v in cands.values() if float(v.get("hit_cost", 0.0) or 0.0) <= 0.0]
+    best_free = max(free) if free else 0.0
+    if float(c["net_gain"]) - best_free < float(threshold) - 1e-9:
+        return False
+
+    def _gross(j):
+        v = cands[j]
+        return float(v["net_gain"]) + float(v.get("hit_cost", 0.0) or 0.0)
+    ks = sorted(cands)
+    for m in range(int(ft_bank) + 1, int(k) + 1):
+        if m not in cands:
+            continue
+        lower = [j for j in ks if j < m]
+        if not lower:
+            continue
+        if _gross(m) - _gross(max(lower)) <= float(hit_cost_per) + 1e-9:
+            return False
+    return True
+
+
+def weighted_plan_total(scores_by_gw: dict, gws: list, decay: float, chips: dict | None = None) -> float:
+    """M29(5)(i): the compared total = decay-weighted weekly scores over `gws` (Rule #54(c)) plus each chip's value
+    weighted by its own week's weight (chips = {"tc"|"bb"|"fh": (gw, value)}); chips outside `gws` are not counted."""
+    w = decay_weights(len(gws), float(decay))
+    wk = {int(g): w[i] for i, g in enumerate(gws)}
+    tot = sum(wk[int(g)] * float(scores_by_gw.get(g, 0.0) or 0.0) for g in gws)
+    for v in (chips or {}).values():
+        if v and int(v[0]) in wk:
+            tot += wk[int(v[0])] * float(v[1])
+    return float(tot)
+
+
+def choose_plan_variant(plain: dict, variants: list, band_pct: float = 0.02, band_floor: float = 2.0,
+                        health_floor: float = 2.0) -> dict:
+    """M29(5) decision. plain/variants = {"name", "total" (weighted, chips included), "checkpoint" (score in the week
+    after the last chip week), "moves_now", "kind" ("single"|"combined")}.
+    band = max(band_floor, band_pct x plain total). A variant passes only if total - plain > band AND its checkpoint is
+    not more than max(health_floor, 2% of plain checkpoint) below plain's (Rule #52). Among passing variants, those
+    inside the band of the best pass are tied -> fewest moves now, then single over combined, then higher total.
+    Returns {"pick", "band", "rows"} (rows: plain first, each with gain vs plain and status)."""
+    band = max(float(band_floor), float(band_pct) * float(plain["total"]))
+    hb = max(float(health_floor), 0.02 * float(plain.get("checkpoint") or 0.0))
+    rows = [{"name": plain["name"], "total": round(plain["total"], 2), "gain": 0.0, "band": round(band, 2),
+             "moves_now": plain.get("moves_now", 0), "status": "baseline"}]
+    passing = []
+    for v in variants:
+        g = float(v["total"]) - float(plain["total"])
+        if (plain.get("checkpoint") is not None and v.get("checkpoint") is not None
+                and float(v["checkpoint"]) < float(plain["checkpoint"]) - hb - 1e-9):
+            st = f"rejected: squad at checkpoint {float(v['checkpoint']) - float(plain['checkpoint']):+.1f}"
+        elif g > band + 1e-9:
+            st = "passes"
+            passing.append(v)
+        else:
+            st = "inside band"
+        rows.append({"name": v["name"], "total": round(float(v["total"]), 2), "gain": round(g, 2), "band": round(band, 2),
+                     "moves_now": v.get("moves_now", 0), "status": st, "chips": v.get("chips")})
+    pick = plain["name"]
+    if passing:
+        best = max(float(v["total"]) for v in passing)
+        tied = [v for v in passing if best - float(v["total"]) <= band + 1e-9]
+        win = min(tied, key=lambda v: (int(v.get("moves_now", 0)), 0 if v.get("kind") != "combined" else 1,
+                                       -float(v["total"])))
+        pick = win["name"]
+        for r in rows:
+            if r["name"] == pick:
+                r["status"] = "chosen"
+    return {"pick": pick, "band": round(band, 2), "rows": rows}
+
+
+def tc_route_targets(pool: pd.DataFrame, tc_gw: int, own_codes, premium: float, k: int = 2) -> list:
+    """M29(5)(v): non-owned players whose availability-weighted xPts (xadj; xpts when absent) in the TC week exceed the
+    squad's current premium, best first, top `k` (estimate-tier k = 2)."""
+    col = f"xadj_gw{int(tc_gw)}" if f"xadj_gw{int(tc_gw)}" in pool.columns else f"xpts_gw{int(tc_gw)}"
+    if col not in pool.columns:
+        return []
+    own = set(int(c) for c in (own_codes or []))
+    p = pool[~pool["code"].isin(own)].copy()
+    p["_v"] = pd.to_numeric(p[col], errors="coerce")
+    p = p[p["_v"] > float(premium) + 1e-9].sort_values("_v", ascending=False).head(int(k))
+    return [{"code": int(r["code"]), "gw": int(tc_gw), "name": str(r.get("web_name", "")), "xpts": round(float(r["_v"]), 2)}
+            for _, r in p.iterrows()]
+
+
+def chip_table_col(sq: pd.DataFrame, gw: int) -> tuple:
+    """M31(6): the column a chip table should list -- the availability-adjusted xadj_gw{n} (same figure as the card),
+    else the raw xpts column labelled as raw."""
+    if f"xadj_gw{int(gw)}" in sq.columns:
+        return f"xadj_gw{int(gw)}", f"xPts GW{int(gw)} (adj.)"
+    return f"xpts_gw{int(gw)}", f"xPts GW{int(gw)} raw (no availability factor)"
+
+
+_CHIP_BADGE = {"TC": ("TC", "#C98A26"), "BB": ("BB", "#2E9E5B"), "FH": ("FH", "#3B6FD8"), "WC": ("WC", "#7A4FD0")}
+
+
+def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_by_gw: dict | None,
+                     scores_by_gw: dict | None, gws: list) -> str:
+    """Transfer chain as a visual strip: one column per GW with the chip badge, OUT -> IN moves (or Roll), banked
+    free-transfer dots and a bar for the week's projected score. `first_week` = (gw, ["Out → In", ...], ft_after)."""
+    import html as _h
+    by = {int(w.get("gw")): w for w in (weekly_plan or []) if w.get("gw") is not None}
+    sc = {int(g): float(v) for g, v in (scores_by_gw or {}).items() if v is not None}
+    smax = max(sc.values()) if sc else 1.0
+    smin = min(sc.values()) if sc else 0.0
+    cols = []
+    for g in gws:
+        g = int(g)
+        badge = ""
+        ch = (chips_by_gw or {}).get(g)
+        if ch:
+            lab, colr = _CHIP_BADGE.get(str(ch), (str(ch), "#555"))
+            badge = f'<span class="cs-chip" style="background:{colr}">{_h.escape(lab)}</span>'
+        moves, ft = [], None
+        if first_week is not None and int(first_week[0]) == g:
+            moves = [tuple(x.split(" → ", 1)) if isinstance(x, str) and " → " in x else (str(x), "") for x in (first_week[1] or [])]
+            ft = first_week[2] if len(first_week) > 2 else None
+        elif g in by:
+            w = by[g]
+            moves = [(m.get("out", "?"), m.get("in", "?")) for m in (w.get("moves") or [])]
+            ft = w.get("ft_banked_after")
+            if w.get("chip_played") == "wildcard":
+                badge = f'<span class="cs-chip" style="background:#7A4FD0">WC</span>'
+        mv = ("".join(f'<div class="cs-mv"><span class="cs-out">{_h.escape(str(o))}</span>'
+                      f'<span class="cs-in">{_h.escape(str(i))}</span></div>' for o, i in moves)
+              if moves else '<div class="cs-roll">Roll</div>')
+        dots = ("".join('<span class="cs-dot on"></span>' for _ in range(int(ft))) +
+                "".join('<span class="cs-dot"></span>' for _ in range(max(0, 5 - int(ft))))) if ft is not None else ""
+        bar = ""
+        if g in sc:
+            pct = 30 + 70 * ((sc[g] - smin) / (smax - smin) if smax > smin else 1.0)
+            bar = (f'<div class="cs-bar"><div style="width:{pct:.0f}%"></div></div>'
+                   f'<div class="cs-pts">{sc[g]:.1f}</div>')
+        cols.append(f'<div class="cs-col"><div class="cs-gw">GW{g}{badge}</div>{mv}'
+                    f'<div class="cs-ft">{dots}</div>{bar}</div>')
+    css = ('<style>.cs-wrap{display:flex;gap:6px;overflow-x:auto;padding:4px 0 8px}'
+           '.cs-col{flex:0 0 96px;border:1px solid var(--rule,#DEE8D2);border-radius:8px;padding:6px;background:var(--surface,#fff);font-size:11px}'
+           '.cs-gw{font-weight:700;display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}'
+           '.cs-chip{color:#fff;border-radius:6px;padding:0 5px;font-size:10px}'
+           '.cs-mv{display:flex;flex-direction:column;margin-bottom:3px}'
+           '.cs-out{color:#E14E54;text-decoration:line-through;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+           '.cs-in{color:#157A3E;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+           '.cs-roll{color:#8A958C;margin-bottom:3px}.cs-ft{margin:2px 0}'
+           '.cs-dot{display:inline-block;width:6px;height:6px;border-radius:3px;background:#DEE8D2;margin-right:2px}'
+           '.cs-dot.on{background:#2E9E5B}.cs-bar{height:5px;background:#EDF3E6;border-radius:3px}'
+           '.cs-bar div{height:5px;background:#2E9E5B;border-radius:3px}.cs-pts{font-size:10px;color:#4A564D}</style>')
+    return css + '<div class="cs-wrap">' + "".join(cols) + "</div>"
 
 
 def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None) -> str:
@@ -3908,7 +4112,7 @@ def event_deadlines(events) -> dict:
 
 
 def m30_items(planning_gw: int, window_gws: list, overrides, fixtures_counts_special: set, band: float,
-              fh_by_gw: dict | None) -> tuple:
+              fh_by_gw: dict | None, floor: float | None = None) -> tuple:
     """R2 Patch 2: the hashable M30/M31 settings passed into the cached chain calc: covered weeks (GW+0..+5 or the last
     per-GW clean-sheet column with data in the sheet), special weeks (doubles/blanks), band, Free Hit one-week optimum
     per week (evaluate_free_hit 'rebuild'), planning GW."""
@@ -3921,11 +4125,15 @@ def m30_items(planning_gw: int, window_gws: list, overrides, fixtures_counts_spe
             last_tab = max(int(str(c)[9:]) for c in cols)
     except Exception:
         last_tab = None
-    cov = tuple(sorted(m30_covered_gws(planning_gw, window_gws, last_table_gw=last_tab)))
+    # R2 Patch 3: covered weeks do not depend on how far this run's chip window reaches (M30(1): GW+0..GW+5)
+    _span = sorted(set(int(g) for g in (window_gws or [])) | set(range(int(planning_gw), int(planning_gw) + 6))
+                   | (set(range(int(planning_gw), int(last_tab) + 1)) if last_tab else set()))
+    cov = tuple(sorted(m30_covered_gws(planning_gw, _span, last_table_gw=last_tab)))
     fh = tuple(sorted((int(g), float(v["rebuild"])) for g, v in (fh_by_gw or {}).items()
                       if isinstance(v, dict) and v.get("rebuild") is not None))
     return (("covered", cov), ("special", tuple(sorted(int(g) for g in fixtures_counts_special))),
-            ("band", float(band)), ("fh_ref", fh), ("planning_gw", int(planning_gw)))
+            ("band", float(band)), ("fh_ref", fh), ("planning_gw", int(planning_gw)),
+            ("floor", (None if floor is None else float(floor))))
 
 
 def m30_from_items(items) -> dict | None:
@@ -3935,7 +4143,7 @@ def m30_from_items(items) -> dict | None:
     d = dict(items)
     return {"covered": set(d.get("covered") or ()), "special": set(d.get("special") or ()),
             "band": float(d.get("band", 2.0)), "fh_ref_by_gw": (dict(d["fh_ref"]) if d.get("fh_ref") else None),
-            "planning_gw": d.get("planning_gw")}
+            "planning_gw": d.get("planning_gw"), "floor": d.get("floor")}
 
 
 def m31_factor(k: int) -> float:
@@ -4092,7 +4300,7 @@ def m30_covered_gws(planning_gw: int, gws: list, last_table_gw: int | None = Non
 
 
 def select_chip_weeks(tables: dict, covered: set, special: set, band: float, blocked: set | None = None,
-                      allowed: dict | None = None) -> dict:
+                      allowed: dict | None = None, floor: float | None = None) -> dict:
     """M1 + M29(2) + M30: pick TC/BB/FH weeks. `tables` = {"tc"|"bb"|"fh": {gw: value}}.
     Eligible weeks per chip: covered weeks; far weeks only if value > best covered value + `band` (single-week Rule #34
     band, 2-point floor); known doubles/blanks (`special`) at any distance. If the chip has no covered week at all
@@ -4103,17 +4311,29 @@ def select_chip_weeks(tables: dict, covered: set, special: set, band: float, blo
     import itertools
     blocked = set(blocked or ())
     elig = {}
+    held = {}
     for c, t in tables.items():
         t = {int(g): float(v) for g, v in (t or {}).items() if v is not None and int(g) not in blocked
              and (allowed is None or c not in allowed or int(g) in set(allowed[c]))}
         if not t:
             continue
+        # M30(2): eligibility is decided on ALL values (a far week must beat the best covered week by the band) ...
         cov = {g: v for g, v in t.items() if g in covered}
         if cov:
             best_cov = max(cov.values())
             e = {g: v for g, v in t.items() if g in covered or g in special or v > best_cov + float(band) + 1e-9}
         else:
             e = dict(t)
+        if floor is not None:
+            # ... then (R2 Patch 3) a value below the materiality bar never competes for a week -- it would only push
+            # another chip off its best week and be held anyway. The best eligible below-bar week is reported as held.
+            low = {g: v for g, v in e.items() if v < float(floor)}
+            e = {g: v for g, v in e.items() if v >= float(floor)}
+            if not e and low:
+                hb = max(low, key=lambda g: (low[g], -g))
+                held[c] = (int(hb), round(low[hb], 2))
+        if not e:
+            continue
         elig[c] = e
     chips = sorted(elig)
     best_key, best = None, None
@@ -4125,7 +4345,7 @@ def select_chip_weeks(tables: dict, covered: set, special: set, band: float, blo
         key = (tot, sum(1 for w in wk if w in covered), tuple(sorted(wk, reverse=True)))
         if best_key is None or key > best_key:
             best_key, best = key, combo
-    out = {"tc": None, "bb": None, "fh": None, "tie_sets": {}, "conf": {}, "far": {}, "eligible": elig}
+    out = {"tc": None, "bb": None, "fh": None, "tie_sets": {}, "conf": {}, "far": {}, "eligible": elig, "held": held}
     for c, w in zip(chips, best or ()):
         if w is None:
             continue
