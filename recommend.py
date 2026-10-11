@@ -18,6 +18,7 @@ proceeds are usually <= now_cost), not optimistic — worth a manual gut
 check on tight-budget swaps.
 """
 from __future__ import annotations
+import numpy as np
 import pandas as pd
 
 import fpl_engine as eng
@@ -3582,7 +3583,7 @@ def tc_target_candidates(pool: pd.DataFrame, tc_gw: int, own_codes, k: int = 3) 
 
 def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None, fh_gw: int | None,
                      fh_ref_score: float | None, types: tuple, moe_fn=None, pick_rule: str = "best_horizon",
-                     allowed: dict | None = None) -> dict:
+                     allowed: dict | None = None, m30: dict | None = None) -> dict:
     """Patch 112/113 (manager: Triple Captain / Bench Boost / Free Hit must count in the Wildcard decision).
     Chip value for ONE squad path (`squads_by_gw` = the squad fielded each GW). DEVIATION from Standing Rule #31
     (captaincy is disclosure, never a scoring input) -- explicit manager instruction, flagged for the model chat.
@@ -3599,7 +3600,12 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
     error -> latest week, BB first).
     `allowed` = {chip key: GWs} limits a chip to its earliest still-available window (a first-half chip lapses at the
     deadline); None = no restriction. `types` uses the chip keys '3xc', 'bboost', 'freehit'.
-    Returns {'tc','bb','fh': (gw, value)|None, 'total', 'tc_player', '*_by_gw', '*_gap', '*_best', '*_conf'}."""
+    Returns {'tc','bb','fh': (gw, value)|None, 'total', 'tc_player', '*_by_gw', '*_gap', '*_best', '*_conf'}.
+    R2 Patch 2: `m30` = {"covered", "special", "band", "fh_ref_by_gw"?, "planning_gw"?} switches to the model M30/M31
+    selection (chip_week_tables + select_chip_weeks): availability-adjusted values, near weeks first, best week (not the
+    pair/latest rules), one chip per week; Free Hit per week when `fh_ref_by_gw` is given. `pick_rule` is then unused."""
+    if m30 is not None:
+        return _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, types, allowed, m30)
     blocked = {g for g in (wc_gw, fh_gw) if g is not None}
     per = {}
     for g in gws:
@@ -3702,6 +3708,51 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
     if "freehit" in types and fh_gw is not None and fh_ref_score is not None and squads_by_gw.get(fh_gw) is not None:
         cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
         out["fh"] = (fh_gw, round(max(0.0, float(fh_ref_score) - float(cur)), 2))
+    out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
+    return out
+
+
+def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, types, allowed, m30):
+    """R2 Patch 2: chain_chip_value under model rulings M29(2)/M30/M31 (see chain_chip_value)."""
+    fh_tab = m30.get("fh_ref_by_gw") if "freehit" in types else None
+    tabs = chip_week_tables(squads_by_gw, list(gws), fh_ref_by_gw=fh_tab, planning_gw=m30.get("planning_gw"))
+    blocked = {g for g in (wc_gw,) if g is not None}
+    fixed_fh = None
+    if "freehit" in types and not fh_tab and fh_gw is not None and fh_ref_score is not None \
+            and squads_by_gw.get(fh_gw) is not None:
+        cur = opt.rating_gw_value(squads_by_gw[fh_gw], f"xpts_gw{fh_gw}", cfg)["total_realized"]
+        fixed_fh = (int(fh_gw), round(max(0.0, float(fh_ref_score) - float(cur)), 2))
+        blocked.add(int(fh_gw))
+    want = {"3xc": "tc", "bboost": "bb", "freehit": "fh"}
+    tables = {}
+    for t, slot in want.items():
+        if t not in types or (slot == "fh" and not fh_tab):
+            continue
+        tables[slot] = {g: v[slot] for g, v in tabs.items() if v.get(slot) is not None}
+    allowed_s = ({want[k]: tuple(v) for k, v in allowed.items() if k in want} if allowed else None)
+    sel = select_chip_weeks(tables, covered=set(m30.get("covered") or ()), special=set(m30.get("special") or ()),
+                            band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s)
+    out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
+           "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ())}
+    for slot in ("tc", "bb", "fh"):
+        cand = tables.get(slot) or {}
+        out[slot + "_by_gw"] = {g: round(v, 2) for g, v in cand.items()}
+        pick = out.get(slot)
+        out[slot + "_tie_set"] = sel["tie_sets"].get(slot, [])
+        out[slot + "_conf"] = sel["conf"].get(slot)
+        out[slot + "_far"] = sel["far"].get(slot, False)
+        if pick and cand:
+            rest = [v for g, v in cand.items() if g != pick[0]]
+            out[slot + "_gap"] = round(pick[1] - max(rest), 2) if rest else None
+            b = max(cand, key=lambda k: (cand[k], k))
+            out[slot + "_best"] = (b, round(cand[b], 2))
+            r2 = {g: v for g, v in cand.items() if g != pick[0]}
+            out[slot + "_runner"] = ((max(r2, key=lambda k: (r2[k], -k)), round(r2[max(r2, key=lambda k: (r2[k], -k))], 2))
+                                     if r2 else None)
+        else:
+            out[slot + "_gap"] = out[slot + "_best"] = out[slot + "_runner"] = None
+    if out["tc"]:
+        out["tc_player"] = (tabs.get(out["tc"][0]) or {}).get("tc_player")
     out["total"] = round(sum(v[1] for v in (out["tc"], out["bb"], out["fh"]) if v), 2)
     return out
 
@@ -3813,7 +3864,7 @@ def apply_chip_floor(portfolio: dict | None, floor: float) -> tuple[dict | None,
 def held_chip_sub(held: tuple, floor: float) -> str:
     """R2 Patch 1 (A2): card sub-line for a chip held because its best week is below the materiality floor."""
     gw, val = held
-    return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held (Rule #34)"
+    return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held, re-check at next run (Rule #34)"
 
 
 def chip_window_gws(chip_rows: list, name_prefix: str, gws: list) -> list:
@@ -3836,6 +3887,271 @@ def wildcard_scan_needed(available_types, valid_gws_by_type_items) -> bool:
     if "wildcard" not in valid:
         return True
     return len(tuple(valid["wildcard"])) > 0
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# R2 Patch 2 -- model rulings M30 (chip weeks beyond market coverage) and M31 (expected-minutes distance factor), and
+# B1 (after the Wildcard, chips are placed on the squads the plan fields each week, M29(2)).
+# ---------------------------------------------------------------------------------------------------------------------
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def event_deadlines(events) -> dict:
+    """R2 Patch 2: {gameweek id: UTC deadline Timestamp} from the bootstrap `events` table (empty when absent)."""
+    try:
+        if events is None or getattr(events, "empty", True) or "deadline_time" not in events.columns:
+            return {}
+        return {int(r["id"]): pd.to_datetime(r["deadline_time"], utc=True) for _, r in events.iterrows()
+                if pd.notna(r.get("deadline_time")) and pd.notna(r.get("id"))}
+    except Exception:
+        return {}
+
+
+def m30_items(planning_gw: int, window_gws: list, overrides, fixtures_counts_special: set, band: float,
+              fh_by_gw: dict | None) -> tuple:
+    """R2 Patch 2: the hashable M30/M31 settings passed into the cached chain calc: covered weeks (GW+0..+5 or the last
+    per-GW clean-sheet column with data in the sheet), special weeks (doubles/blanks), band, Free Hit one-week optimum
+    per week (evaluate_free_hit 'rebuild'), planning GW."""
+    import re as _re
+    last_tab = None
+    try:
+        cols = [c for c in getattr(overrides, "columns", []) if _re.fullmatch(r"cs_pct_gw\d+", str(c))
+                and pd.to_numeric(overrides[c], errors="coerce").notna().any()]
+        if cols:
+            last_tab = max(int(str(c)[9:]) for c in cols)
+    except Exception:
+        last_tab = None
+    cov = tuple(sorted(m30_covered_gws(planning_gw, window_gws, last_table_gw=last_tab)))
+    fh = tuple(sorted((int(g), float(v["rebuild"])) for g, v in (fh_by_gw or {}).items()
+                      if isinstance(v, dict) and v.get("rebuild") is not None))
+    return (("covered", cov), ("special", tuple(sorted(int(g) for g in fixtures_counts_special))),
+            ("band", float(band)), ("fh_ref", fh), ("planning_gw", int(planning_gw)))
+
+
+def m30_from_items(items) -> dict | None:
+    """R2 Patch 2: inverse of m30_items (None when empty)."""
+    if not items:
+        return None
+    d = dict(items)
+    return {"covered": set(d.get("covered") or ()), "special": set(d.get("special") or ()),
+            "band": float(d.get("band", 2.0)), "fh_ref_by_gw": (dict(d["fh_ref"]) if d.get("fh_ref") else None),
+            "planning_gw": d.get("planning_gw")}
+
+
+def m31_factor(k: int) -> float:
+    """M31(1): availability factor for a week k gameweeks ahead (k = 1 = the next deadline gameweek):
+    f(k) = 0.80 + 0.20 * exp(-(k-1)/3) -> 1.00, 0.94, 0.90, 0.87, 0.85, 0.84 ... floor 0.80. Estimate-tier parameters
+    (re-fit when the Step 0 log holds ten gameweeks of projected vs actual minutes by distance). k <= 1 -> 1.0."""
+    import math
+    k = int(k)
+    if k <= 1:
+        return 1.0
+    return 0.80 + 0.20 * math.exp(-(k - 1) / 3.0)
+
+
+def parse_return_gw(news, deadlines: dict, season_start_year: int):
+    """M31(2) dated return news, read from the FPL news text ("... Expected back 24 Oct", "Suspended until 17 Oct").
+    Returns the first gameweek whose deadline DATE is on or after that date, or None (no date, "Unknown return date",
+    or a date after the last known deadline). Months Aug-Dec belong to `season_start_year`, Jan-Jul to the next year.
+    Disclosed reading: "until D" is treated like "back D" (FPL wording is not consistent about inclusive dates)."""
+    import re as _re
+    if not news or not isinstance(news, str) or not deadlines:
+        return None
+    m = _re.search(r"(?:back|until)\s+(\d{1,2})\s+([A-Za-z]{3})", news, _re.I)
+    if not m:
+        return None
+    mon = _MONTHS.get(m.group(2).lower())
+    if mon is None:
+        return None
+    year = int(season_start_year) + (0 if mon >= 8 else 1)
+    try:
+        d = pd.Timestamp(year=year, month=mon, day=int(m.group(1))).date()
+    except ValueError:
+        return None
+    for gw in sorted(deadlines):
+        dl = deadlines[gw]
+        if dl is None or pd.isna(dl):
+            continue
+        if pd.Timestamp(dl).date() >= d:
+            return int(gw)
+    return None
+
+
+def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadlines: dict | None = None,
+                          season_start_year: int | None = None) -> pd.DataFrame:
+    """M31(2): per-player, per-week availability `avail_gw{g}` and availability-adjusted xPts `xadj_gw{g}` for CHIP and
+    Wildcard-window valuation only (M31(4); transfers and the build keep xpts_gw{g}). k = g - planning_gw + 1.
+      - next gameweek (k = 1): the live flag (chance of playing; 0 for i/s/u/n) and xadj = the model's own xpts (already
+        carrying that flag);
+      - departed / not available (u, n): 0 every week;
+      - flagged with a dated return (FPL news text, parse_return_gw): 0 before the return week, then f(g - R + 1);
+      - injured/suspended (i, s) with no date: 0 (a confirmed absence stays 0 until a return date exists);
+      - everyone else (a, d): healthy baseline x f(k) -- the 'd' flag counts for the next gameweek only.
+    Healthy baseline = xptsh_gw{g} from data_pipeline.compute_all (xPts with the availability flag removed); without
+    it, xPts / (chance/100) for a 'd' player and xPts otherwise (disclosed fallback). Disclosed simplification: the
+    factor scales the whole xPts, not only the minutes-driven part. Returns a copy."""
+    out = proj.copy()
+    status = out.get("status", pd.Series("a", index=out.index)).astype(str).str.lower()
+    chance = pd.to_numeric(out.get("chance_of_playing_next_round", pd.Series(np.nan, index=out.index)), errors="coerce")
+    news = out.get("news", pd.Series("", index=out.index))
+    yr = season_start_year
+    if yr is None:
+        yr = (pd.Timestamp(min(deadlines.values())).year if deadlines else pd.Timestamp.utcnow().year)
+        if deadlines and pd.Timestamp(min(deadlines.values())).month < 8:
+            yr -= 1
+    ret = pd.Series([parse_return_gw(n, deadlines or {}, yr) if s in ("i", "s", "d") else None
+                     for n, s in zip(news, status)], index=out.index, dtype=object)
+    now_avail = chance.where(chance.notna(), np.where(status.isin(["i", "s", "u", "n"]), 0.0, 100.0)) / 100.0
+    for g in gws:
+        col = f"xpts_gw{g}"
+        if col not in out.columns:
+            continue
+        x = pd.to_numeric(out[col], errors="coerce")
+        hcol = f"xptsh_gw{g}"
+        if hcol in out.columns:
+            h = pd.to_numeric(out[hcol], errors="coerce")
+        else:
+            h = x.where(~((status == "d") & (chance > 0)), x / (chance / 100.0))
+        k = int(g) - int(planning_gw) + 1
+        av = []
+        for i, st in zip(out.index, status):
+            r = ret.loc[i]
+            if st in ("u", "n"):
+                av.append(0.0)
+            elif k <= 1:
+                av.append(float(now_avail.loc[i]))
+            elif r is not None and st in ("i", "s", "d") and int(r) > int(planning_gw):
+                av.append(0.0 if int(g) < int(r) else m31_factor(int(g) - int(r) + 1))
+            elif st in ("i", "s"):
+                av.append(0.0)
+            else:
+                av.append(m31_factor(k))
+        av = pd.Series(av, index=out.index, dtype=float)
+        out[f"avail_gw{g}"] = av
+        out[hcol] = h
+        out[f"xadj_gw{g}"] = x if k <= 1 else (h * av)
+    return out
+
+
+def _col_or(sq: pd.DataFrame, pref: str, fallback: str, g: int) -> pd.Series:
+    c = f"{pref}{g}"
+    if c in sq.columns:
+        return pd.to_numeric(sq[c], errors="coerce").fillna(0.0)
+    return pd.to_numeric(sq[f"{fallback}{g}"], errors="coerce").fillna(0.0)
+
+
+def chip_week_tables(squads_by_gw: dict, gws: list, fh_ref_by_gw: dict | None = None,
+                     planning_gw: int | None = None) -> dict:
+    """M31(3)/(4) + B1: per-week chip values on the squad fielded that week.
+      Bench Boost   = bench xadj after the best XI on xadj (xadj = availability-adjusted xPts; xpts when absent).
+      Triple Captain= availability-weighted best of the squad's top three by healthy xPts:
+                      p1 v1 + (1-p1) p2 v2 + (1-p1)(1-p2) p3 v3 (v = xptsh, p = avail; xpts and p = 1 when absent).
+      Free Hit      = max(0, fh_ref x f(k) - best-XI xadj of the fielded squad) when `fh_ref_by_gw` has the week
+                      (the one-week optimum's XI total, the same yardstick as chip_protocol._fh_post_table_for_squad).
+    Returns {gw: {"bb", "tc", "tc_player", "fh"}}."""
+    out = {}
+    p0 = int(planning_gw) if planning_gw is not None else (min(gws) if gws else 0)
+    for g in gws:
+        sq = squads_by_gw.get(g)
+        if sq is None or f"xpts_gw{g}" not in sq.columns or sq.empty:
+            continue
+        sq = sq.copy()
+        adj = _col_or(sq, "xadj_gw", "xpts_gw", g)
+        sq["_adj"] = adj.values
+        best = opt.best_starting_xi(sq, "_adj")
+        if not best or best.get("xi") is None or best["xi"].empty:
+            continue
+        xi_codes = set(best["xi"]["code"])
+        bench = sq[~sq["code"].isin(xi_codes)]
+        bb = round(float(bench["_adj"].sum()), 4) if not bench.empty else 0.0
+        v = _col_or(sq, "xptsh_gw", "xpts_gw", g)
+        p = pd.to_numeric(sq[f"avail_gw{g}"], errors="coerce").fillna(1.0) if f"avail_gw{g}" in sq.columns \
+            else pd.Series(1.0, index=sq.index)
+        order = v.sort_values(ascending=False).index[:3]
+        e, miss = 0.0, 1.0
+        for i in order:
+            e += miss * float(p.loc[i]) * float(v.loc[i])
+            miss *= (1.0 - float(p.loc[i]))
+        top = order[0] if len(order) else None
+        fh = None
+        if fh_ref_by_gw and g in fh_ref_by_gw and fh_ref_by_gw[g] is not None:
+            fh = round(max(0.0, float(fh_ref_by_gw[g]) * m31_factor(int(g) - p0 + 1) - float(best["xi"]["_adj"].sum())), 4)
+        out[g] = {"bb": bb, "tc": round(e, 4), "fh": fh,
+                  "tc_player": ({"gw": g, "name": str(sq.loc[top].get("web_name", "")), "code": int(sq.loc[top, "code"]),
+                                 "team": sq.loc[top].get("team", ""), "xpts": round(e, 2)} if top is not None else None)}
+    return out
+
+
+def m30_covered_gws(planning_gw: int, gws: list, last_table_gw: int | None = None, reach: int = 5) -> set:
+    """M30(1): covered = GW+0..GW+`reach` (attack fixture factor non-zero, data_pipeline.effective_fixture_strength) or
+    up to the last week of a dated per-GW market table, whichever reaches further."""
+    last = int(planning_gw) + int(reach)
+    if last_table_gw is not None:
+        last = max(last, int(last_table_gw))
+    return {int(g) for g in gws if int(planning_gw) <= int(g) <= last}
+
+
+def select_chip_weeks(tables: dict, covered: set, special: set, band: float, blocked: set | None = None,
+                      allowed: dict | None = None) -> dict:
+    """M1 + M29(2) + M30: pick TC/BB/FH weeks. `tables` = {"tc"|"bb"|"fh": {gw: value}}.
+    Eligible weeks per chip: covered weeks; far weeks only if value > best covered value + `band` (single-week Rule #34
+    band, 2-point floor); known doubles/blanks (`special`) at any distance. If the chip has no covered week at all
+    (its window lies beyond coverage) its far weeks compete among themselves (M30(6), self-limiting).
+    One chip per week; maximise the total; ties: more covered weeks, then the LATER weeks (M1 exact ties). The old
+    'latest earliest week among near-ties' rule is not used (M30(3)). Tie set per chip = eligible weeks within `band`
+    of its best eligible value (low confidence when more than one). Floor/held handled by the caller."""
+    import itertools
+    blocked = set(blocked or ())
+    elig = {}
+    for c, t in tables.items():
+        t = {int(g): float(v) for g, v in (t or {}).items() if v is not None and int(g) not in blocked
+             and (allowed is None or c not in allowed or int(g) in set(allowed[c]))}
+        if not t:
+            continue
+        cov = {g: v for g, v in t.items() if g in covered}
+        if cov:
+            best_cov = max(cov.values())
+            e = {g: v for g, v in t.items() if g in covered or g in special or v > best_cov + float(band) + 1e-9}
+        else:
+            e = dict(t)
+        elig[c] = e
+    chips = sorted(elig)
+    best_key, best = None, None
+    for combo in itertools.product(*[sorted(elig[c]) + [None] for c in chips]):
+        wk = [w for w in combo if w is not None]
+        if len(wk) != len(set(wk)):
+            continue
+        tot = round(sum(elig[c][w] for c, w in zip(chips, combo) if w is not None), 6)
+        key = (tot, sum(1 for w in wk if w in covered), tuple(sorted(wk, reverse=True)))
+        if best_key is None or key > best_key:
+            best_key, best = key, combo
+    out = {"tc": None, "bb": None, "fh": None, "tie_sets": {}, "conf": {}, "far": {}, "eligible": elig}
+    for c, w in zip(chips, best or ()):
+        if w is None:
+            continue
+        out[c] = (int(w), round(elig[c][w], 2))
+        bmax = max(elig[c].values())
+        ts = sorted((g, round(v, 2)) for g, v in elig[c].items() if v >= bmax - float(band) - 1e-9)
+        out["tie_sets"][c] = ts
+        out["conf"][c] = "near-tie" if len(ts) > 1 else "clear"
+        out["far"][c] = int(w) not in covered
+    return out
+
+
+def m30_wildcard_filter(gains: dict | None, covered: set, band: float, window: int = 4) -> dict | None:
+    """M30(5): a Wildcard candidate whose `window`-week scored weeks are mostly far (more than half beyond coverage) stays
+    only if its gain beats the best mostly-covered candidate by more than `band` (the four-GW band, about 5). No covered
+    candidate -> unchanged. Returns a filtered copy (None passes through)."""
+    if gains is None:
+        return None
+    def _far(t):
+        wk = list(range(int(t), int(t) + int(window)))
+        return sum(1 for w in wk if w not in covered) > len(wk) / 2.0
+    cov_g = [v for t, v in gains.items() if v is not None and not _far(t)]
+    if not cov_g:
+        return dict(gains)
+    best = max(cov_g)
+    return {t: v for t, v in gains.items() if not _far(t) or (v is not None and v > best + float(band) + 1e-9)}
 
 
 def style_swap_overlay(plain: pd.DataFrame, styled: pd.DataFrame, window_cols: list) -> tuple[list, float]:

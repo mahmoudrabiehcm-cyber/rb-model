@@ -6,7 +6,7 @@ captaincy and chip timing. It is built to help any team; it is not tuned to one 
 
 - Model document: FPL Maverick v6.13 (project PDF). The app follows its rules; departures are named in the app text
   and in `logs/LOG_APP.md`.
-- Current release: **Release 2, Patch 1** (badge "r2 patch 1"). Release 1 ended at Patch 117l. The full history is
+- Current release: **Release 2, Patch 2** (badge "r2 patch 2"). Release 1 ended at Patch 117l. The full history is
   the `PATCH_VERSION` string at the top of `app.py`.
 - How to host it: see `DEPLOY.md`.
 
@@ -26,7 +26,7 @@ Sidebar: team, style profile, hit stance, Locked players, Excluded players, Down
 | `data_pipeline.py` | Builds the per-player table (xPts per gameweek, clean sheets, fixture factors, sheet overrides) and the best-possible-squad solves. |
 | `fpl_engine.py` | Core formulas: xM (expected minutes), decay schedule, DEFCON, Team Rating %, margin of error (Rule #34), Wildcard trigger. |
 | `optimizer.py` | PuLP/CBC squad solver (budget, 2-5-5-3, max 3 per club; weekly XI + captain build for the Wildcard). Works on PuLP 3.x and 4.x. |
-| `recommend.py` | Transfer planner, Wildcard chain decision, chip placement on the plan, card and label text. |
+| `recommend.py` | Transfer planner, Wildcard chain decision, chip placement on the plan (model M29(2), M30 near weeks first, M31 availability by distance), card and label text. |
 | `chip_protocol.py` | Chip status per window, double/blank detection, Rule #48 Wildcard scan, Rule #49 joint chip sequence. |
 | `setpiece.py` | Set-piece role signal. |
 | `style_profiles.py` | The manager style presets (default "Calculated Maverick"). |
@@ -53,5 +53,5 @@ pip install -r requirements.txt -r requirements-dev.txt
 python3 -m pytest -q -p no:cacheprovider $(ls test_*.py | grep -v "driver\|playwright\|harness")
 ```
 
-Release 2 Patch 1: 590 tests, all passing on PuLP 3.3.2 and on PuLP 4.0.0 (with the repo's Turf Green `config.toml`).
+Release 2 Patch 2: 612 tests, all passing on PuLP 3.3.2 and on PuLP 4.0.0 (with the repo's Turf Green `config.toml`).
 Rule: write the failing test first, then the fix, then the full regression.

@@ -540,6 +540,14 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
 
     # --- xM (Step 4), once per player, independent of gw ---
     pl["_xm"] = eng.estimate_xm_vec(pl, cfg)
+    # R2 Patch 2 (model M31): the HEALTHY-baseline xM -- the same estimate with the availability flag removed (status
+    # treated as available, no chance-of-playing scaling). Used only for the xptsh_gw{n} columns that chip and
+    # Wildcard-window valuation scale by the distance factor; xpts_gw{n} and every other output are unchanged.
+    _plh = pl.copy()
+    _plh["status"] = "a"
+    _plh["chance_of_playing_next_round"] = np.nan
+    pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
+    del _plh
 
     # --- bonus (Step "p_for_bonus" override: current takes priority) ---
     bonus_cur = pd.to_numeric(pl.get("bonus_per_start_cur", pd.Series(np.nan, index=pl.index)),
@@ -606,7 +614,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     exploded = exploded.sort_values(["_pidx", "event", "_forder"], kind="mergesort",
                                      na_position="last").reset_index(drop=True)
 
-    player_cols = ["_pidx", "position", "_xm", "_comp_disc", "_xbonus_adj",
+    player_cols = ["_pidx", "position", "_xm", "_xm_h", "_comp_disc", "_xbonus_adj",
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
@@ -699,6 +707,10 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         - cfg["disc_cost"]
     xpts_fixture = eng._pyround(pd.Series(np.maximum(xpts_raw, 0.0), index=exploded.index), 3)
     xpts_fixture = xpts_fixture.where(~is_blank, 0.0)
+    # R2 Patch 2 (M31): the same fixture xPts at the healthy-baseline xM
+    _xpts_raw_h = exploded["_xm_h"].astype(float) * exploded["_comp_disc"].astype(float) * inner - cfg["disc_cost"]
+    exploded["_xpts_fixture_h"] = eng._pyround(pd.Series(np.maximum(_xpts_raw_h, 0.0), index=exploded.index), 3) \
+        .where(~is_blank, 0.0)
 
     opp_label = exploded["_opp_short"].astype(str) + " (" + np.where(is_home_true, "H", "A") + ")"
     opp_label = pd.Series(opp_label, index=exploded.index).where(~is_blank, "")
@@ -713,6 +725,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     # through the sum exactly like the scalar loop's `gw_total += res["xpts"]`
     # (plain float addition, which never silently drops a NaN to 0).
     grouped_xpts = eng._pyround(grp["_xpts_fixture"].sum(skipna=False), 3)
+    grouped_xpts_h = eng._pyround(grp["_xpts_fixture_h"].sum(skipna=False), 3)
     grouped_opp = grp["_opp_label"].agg(" / ".join)
     grouped_rank = grp["_fdr_rank"].max()
     rank_to_tier = {0: "easy", 1: "mid", 2: "hard"}
@@ -720,10 +733,12 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
 
     if gw_list:
         xpts_wide = grouped_xpts.unstack("event").reindex(index=pl["_pidx"], columns=gw_list)
+        xptsh_wide = grouped_xpts_h.unstack("event").reindex(index=pl["_pidx"], columns=gw_list)
         opp_wide = grouped_opp.unstack("event").reindex(index=pl["_pidx"], columns=gw_list)
         fdr_wide = grouped_fdr.unstack("event").reindex(index=pl["_pidx"], columns=gw_list)
     else:
         xpts_wide = pd.DataFrame(index=pl["_pidx"])
+        xptsh_wide = pd.DataFrame(index=pl["_pidx"])
         opp_wide = pd.DataFrame(index=pl["_pidx"])
         fdr_wide = pd.DataFrame(index=pl["_pidx"])
 
@@ -789,6 +804,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         out[f"xpts_gw{g}"] = xpts_wide[g].to_numpy() if g in xpts_wide.columns else 0.0
         out[f"opp_gw{g}"] = opp_wide[g].fillna("").to_numpy() if g in opp_wide.columns else ""
         out[f"fdr_gw{g}"] = fdr_wide[g].fillna("").to_numpy() if g in fdr_wide.columns else ""
+        out[f"xptsh_gw{g}"] = xptsh_wide[g].to_numpy() if g in xptsh_wide.columns else 0.0   # R2 Patch 2 (M31)
 
     if gw_list:
         # skipna=False to match Python's plain `sum(gw_xpts.values())`,
