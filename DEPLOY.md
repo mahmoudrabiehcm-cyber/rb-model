@@ -12,7 +12,7 @@ Run Model.
 | Streamlit Community Cloud hosting | Free | Streamlit's own cloud page states Community Cloud is "Totally free" for public apps, no credit card requested at signup |
 | Official FPL API (`fantasy.premierleague.com/api`) | Free | Public, no API key or account needed for the bootstrap/fixtures/entry/entry-picks/entry-history endpoints this app uses. (The API has no official published ToS — see the caveat below.) |
 | Google Fonts (Fraunces / IBM Plex) | Free | Google Fonts is a free, ad-free web font service |
-| PuLP + CBC solver (squad optimizer) | Free | Open-source, MIT-license-compatible, bundled with the `pulp` PyPI package |
+| PuLP + CBC solver (squad optimizer) | Free | Open-source. PuLP 4.0 no longer bundles CBC, so `requirements.txt` asks for `pulp[cbc]`, which installs it. The app runs on PuLP 3.x and 4.x (Release 2 Patch 1). |
 
 **One honest caveat, not a blocker:** the official FPL API has no
 published, official terms-of-service document — every FPL community tool
@@ -105,6 +105,18 @@ the link — bookmark it, share it, whatever you like.
 If step 6 fails, see Troubleshooting below before assuming something's
 architecturally wrong — the most common first-deploy issues are quick fixes.
 
+## Applying a patch (Release 2 onward)
+
+Each patch arrives as either the full set of deploy files in one zip, or only the changed files (the patch note says which
+files changed and what they sit on top of). Upload them to the repo root over the old ones and commit; Streamlit Cloud
+redeploys by itself. Then check the sidebar badge (for example "r2 patch 1").
+
+Not in patch zips, already in the repo, leave them alone:
+- `.streamlit/config.toml` (theme). It must stay inside the `.streamlit` folder.
+- `manual_overrides.csv` (your weekly sheet; you upload it yourself).
+
+Tests are never in deploy zips and never go in the repo.
+
 ## Updating the model later
 
 Edit `model_config.yaml` (a weight/threshold) or any `.py` file (new logic)
@@ -133,10 +145,11 @@ looking, which is part of how the free tier stays free.
 - **Team ID not found** — double-check the number. It's the digits in the
   URL when you open **Points** on your team on the official site
   (`fantasy.premierleague.com/entry/<this number>/event/...`).
-- **PuLP/CBC solver error in the logs** — very rare on Community Cloud
-  (CBC ships inside the `pulp` package, no separate system install needed),
-  but if it happens, the Team Rating % section will show "Not computed this
-  run" rather than crashing the whole app — everything else still works.
+- **PuLP/CBC solver error in the logs** — check `requirements.txt` still says
+  `pulp[cbc]` (PuLP 4.0 does not ship CBC without that extra). Streamlit Cloud
+  installs the newest PuLP the line allows; "Manage app" → logs shows which
+  version. A failed solve shows "Not computed this run" or a fallback label
+  rather than crashing the app.
 - **Player photos not loading** — they hotlink the official
   `resources.premierleague.com` image CDN; a broken image quietly falls
   back to an initials avatar (built into the page, no fix needed on your

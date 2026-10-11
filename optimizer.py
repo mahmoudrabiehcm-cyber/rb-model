@@ -230,7 +230,10 @@ def _solve_and_get_status(prob, solver) -> str:
     if hasattr(result, "status") and hasattr(result.status, "name"):
         status = result.status.name
     else:
-        status = pulp.LpStatus[prob.status]
+        # R2 Patch 1 (A4): pre-4.0 int status; decoded without requiring pulp.LpStatus (absent in PuLP 4.0).
+        _codes = getattr(pulp, "LpStatus", None) or {1: "Optimal", 0: "Not Solved", -1: "Infeasible",
+                                                      -2: "Unbounded", -3: "Undefined"}
+        status = _codes.get(getattr(prob, "status", result), "Undefined")
     if status == "GapLimit":
         return "Optimal"
     return status
@@ -600,7 +603,10 @@ def solve_squad_xi_weighted(players: pd.DataFrame, cfg: dict, budget: float, win
             # XI's best scorer, so a squad whose XI holds none of the top 60 of a week is not a realistic optimum; measured
             # identical squad and total on 3 pools, ~2x faster under four parallel solves.
             TOP = {c: (set(sorted(I, key=lambda i, c=c: -V[c][i])[:int(captain_k)]) if int(captain_k) > 0 else set(I)) for c in cols}
-            cap_v = {(i, c): pulp.LpVariable(f"c_{i}_{k}", lowBound=0, upBound=1) for k, c in enumerate(cols) for i in I
+            # R2 Patch 1 (A1): built with prob.add_variable (continuous, 0..1) -- the direct pulp.LpVariable(name, lowBound=..)
+            # form is rejected by PuLP 4.0, which made this whole captain-term solve return None (Wildcard fell to the
+            # "Rule #54(a) not met" ladder step). Same variables and maths as before; works on PuLP 3.x and 4.x.
+            cap_v = {(i, c): prob.add_variable(f"c_{i}_{k}", lowBound=0, upBound=1) for k, c in enumerate(cols) for i in I
                      if i in TOP[c]}
         terms = []
         for k, c in enumerate(cols):
@@ -844,7 +850,13 @@ def solve_xi_first_squad(players: pd.DataFrame, cfg: dict, budget: float, gw_col
             _b_price = bench_pool["price"].tolist()
             _b_pos = bench_pool["position"].tolist()
             _b_team = bench_pool["team"].tolist()
-            prob2 += pulp.lpSum(y[i] * v for i, v in zip(_b_idx, _b_price))
+            # R2 Patch 1 (A1): among equally cheap benches take the one with more xPts. Before, a price tie was left to the
+            # solver (PuLP 3.3.2 and 4.0 picked different players at the same price). The xPts term is scaled so its
+            # whole range stays below half a 0.1m price step, so it can never buy a dearer bench.
+            _b_x = pd.to_numeric(bench_pool[gw_col], errors="coerce").fillna(0.0).clip(lower=0.0).tolist() \
+                if gw_col in bench_pool.columns else [0.0] * len(_b_idx)
+            _eps = 0.05 / (sum(sorted(_b_x, reverse=True)[:4]) + 1.0)
+            prob2 += pulp.lpSum(y[i] * (v - _eps * xv) for i, v, xv in zip(_b_idx, _b_price, _b_x))
             prob2 += pulp.lpSum(y[i] * v for i, v in zip(_b_idx, _b_price)) <= remaining_budget
             for pos, n in need.items():
                 prob2 += pulp.lpSum(y[i] for i, p in zip(_b_idx, _b_pos) if p == pos) == n

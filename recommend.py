@@ -3781,6 +3781,63 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
     return new, changes
 
 
+def apply_chip_floor(portfolio: dict | None, floor: float) -> tuple[dict | None, dict]:
+    """R2 Patch 1 (A2): the joint sequence (chip_protocol.chip_portfolio_schedule) adds any positive chip value to its
+    total, so a chip worth less than the materiality floor was scheduled and its card said PLAY (manager screen: Free
+    Hit GW16 +1.3 against a 2.0 bar). The chain path already held such chips (override_chip_detail, Patch 112); this
+    applies the same rule to the joint sequence. Triple Captain / Bench Boost / Free Hit below `floor` are removed
+    from the assignment and listed in `held_below_floor` {chip: (gw, value)}; the Wildcard entry is never touched (it
+    has its own decision); total_gain drops by the held values. The other chips keep their weeks (their values do not
+    depend on the held chip: Free Hit reverts, Rule #49(c); one chip per week only frees a week). Input not mutated."""
+    if not portfolio:
+        return portfolio, {}
+    detail = {k: dict(v) for k, v in (portfolio.get("detail") or {}).items()}
+    assignment = dict(portfolio.get("assignment") or {})
+    held = {}
+    for key in ("3xc", "bboost", "freehit"):
+        e = detail.get(key)
+        if e is None or e.get("value") is None:
+            continue
+        if float(e["value"]) < float(floor):
+            held[key] = (int(e["gw"]), round(float(e["value"]), 2))
+            detail.pop(key, None)
+            assignment.pop(key, None)
+    out = dict(portfolio)
+    out["detail"], out["assignment"] = detail, assignment
+    if held:
+        out["total_gain"] = round(float(portfolio.get("total_gain") or 0.0) - sum(v for _, v in held.values()), 2)
+    out["held_below_floor"] = {**(portfolio.get("held_below_floor") or {}), **held}
+    return out, held
+
+
+def held_chip_sub(held: tuple, floor: float) -> str:
+    """R2 Patch 1 (A2): card sub-line for a chip held because its best week is below the materiality floor."""
+    gw, val = held
+    return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held (Rule #34)"
+
+
+def chip_window_gws(chip_rows: list, name_prefix: str, gws: list) -> list:
+    """R2 Patch 1 (A3): the weeks of `gws` inside a still-available window of the chip named `name_prefix`
+    (chip_protocol.chip_status rows). A used first-half Wildcard with the second window opening at GW20 gives []
+    for a GW7-GW18 scan."""
+    wins = [r.get("window") for r in (chip_rows or [])
+            if str(r.get("chip", "")).startswith(name_prefix) and r.get("status") == "available"]
+    wins = [w for w in wins if w and w[0] is not None and w[1] is not None]
+    return [g for g in (gws or []) if any(int(s) <= int(g) <= int(e) for s, e in wins)]
+
+
+def wildcard_scan_needed(available_types, valid_gws_by_type_items) -> bool:
+    """R2 Patch 1 (A3): the Rule #48 scan (two MILP solves per week) only when a Wildcard can actually be played in the
+    scanned weeks. `valid_gws_by_type_items` = the window-clipped weeks per chip type the app already builds; a
+    Wildcard with no clipped week (used, next window outside the scan) needs no scan. No window data = old behaviour."""
+    if "wildcard" not in set(available_types or ()):
+        return False
+    valid = dict(valid_gws_by_type_items or ())
+    if "wildcard" not in valid:
+        return True
+    return len(tuple(valid["wildcard"])) > 0
+
+
 def style_swap_overlay(plain: pd.DataFrame, styled: pd.DataFrame, window_cols: list) -> tuple[list, float]:
     """Patch 112: the Wildcard is decided and scored PLAIN (best xPts squad); a style profile only swaps tied players.
     Lists each swap (out -> in, matched by position) with its xPts cost over `window_cols` (plain minus styled,
