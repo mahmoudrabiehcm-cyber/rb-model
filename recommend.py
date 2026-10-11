@@ -4015,6 +4015,56 @@ def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | Non
             '<div class="mv-foot">Full chain → Transfers tab</div></div>')
 
 
+def gw_points_breakdown(xi_df: pd.DataFrame, bench_df: pd.DataFrame | None, col: str, cap_code=None,
+                        chip: str | None = None) -> dict:
+    """R2 Patch 6: the Pitch points tile with its parts. xi = the starting XI's plain points; cap = the captain's extra
+    (x1 more as captain, x2 more with the Triple Captain); bench = the plain full bench, Bench Boost week only.
+    Returns {"xi", "cap", "bench", "total", "cap_name", "text"}."""
+    xv = pd.to_numeric(xi_df[col], errors="coerce").fillna(0.0)
+    xi = float(xv.sum())
+    cap, cap_name = 0.0, None
+    if cap_code is not None and (xi_df["code"] == cap_code).any():
+        r = xi_df[xi_df["code"] == cap_code].iloc[0]
+        cx = float(pd.to_numeric(pd.Series([r[col]]), errors="coerce").fillna(0.0).iloc[0])
+        cap = cx * (2.0 if chip == "TC" else 1.0)
+        cap_name = str(r.get("web_name", ""))
+    bench = 0.0
+    if chip == "BB" and bench_df is not None and not bench_df.empty:
+        bench = float(pd.to_numeric(bench_df[col], errors="coerce").fillna(0.0).sum())
+    total = xi + cap + bench
+    parts = [f"{xi:.1f} XI"]
+    if cap_name:
+        parts.append(f"{cap:.1f} {'TC' if chip == 'TC' else 'C'} ({cap_name})")
+    if chip == "BB":
+        parts.append(f"{bench:.1f} bench (BB)")
+    return {"xi": xi, "cap": cap, "bench": bench, "total": total, "cap_name": cap_name,
+            "text": " + ".join(parts) + f" = {total:.1f}"}
+
+
+def captain_cost(xi_df: pd.DataFrame, col: str, chosen_code, model_code, chip: str | None = None):
+    """R2 Patch 6: points the chosen captain gains (+) or loses (-) against the model's pick this GW (x2 in the TC week).
+    None when either player is not in this XI."""
+    def _x(c):
+        r = xi_df[xi_df["code"] == c]
+        return None if r.empty else float(pd.to_numeric(r[col], errors="coerce").fillna(0.0).iloc[0])
+    a, b = _x(chosen_code), _x(model_code)
+    if a is None or b is None:
+        return None
+    return round((a - b) * (2.0 if chip == "TC" else 1.0), 4)
+
+
+def apply_week_moves(squad: pd.DataFrame, moves: list | None, pool: pd.DataFrame) -> pd.DataFrame:
+    """R2 Patch 6: the squad after one week's moves (OUT rows dropped, IN rows taken from `pool`), for the Bench Boost
+    week tile -- the incoming player counts, the outgoing one does not. No moves -> the squad unchanged."""
+    mv = [m for m in (moves or []) if m.get("out_code") is not None and m.get("in_code") is not None]
+    if not mv:
+        return squad
+    outs = {m["out_code"] for m in mv}
+    ins = [m["in_code"] for m in mv if m["in_code"] not in set(squad["code"])]
+    add = pool[pool["code"].isin(ins)].drop_duplicates(subset=["code"])
+    return pd.concat([squad[~squad["code"].isin(outs)], add], ignore_index=True, sort=False)
+
+
 def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None) -> str:
     """Patch 113: one honest sentence about how clear a chip week is. Always starts with a capital and ends with a
     full stop, so it can follow any caption without stray punctuation."""
