@@ -3961,6 +3961,60 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
     return css + '<div class="cs-wrap">' + "".join(cols) + "</div>"
 
 
+def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | None = None, chip_value=None,
+                           photo_fn=None, note: str | None = None, max_cards: int = 6, upcoming: list | None = None) -> str:
+    """R2 Patch 5: the moves panel that sits beside the pitch (same look as the pitch cards). Header = GW, chip badge
+    (with its value) and banked free-transfer dots; body = OUT -> IN photo cards with net xPts and FREE / -4, or a Roll
+    card. More than `max_cards` changes (a Wildcard / Free Hit scenario) -> the first ones plus "N changes"."""
+    import html as _h
+    moves = list(moves or [])
+    colr = {"TC": "#C98A26", "BB": "#2E9E5B", "FH": "#3B6FD8", "WC": "#7A4FD0"}.get(str(chip or ""), "#555")
+    badge = (f'<span class="cs-chip" style="background:{colr}">{_h.escape(str(chip))}'
+             + (f" {float(chip_value):+.1f}" if chip_value is not None else "") + "</span>") if chip else ""
+    dots = ""
+    if ft is not None:
+        dots = ('<div class="cs-ft">' + "".join('<span class="cs-dot on"></span>' for _ in range(int(ft)))
+                + "".join('<span class="cs-dot"></span>' for _ in range(max(0, 5 - int(ft)))) + "</div>")
+
+    def _ph(code, name):
+        ini = "".join(w[0] for w in str(name).split()[:2]).upper() or "?"
+        src = photo_fn(code) if (photo_fn and code is not None) else ""
+        return (f'<div class="mv-ph"><img src="{_h.escape(src)}" onerror="this.style.display=\'none\'">'
+                f'<span>{_h.escape(ini)}</span></div>')
+    cards = []
+    for m in moves[:max_cards]:
+        hit = float(m.get("hit_cost", 0) or 0)
+        pill = '<span class="hit-pill free">FREE</span>' if hit <= 0 else f'<span class="hit-pill hit">-{hit:.0f}</span>'
+        net = m.get("net_gain")
+        net_html = f'<span class="mv-net">{float(net):+.1f}</span>' if net is not None else ""
+        cards.append('<div class="mv-card">'
+                     f'<div class="mv-side out">{_ph(m.get("out_code"), m.get("out", ""))}'
+                     f'<div class="mv-nm">{_h.escape(str(m.get("out", "")))}</div></div>'
+                     f'<div class="mv-arrow">→{net_html}{pill}</div>'
+                     f'<div class="mv-side in">{_ph(m.get("in_code"), m.get("in", ""))}'
+                     f'<div class="mv-nm">{_h.escape(str(m.get("in", "")))}</div></div></div>')
+    if len(moves) > max_cards:
+        cards.append(f'<div class="mv-more">{len(moves)} changes in total</div>')
+    if not moves:
+        cards.append('<div class="mv-card roll"><div class="mv-roll">Roll</div>'
+                     '<div class="mv-sub">no move clears the bar</div></div>')
+    head = (f'<div class="mv-head"><span class="mv-gw">GW{int(gw)} moves</span>{badge}</div>{dots}'
+            + (f'<div class="mv-note">{_h.escape(str(note))}</div>' if note else ""))
+    if len(moves) > max_cards:
+        head = head.replace(" moves</span>", f" · {len(moves)} changes</span>", 1)
+    up = ""
+    if upcoming:
+        rows = []
+        for ug, utxt, uchip in list(upcoming)[:3]:
+            uc = {"TC": "#C98A26", "BB": "#2E9E5B", "FH": "#3B6FD8", "WC": "#7A4FD0"}.get(str(uchip or ""), "")
+            ub = f'<span class="cs-chip" style="background:{uc}">{_h.escape(str(uchip))}</span>' if uchip else ""
+            rows.append(f'<div class="mv-up"><span class="mv-up-gw">GW{int(ug)}</span>'
+                        f'<span class="mv-up-t">{_h.escape(str(utxt))}</span>{ub}</div>')
+        up = '<div class="mv-uph">Next on the plan</div>' + "".join(rows)
+    return ('<div class="mv-panel">' + head + "".join(cards) + up +
+            '<div class="mv-foot">Full chain → Transfers tab</div></div>')
+
+
 def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None) -> str:
     """Patch 113: one honest sentence about how clear a chip week is. Always starts with a capital and ends with a
     full stop, so it can follow any caption without stray punctuation."""
