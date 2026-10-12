@@ -3729,6 +3729,48 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
     return out
 
 
+def m32_fh_filter(fh_table: dict, xi_by_gw: dict, covered: set, planning_gw: int | None,
+                  bar_abs: float = 8.0, bar_pct: float = 0.14, expiry: tuple = (16, 19), expiry_min: float = 2.0,
+                  gap_band: float = 2.0) -> tuple:
+    """R2 Patch 7 -- model ruling M32 (Free Hit placement). Returns (eligible {gw: value}, info).
+    A week is eligible when (1) its Free Hit gain is at least max(`bar_abs`, `bar_pct` x that week's plan XI) and
+    (2) the gap is TEMPORARY: the mean gap of the next 2-3 weeks (those with a value) is within `gap_band` of the
+    plan's ordinary gap (median gap over all valued weeks). If no week passes and the window reaches the expiry
+    weeks (GW16-19, first chip set ends at the GW19 deadline), the best expiry week with gain >= `expiry_min` is eligible
+    (a later expiry week only if it beats the best by more than `gap_band` -- the max picks the best, so ties go early).
+    Disclosed simplification: the squad-overlap test (a) is not built -- the app holds only the Free Hit totals per week,
+    not the squads; test (b) is the temporary-gap test used."""
+    tab = {int(g): float(v) for g, v in (fh_table or {}).items() if v is not None}
+    info = {"bar": {}, "temp": {}, "expiry": False, "best_fail": None}
+    if not tab:
+        return {}, info
+    gws = sorted(tab)
+    ordinary = sorted(tab.values())[len(tab) // 2]
+    ok = {}
+    for g in gws:
+        xi = float((xi_by_gw or {}).get(g) or 0.0)
+        bar = max(float(bar_abs), float(bar_pct) * xi)
+        info["bar"][g] = round(bar, 2)
+        nxt = [tab[h] for h in gws if h > g and h in tab][:3]
+        nxt = nxt[:3] if len(nxt) >= 2 else nxt
+        temp = (not nxt) or (sum(nxt) / len(nxt) <= ordinary + float(gap_band) + 1e-9)
+        info["temp"][g] = bool(temp)
+        if tab[g] >= bar - 1e-9 and temp:
+            ok[g] = tab[g]
+    if ok:
+        return ok, info
+    fails = {g: v for g, v in tab.items()}
+    hb = max(fails, key=lambda g: (fails[g], -g))
+    info["best_fail"] = (int(hb), round(fails[hb], 2))
+    exp = {g: v for g, v in tab.items() if int(expiry[0]) <= g <= int(expiry[1]) and v >= float(expiry_min)}
+    if exp:
+        best = max(exp.values())
+        pick = min(g for g, v in exp.items() if v >= best - 1e-9)
+        info["expiry"] = True
+        return {pick: exp[pick]}, info
+    return {}, info
+
+
 def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, types, allowed, m30):
     """R2 Patch 2: chain_chip_value under model rulings M29(2)/M30/M31 (see chain_chip_value)."""
     fh_tab = m30.get("fh_ref_by_gw") if "freehit" in types else None
@@ -3747,14 +3789,35 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
             continue
         tables[slot] = {g: v[slot] for g, v in tabs.items() if v.get(slot) is not None}
     allowed_s = ({want[k]: tuple(v) for k, v in allowed.items() if k in want} if allowed else None)
-    sel = select_chip_weeks(tables, covered=set(m30.get("covered") or ()), special=set(m30.get("special") or ()),
-                            band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s,
-                            floor=m30.get("floor"))
+    m32 = None
+    _full_fh = dict(tables.get("fh") or {})
+    if tables.get("fh"):
+        elig_fh, m32 = m32_fh_filter(_full_fh, {g: v.get("xi_total") for g, v in tabs.items()},
+                                     set(m30.get("covered") or ()), m30.get("planning_gw"))
+        tables["fh"] = elig_fh
+        if not elig_fh:
+            tables.pop("fh")
+    _kw = dict(covered=set(m30.get("covered") or ()), special=set(m30.get("special") or ()),
+               band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s, floor=m30.get("floor"))
+    sel = select_chip_weeks(tables, **_kw)
+    if sel.get("fh") and len(tables) > 1:
+        # M32 displacement: Free Hit takes a week only if the joint total beats the best without it by more than 2.0
+        sel0 = select_chip_weeks({k: v for k, v in tables.items() if k != "fh"}, **_kw)
+        t1 = sum(sel[c][1] for c in ("tc", "bb", "fh") if sel.get(c))
+        t0 = sum(sel0[c][1] for c in ("tc", "bb") if sel0.get(c))
+        if t1 - t0 <= 2.0 + 1e-9:
+            sel = sel0
+            sel["fh"] = None
+            m32["displaced"] = True
+    if m32 is not None and not sel.get("fh"):
+        sel.setdefault("held", {})
+        if m32.get("best_fail"):
+            sel["held"]["fh"] = m32["best_fail"]
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
            "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
-           "held": dict(sel.get("held") or {})}
+           "held": dict(sel.get("held") or {}), "m32": m32}
     for slot in ("tc", "bb", "fh"):
-        cand = tables.get(slot) or {}
+        cand = (_full_fh if slot == "fh" else tables.get(slot)) or {}
         out[slot + "_by_gw"] = {g: round(v, 2) for g, v in cand.items()}
         pick = out.get(slot)
         out[slot + "_tie_set"] = sel["tie_sets"].get(slot, [])
@@ -4000,7 +4063,9 @@ def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | Non
                      '<div class="mv-sub">no move clears the bar</div></div>')
     head = (f'<div class="mv-head"><span class="mv-gw">GW{int(gw)} moves</span>{badge}</div>{dots}'
             + (f'<div class="mv-note">{_h.escape(str(note))}</div>' if note else ""))
-    if len(moves) > max_cards:
+    if str(chip or "") == "FH" and moves:
+        head = head.replace(f"GW{int(gw)} moves</span>", f"GW{int(gw)} · Free Hit: {len(moves)} changes</span>", 1)
+    elif len(moves) > max_cards:
         head = head.replace(" moves</span>", f" · {len(moves)} changes</span>", 1)
     up = ""
     if upcoming:
@@ -4169,9 +4234,13 @@ def apply_chip_floor(portfolio: dict | None, floor: float) -> tuple[dict | None,
     return out, held
 
 
-def held_chip_sub(held: tuple, floor: float) -> str:
-    """R2 Patch 1 (A2): card sub-line for a chip held because its best week is below the materiality floor."""
+def held_chip_sub(held: tuple, floor: float, free_hit: bool = False) -> str:
+    """R2 Patch 1 (A2): card sub-line for a chip held because its best week is below the materiality floor.
+    R2 Patch 7 (M32): the Free Hit is held against its own bar (max 8 xPts or 14% of the XI) and the temporary-gap test."""
     gw, val = held
+    if free_hit:
+        return (f"best week GW{int(gw)} is {float(val):+.1f} xPts: below the Free Hit bar (8 xPts or 14% of the XI) or "
+                f"the gap is not temporary: held for a bigger one-week gap or the GW16-19 expiry (M32)")
     return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held, re-check at next run (Rule #34)"
 
 
@@ -4388,7 +4457,7 @@ def chip_week_tables(squads_by_gw: dict, gws: list, fh_ref_by_gw: dict | None = 
         fh = None
         if fh_ref_by_gw and g in fh_ref_by_gw and fh_ref_by_gw[g] is not None:
             fh = round(max(0.0, float(fh_ref_by_gw[g]) * m31_factor(int(g) - p0 + 1) - float(best["xi"]["_adj"].sum())), 4)
-        out[g] = {"bb": bb, "tc": round(e, 4), "fh": fh,
+        out[g] = {"bb": bb, "tc": round(e, 4), "fh": fh, "xi_total": round(float(best["xi"]["_adj"].sum()), 4),
                   "tc_player": ({"gw": g, "name": str(sq.loc[top].get("web_name", "")), "code": int(sq.loc[top, "code"]),
                                  "team": sq.loc[top].get("team", ""), "xpts": round(e, 2)} if top is not None else None)}
     return out
