@@ -1187,6 +1187,8 @@ def plan_timeline_lines(weekly_plan: list | None, first_week: tuple | None = Non
         ft = wk.get("ft_banked_after")
         if wk.get("chip_played") == "wildcard":
             lines.append(f"GW{gw}: WILDCARD ({len(moves)} changes)")
+        elif wk.get("chip_played") == "freehit":
+            lines.append(f"GW{gw}: FREE HIT (squad reverts next GW)")
         elif moves:
             tail = f" ({ft} FT left)" if ft is not None else ""
             if wk.get("cap_forced"):
@@ -1817,6 +1819,23 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             total_net_gain += net_gain_wc
             sim_squad = new_squad
             ft_bank = ft_after
+            continue
+
+        # R2 Patch 8 (manager, 12 Oct 2026): a Free Hit week has unlimited TEMPORARY transfers; the original squad
+        # returns at the next deadline, so the plan squad does not change that week, no free transfer is spent and none
+        # is added (the bank is carried, as in a Wildcard week). Disclosed: "no new transfer in a chip week" is FPL's
+        # rule per the manager's own reading and FPL guides, not seen on a Free Hit week of his account yet.
+        if freehit_gw is not None and gw == freehit_gw and not (wildcard_gw is not None and gw == wildcard_gw):
+            ft_after = ft_bank
+            plan.append(f"GW{gw}: Free Hit played - one-week squad, your squad returns next GW; {ft_bank} FT carried "
+                        f"unchanged (none spent, none added).")
+            weekly_plan.append({
+                "gw": gw, "moves": [], "net_gain": 0.0,
+                "ft_available": ft_bank, "ft_used": 0, "ft_banked_after": ft_after,
+                "summary": f"GW{gw}: FREE HIT - squad reverts next GW; {ft_bank} FT carried.",
+                "data_gap_note": None, "chip_played": "freehit",
+            })
+            summary.append(f"GW{gw}: FREE HIT - squad reverts next GW; {ft_bank} FT carried.")
             continue
 
         current_codes = list(sim_squad["code"])
@@ -3972,9 +3991,11 @@ _CHIP_BADGE = {"TC": ("TC", "#C98A26"), "BB": ("BB", "#2E9E5B"), "FH": ("FH", "#
 
 
 def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_by_gw: dict | None,
-                     scores_by_gw: dict | None, gws: list) -> str:
-    """Transfer chain as a visual strip: one column per GW with the chip badge, OUT -> IN moves (or Roll), banked
-    free-transfer dots and a bar for the week's projected score. `first_week` = (gw, ["Out → In", ...], ft_after)."""
+                     scores_by_gw: dict | None, gws: list, ft_now: int | None = None) -> str:
+    """Transfer chain as a visual strip: one column per GW with the chip badge, OUT -> IN moves (or Roll), free-transfer
+    dots and a bar for the week's projected score. `first_week` = (gw, ["Out → In", ...], ft_after).
+    R2 Patch 9: the dots are the free transfers AVAILABLE that week (before its moves): the plan's `ft_available`, and
+    `ft_now` (your current count) for the first week when given; without `ft_now` the first week keeps its banked-after value."""
     import html as _h
     by = {int(w.get("gw")): w for w in (weekly_plan or []) if w.get("gw") is not None}
     sc = {int(g): float(v) for g, v in (scores_by_gw or {}).items() if v is not None}
@@ -3991,13 +4012,15 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
         moves, ft = [], None
         if first_week is not None and int(first_week[0]) == g:
             moves = [tuple(x.split(" → ", 1)) if isinstance(x, str) and " → " in x else (str(x), "") for x in (first_week[1] or [])]
-            ft = first_week[2] if len(first_week) > 2 else None
+            ft = ft_now if ft_now is not None else (first_week[2] if len(first_week) > 2 else None)
         elif g in by:
             w = by[g]
             moves = [(m.get("out", "?"), m.get("in", "?")) for m in (w.get("moves") or [])]
-            ft = w.get("ft_banked_after")
+            ft = w.get("ft_available") if w.get("ft_available") is not None else w.get("ft_banked_after")
             if w.get("chip_played") == "wildcard":
                 badge = f'<span class="cs-chip" style="background:#7A4FD0">WC</span>'
+            elif w.get("chip_played") == "freehit":
+                badge = f'<span class="cs-chip" style="background:#3B6FD8">FH</span>'
         mv = ("".join(f'<div class="cs-mv"><span class="cs-out">{_h.escape(str(o))}</span>'
                       f'<span class="cs-in">{_h.escape(str(i))}</span></div>' for o, i in moves)
               if moves else '<div class="cs-roll">Roll</div>')
