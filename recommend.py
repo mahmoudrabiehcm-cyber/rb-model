@@ -1803,11 +1803,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             pairs_wc = _pair_moves(sim_squad, new_squad, this_gw_col)
             week_moves = [{**_move_row(p, 0.0, net_gain_wc, True), "gw": gw} for p in pairs_wc]
             ft_used = 0
-            ft_after = min(transfers.MAX_BANK, ft_bank + 1)
+            ft_after = ft_bank          # R2 Patch 8: a chip week adds no new free transfer (real FPL account, 12 Oct)
             week_summary = (f"GW{gw}: WILDCARD — full squad rebuild ({len(pairs_wc)} changes) — "
                              f"net {net_gain_wc:+.1f} xPts over the remaining horizon.")
             plan.append(f"GW{gw}: Wildcard played — squad rebuilt wholesale, no free transfer drawn "
-                        f"(Rule #44), {ft_bank} FT banked → {ft_after} for GW{gw + 1} (unused-week accrual).")
+                        f"(Rule #44), {ft_bank} FT carried → {ft_after} for GW{gw + 1} (a chip week adds none).")
             weekly_plan.append({
                 "gw": gw, "moves": week_moves, "net_gain": net_gain_wc,
                 "ft_available": ft_bank, "ft_used": ft_used, "ft_banked_after": ft_after,

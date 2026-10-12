@@ -56,10 +56,13 @@ def derive_free_transfers(history_current: list[dict], chips_played: list[dict])
         # unlimited pool, not from the bank, so the bank is NEVER reset here.
         # Both branches now get the same normal +1 accrual regardless of
         # whether a Wildcard was played this GW.
-        if chip == "wildcard":
-            trace.append(f"GW{gw}: Wildcard played — bank carries forward untouched (Rule #39), "
-                          f"then gets its normal +1 accrual for GW{gw + 1} like any other week.")
-        ft = min(MAX_BANK, ft + 1)
+        # R2 Patch 8 (verified on the manager's real FPL account, 12 Oct 2026: GW3 2 moves, GW4 1, GW5 1, GW6 Wildcard
+        # -> the official app shows 1 free transfer for GW7): a chip week (Wildcard / Free Hit) adds NO new free
+        # transfer; the bank is carried forward unchanged. Replaces the Patch 26 / Rule #39 "+1 after a Wildcard" reading.
+        if chip in ("wildcard", "freehit"):
+            trace.append(f"GW{gw}: chip week - no new free transfer added; {ft} carried into GW{gw + 1}.")
+        else:
+            ft = min(MAX_BANK, ft + 1)
 
     trace.append(f"-> {ft} free transfer(s) available now (cap {MAX_BANK}).")
     return {"free_transfers": ft, "trace": trace}
