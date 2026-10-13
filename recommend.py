@@ -3864,7 +3864,9 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
         if pick and cand:
             rest = [v for g, v in cand.items() if g != pick[0]]
             out[slot + "_gap"] = round(pick[1] - max(rest), 2) if rest else None
-            b = max(cand, key=lambda k: (cand[k], k))
+            # R2 Patch 11: the chip's "own best week" is read inside the covered window (GW+0..+5), earlier week on a tie
+            _cov = {g: v for g, v in cand.items() if g in set(out.get("covered") or ())} or cand
+            b = max(_cov, key=lambda k: (round(_cov[k], 1), -k))
             out[slot + "_best"] = (b, round(cand[b], 2))
             r2 = {g: v for g, v in cand.items() if g != pick[0]}
             out[slot + "_runner"] = ((max(r2, key=lambda k: (r2[k], -k)), round(r2[max(r2, key=lambda k: (r2[k], -k))], 2))
@@ -4240,6 +4242,12 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
             old = new.get(key, {}).get("gw")
             e = dict(new.get(key, {}))
             e["gw"], e["value"] = int(gw), round(float(val), 2)
+            # R2 Patch 11 (M36): the adjusted per-week figures the plan decided on, the chip's own best week and its tie set
+            if path_chips.get(slot + "_by_gw"):
+                e["by_gw_adj"] = {int(g): float(v) for g, v in path_chips[slot + "_by_gw"].items()}
+                e["best_adj"] = path_chips.get(slot + "_best")
+                e["tie_set"] = [(int(g), float(v)) for g, v in (path_chips.get(slot + "_tie_set") or [])]
+                e["conf"] = path_chips.get(slot + "_conf")
             if key == "3xc":
                 _tp = path_chips.get("tc_player")
                 if _tp and _tp.get("gw") == int(gw):
@@ -4367,6 +4375,25 @@ def m30_from_items(items) -> dict | None:
             "planning_gw": d.get("planning_gw"), "floor": d.get("floor")}
 
 
+def m31_weight(xm) -> float:
+    """R2 Patch 11 (M31(8)): how much of the distance decay a player carries, by his healthy xM (minutes-share scale):
+    0 at xM <= 0.40, 1 at xM >= 0.70, linear between. Unknown xM -> 1.0 (the old one-curve behaviour)."""
+    try:
+        v = float(xm)
+    except (TypeError, ValueError):
+        return 1.0
+    if v != v:
+        return 1.0
+    if v >= 0.70:
+        return 1.0
+    return max(0.0, min(1.0, (v - 0.40) / 0.30))
+
+
+def m31_player_factor(f: float, xm) -> float:
+    """R2 Patch 11 (M31(8)): player factor = 1 - (1 - f(k)) x w(xM), never above 1."""
+    return min(1.0, 1.0 - (1.0 - float(f)) * m31_weight(xm))
+
+
 def m31_factor(k: int) -> float:
     """M31(1): availability factor for a week k gameweeks ahead (k = 1 = the next deadline gameweek):
     f(k) = 0.80 + 0.20 * exp(-(k-1)/3) -> 1.00, 0.94, 0.90, 0.87, 0.85, 0.84 ... floor 0.80. Estimate-tier parameters
@@ -4431,6 +4458,13 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
     ret = pd.Series([parse_return_gw(n, deadlines or {}, yr) if s in ("i", "s", "d") else None
                      for n, s in zip(news, status)], index=out.index, dtype=object)
     now_avail = chance.where(chance.notna(), np.where(status.isin(["i", "s", "u", "n"]), 0.0, 100.0)) / 100.0
+    # R2 Patch 11 (M31(8)): the decay weight follows the player's HEALTHY xM (a 'd' flag's chance removed)
+    if "xm" in out.columns:
+        _xm_raw = pd.to_numeric(out["xm"], errors="coerce")
+        _xm_h = _xm_raw.where(~((status == "d") & (chance > 0)), _xm_raw / (chance / 100.0))
+        _w = _xm_h.apply(m31_weight)
+    else:
+        _w = pd.Series(1.0, index=out.index)
     for g in gws:
         col = f"xpts_gw{g}"
         if col not in out.columns:
@@ -4450,11 +4484,11 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
             elif k <= 1:
                 av.append(float(now_avail.loc[i]))
             elif r is not None and st in ("i", "s", "d") and int(r) > int(planning_gw):
-                av.append(0.0 if int(g) < int(r) else m31_factor(int(g) - int(r) + 1))
+                av.append(0.0 if int(g) < int(r) else 1.0 - (1.0 - m31_factor(int(g) - int(r) + 1)) * float(_w.loc[i]))
             elif st in ("i", "s"):
                 av.append(0.0)
             else:
-                av.append(m31_factor(k))
+                av.append(1.0 - (1.0 - m31_factor(k)) * float(_w.loc[i]))
         av = pd.Series(av, index=out.index, dtype=float)
         out[f"avail_gw{g}"] = av
         out[hcol] = h
@@ -4557,16 +4591,30 @@ def select_chip_weeks(tables: dict, covered: set, special: set, band: float, blo
             continue
         elig[c] = e
     chips = sorted(elig)
-    best_key, best = None, None
+    # R2 Patch 11 (M36(3)): each chip takes its own best week unless they collide; on a collision maximise the pair
+    # total. Pairs whose totals are within 0.10 of the best (numerical tolerance, estimate) are tied: the pair with the
+    # smaller LARGEST per-chip regret (the chip's own best eligible value minus its value in the pair) wins, then the
+    # later commitment (Rule #49). Pairs within the single-week band of the best total form the pair tie set.
+    own_best = {c: max(elig[c].values()) for c in chips}
+    combos = []
     for combo in itertools.product(*[sorted(elig[c]) + [None] for c in chips]):
         wk = [w for w in combo if w is not None]
         if len(wk) != len(set(wk)):
             continue
         tot = round(sum(elig[c][w] for c, w in zip(chips, combo) if w is not None), 6)
-        key = (tot, sum(1 for w in wk if w in covered), tuple(sorted(wk, reverse=True)))
-        if best_key is None or key > best_key:
-            best_key, best = key, combo
-    out = {"tc": None, "bb": None, "fh": None, "tie_sets": {}, "conf": {}, "far": {}, "eligible": elig, "held": held}
+        regret = max([own_best[c] - elig[c][w] for c, w in zip(chips, combo) if w is not None] or [0.0])
+        combos.append((tot, sum(1 for w in wk if w in covered), regret, tuple(sorted(wk, reverse=True)), combo))
+    best = None
+    pair_tie = []
+    if combos:
+        top = max(c[0] for c in combos)
+        near = [c for c in combos if c[0] >= top - 0.10 - 1e-9]
+        pick = max(near, key=lambda c: (c[1], -round(c[2], 6), c[3]))
+        best = pick[4]
+        pair_tie = sorted(((c[4], round(c[0], 2), round(c[2], 2)) for c in combos if c[0] >= top - float(band) - 1e-9),
+                          key=lambda t: -t[1])
+    out = {"tc": None, "bb": None, "fh": None, "tie_sets": {}, "conf": {}, "far": {}, "eligible": elig, "held": held,
+           "pair_tie_set": [{"weeks": dict(zip(chips, cb)), "total": t, "max_regret": r} for cb, t, r in pair_tie]}
     for c, w in zip(chips, best or ()):
         if w is None:
             continue
