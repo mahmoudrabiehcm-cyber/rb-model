@@ -3854,6 +3854,7 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
            "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
            "held": dict(sel.get("held") or {}), "m32": m32}
+    out["bb_raw_by_gw"] = {g: round(float(v["bb_raw"]), 2) for g, v in tabs.items() if v.get("bb_raw") is not None}
     for slot in ("tc", "bb", "fh"):
         cand = (_full_fh if slot == "fh" else tables.get(slot)) or {}
         out[slot + "_by_gw"] = {g: round(v, 2) for g, v in cand.items()}
@@ -4179,7 +4180,120 @@ def apply_week_moves(squad: pd.DataFrame, moves: list | None, pool: pd.DataFrame
     return pd.concat([squad[~squad["code"].isin(outs)], add], ignore_index=True, sort=False)
 
 
-def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None) -> str:
+M37_Q_DEFAULT = 0.53          # P(all four bench players fit) ~ 0.85^4 (model M37(2), estimate)
+
+
+def m37_bb_flex(later: list, q: float = M37_Q_DEFAULT, v_blind: float | None = None) -> float | None:
+    """R2 Patch 12 (M37(2)): flexible Bench Boost value over the later tie-set weeks, in order.
+    later = [(gw, H_i healthy bench value), ...] ; V_flex = sum_i [prod_{j<i}(1-q)] q H_i + [prod (1-q)] V_blind.
+    V_blind (the value if no week works out) defaults to the last week's healthy value. None when `later` is empty."""
+    pts = [float(h) for _, h in later if h is not None]
+    if not pts:
+        return None
+    q = max(0.0, min(1.0, float(q)))
+    tot, miss = 0.0, 1.0
+    for h in pts:
+        tot += miss * q * h
+        miss *= (1.0 - q)
+    tot += miss * (float(v_blind) if v_blind is not None else pts[-1])
+    return tot
+
+
+def m37_bb_act(planned_gw, planning_gw, by_gw_adj: dict | None, raw_by_gw: dict | None, tie_set: list | None,
+               tc_gw=None, q: float = M37_Q_DEFAULT, expiry_gw: int = 16) -> dict | None:
+    """R2 Patch 12 (M37(3)): act-now test for the Bench Boost. Only asked when the planned week IS the current deadline
+    week. V_now = that week's adjusted value (known flags already in); V_flex = flexible value over the later covered
+    tie-set weeks (the Triple Captain week is removed, M36(3)). Play only if V_now >= V_flex, else 'wait, window'.
+    Not applied from `expiry_gw` (M32(5) expiry overrides). The 'at most 3 consecutive deferrals' limit needs memory
+    between runs and is NOT enforced here. Returns None when the rule does not apply or data is missing."""
+    try:
+        if planned_gw is None or planning_gw is None or int(planned_gw) != int(planning_gw):
+            return None
+        if int(planning_gw) >= int(expiry_gw):
+            return None
+        adj = {int(g): float(v) for g, v in (by_gw_adj or {}).items()}
+        raw = {int(g): float(v) for g, v in (raw_by_gw or {}).items()}
+        v_now = adj.get(int(planned_gw))
+        if v_now is None:
+            return None
+        later_ws = sorted(int(w) for w, _ in (tie_set or []) if int(w) > int(planned_gw) and (tc_gw is None or int(w) != int(tc_gw))
+                          and int(w) in raw)
+        later = [(w, raw[w]) for w in later_ws]
+        if not later:
+            return {"action": "play", "v_now": round(v_now, 2), "v_flex": None, "cost": None, "window": []}
+        blind = max(adj.get(w, 0.0) for w in later_ws)
+        vf = m37_bb_flex(later, q, v_blind=blind)
+        cost = v_now - vf
+        return {"action": "play" if cost >= 0 else "wait", "v_now": round(v_now, 2), "v_flex": round(vf, 2),
+                "cost": round(cost, 2), "window": later_ws, "q": q}
+    except (TypeError, ValueError):
+        return None
+
+
+def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAULT) -> dict | None:
+    """R2 Patch 12: m37_bb_act on a chain-chips dict (planned week, adjusted and raw bars, tie set, TC week)."""
+    chips = chips or {}
+    bb = chips.get("bb")
+    if not bb:
+        return None
+    tc = chips.get("tc")
+    return m37_bb_act(bb[0], planning_gw, chips.get("bb_by_gw"), chips.get("bb_raw_by_gw"), chips.get("bb_tie_set"),
+                      tc_gw=(tc[0] if tc else None), q=q)
+
+
+def m37_bb_act_text(act: dict | None) -> str:
+    if not act:
+        return ""
+    if act["v_flex"] is None:
+        return "No later tie-set week to wait for: play it now."
+    w = act["window"]
+    win = f"GW{w[0]}" if len(w) == 1 else f"GW{w[0]}-GW{w[-1]}"
+    if act["action"] == "play":
+        return (f"Act-now test (M37, estimate): playing now {act['v_now']:.1f} vs waiting {act['v_flex']:.1f} "
+                f"(window {win}); playing now is ahead by {act['cost']:.1f}.")
+    return (f"Act-now test (M37, estimate): wait, window {win}. Waiting is worth {act['v_flex']:.1f} against "
+            f"{act['v_now']:.1f} now, so playing now costs {-act['cost']:.1f} xPts (chance all four bench players fit "
+            f"{act['q']:.2f}; a bench doubt before the deadline costs nothing).")
+
+
+def m38_tc_split(chip_value, captain_pts, captain_name: str = "") -> str:
+    """R2 Patch 12 (M38): the Triple Captain card number = chip value, split into the captain's own adjusted points and
+    the cover term (chance he is out x best of the next captains). Display only."""
+    try:
+        cv, cp = float(chip_value), float(captain_pts)
+    except (TypeError, ValueError):
+        return ""
+    nm = captain_name or "Captain"
+    cover = cv - cp
+    if abs(cover) < 0.05:
+        return f"Chip gain +{cv:.1f} xPts = {nm} {cp:.1f} (no cover term: his status is confirmed)."
+    return f"Chip gain +{cv:.1f} xPts = {nm} {cp:.1f} + about {cover:.1f} cover (chance he is out x the best of the next captains)."
+
+
+def m39_cs_label(cfg: dict | None, today=None) -> str:
+    """R2 Patch 12 (M39(2)/M37(7)): the label for chip bars that use the older per-GW clean-sheet table, plus the
+    interim-sheet flag. Config-driven (chip_labels.*): the app cannot tell from the CSV itself."""
+    import datetime as _dt
+    c = ((cfg or {}).get("chip_labels") or {})
+    parts = []
+    src, d = c.get("cs_future_source"), c.get("cs_future_date")
+    if src and d:
+        try:
+            dd = _dt.date.fromisoformat(str(d))
+            td = today or _dt.date.today()
+            n = (td - dd).days
+            life = int(c.get("cs_future_expire_days", 14))
+            tag = "expired" if n > life else "estimate"
+            parts.append(f"{c.get('cs_future_weeks', 'GW8-GW10')} clean sheets: {src} {dd.day} {dd.strftime('%b')}, {tag}, "
+                         f"{n} days old.")
+        except ValueError:
+            pass
+    if c.get("sheet_interim"):
+        parts.append("Interim sheet: no news refresh (no press conferences or injury tracker yet); chip verdicts are provisional.")
+    return " ".join(parts)
+
+
+def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None, band=None) -> str:
     """Patch 113: one honest sentence about how clear a chip week is. Always starts with a capital and ends with a
     full stop, so it can follow any caption without stray punctuation."""
     if chosen is None:
@@ -4197,7 +4311,8 @@ def chip_edge_text(chosen, best, gap, conf, what, yielded_to=None, tie_set=None)
     others = [w for w, _ in (tie_set or []) if w != gw]
     if others:
         tie_txt = " Tie set (inside the band): " + ", ".join(f"GW{w}" for w in sorted(others + [gw])) + "."
-    return (f"GW{gw} is the best {what} but only {max(gap, 0.0):+.1f} xPts ahead of the next one, inside the margin of "
+    _b = f" (band {float(band):.1f})" if band is not None else ""
+    return (f"GW{gw} is the best {what} but only {max(gap, 0.0):+.1f} xPts ahead of the next one{_b}, inside the margin of "
             f"error, so treat it as low confidence." + tie_txt)
 
 
@@ -4219,7 +4334,7 @@ def chip_captain_rows(now: dict | None, planning_gw: int, wc_gw: int | None, wc_
     return rows
 
 
-def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float) -> tuple[dict, dict]:
+def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float, planning_gw_hint=None) -> tuple[dict, dict]:
     """Patch 112: swap the joint-sequence weeks of Triple Captain / Bench Boost / Free Hit for the weeks picked on the
     chain's own weekly squads (plain Wildcard rebuild + later transfers). Chips the sequence scheduled are rewritten;
     a chip it did not schedule is added only if its chain value clears `floor`. The Wildcard entry is untouched.
@@ -4248,6 +4363,8 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
                 e["best_adj"] = path_chips.get(slot + "_best")
                 e["tie_set"] = [(int(g), float(v)) for g, v in (path_chips.get(slot + "_tie_set") or [])]
                 e["conf"] = path_chips.get(slot + "_conf")
+                if slot == "bb":
+                    e["act"] = m37_bb_act_for_chain(path_chips, planning_gw_hint)
             if key == "3xc":
                 _tp = path_chips.get("tc_player")
                 if _tp and _tp.get("gw") == int(gw):
@@ -4528,6 +4645,8 @@ def chip_week_tables(squads_by_gw: dict, gws: list, fh_ref_by_gw: dict | None = 
         bench = sq[~sq["code"].isin(xi_codes)]
         bb = round(float(bench["_adj"].sum()), 4) if not bench.empty else 0.0
         v = _col_or(sq, "xptsh_gw", "xpts_gw", g)
+        # R2 Patch 12 (M37(2)): the same bench on the healthy (raw, no availability factor) value H_i
+        bb_raw = round(float(v.loc[bench.index].sum()), 4) if not bench.empty else 0.0
         p = pd.to_numeric(sq[f"avail_gw{g}"], errors="coerce").fillna(1.0) if f"avail_gw{g}" in sq.columns \
             else pd.Series(1.0, index=sq.index)
         order = v.sort_values(ascending=False).index[:3]
@@ -4539,7 +4658,7 @@ def chip_week_tables(squads_by_gw: dict, gws: list, fh_ref_by_gw: dict | None = 
         fh = None
         if fh_ref_by_gw and g in fh_ref_by_gw and fh_ref_by_gw[g] is not None:
             fh = round(max(0.0, float(fh_ref_by_gw[g]) * m31_factor(int(g) - p0 + 1) - float(best["xi"]["_adj"].sum())), 4)
-        out[g] = {"bb": bb, "tc": round(e, 4), "fh": fh, "xi_total": round(float(best["xi"]["_adj"].sum()), 4),
+        out[g] = {"bb": bb, "bb_raw": bb_raw, "tc": round(e, 4), "fh": fh, "xi_total": round(float(best["xi"]["_adj"].sum()), 4),
                   "tc_player": ({"gw": g, "name": str(sq.loc[top].get("web_name", "")), "code": int(sq.loc[top, "code"]),
                                  "team": sq.loc[top].get("team", ""), "xpts": round(e, 2)} if top is not None else None)}
     return out

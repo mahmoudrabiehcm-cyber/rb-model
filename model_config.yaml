@@ -2824,6 +2824,12 @@ setpiece_signal:
 # Patch 30 (see wildcard_trigger: below) — what stays a manager call is only
 # which single GW to actually play it on (Standing Rule #32).
 # -----------------------------------------------------------------------------
+chip_labels:        # R2 Patch 12 (M39(2), M37(7)): labels on the chip plan; the app cannot read these from the CSV, so set them by hand
+  cs_future_source: elevenify      # source of the GW8-GW10 clean-sheet cells in manual_overrides.csv
+  cs_future_date: "2026-10-08"     # its date (LOG_SHEET 13 Oct); the label counts the days from here
+  cs_future_weeks: GW8-GW10
+  cs_future_expire_days: 14        # M25 / M39: older than this -> labelled "expired", kept, not blanked
+  sheet_interim: true              # set false when the final sheet (after the press conferences) is loaded
 chip_timing:
   fh_ft_loss_xpts: 2.0   # R2 Patch 10 (M32(8), estimate): value of the free transfer a Free Hit week forfeits (M10 evidence ~2)
   bench_boost_min_double_exposure_frac: 0.25   # >= this fraction of your 15 in a double
