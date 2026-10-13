@@ -1994,7 +1994,17 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             plan.append(f"GW{gw}: Roll — no move clears the bar this week.")
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
-            week_moves = [{**r, "gw": gw} for r in _assign_move_hits(
+            # R2 Patch 10: the package's own gain for THIS gameweek next to the horizon figure (the horizon sum was
+            # read as one week: a GW8 move showing +13.9 was +0.9 that week and the rest over the next weeks).
+            _bbw = bool(bb_play_gw is not None and gw == bb_play_gw)
+            _kw = dict(bench_weight_scale=(1.0 if _bbw else bench_w), bb_full=_bbw)
+            try:
+                _wk_gain = round(opt.realized_gw_value(chosen["squad"], this_gw_col, cfg, **_kw)["total_realized"]
+                                 - opt.realized_gw_value(sim_squad, this_gw_col, cfg, **_kw)["total_realized"], 2)
+            except Exception:
+                _wk_gain = None
+            week_moves = [{**r, "gw": gw, "pkg_gw_gain": _wk_gain, "pkg_horizon_gain": chosen["net_gain"],
+                           "horizon_n": len(remaining_gws)} for r in _assign_move_hits(
                 [_move_row(p, 0.0, chosen["net_gain"], True) for p in pairs],
                 chosen.get("hit_cost", 0.0), hit_cost_per)]
             move_bits = ", ".join(
@@ -3750,8 +3760,11 @@ def chain_chip_value(squads_by_gw: dict, gws: list, cfg: dict, wc_gw: int | None
 
 def m32_fh_filter(fh_table: dict, xi_by_gw: dict, covered: set, planning_gw: int | None,
                   bar_abs: float = 8.0, bar_pct: float = 0.14, expiry: tuple = (16, 19), expiry_min: float = 2.0,
-                  gap_band: float = 2.0) -> tuple:
-    """R2 Patch 7 -- model ruling M32 (Free Hit placement). Returns (eligible {gw: value}, info).
+                  gap_band: float = 2.0, ft_loss: float = 0.0) -> tuple:
+    """R2 Patch 10 (M32(8), M35): `ft_loss` = the plan's value of the one free transfer a Free Hit week forfeits
+    (no accrual in a chip week); it is subtracted from every week's gain before the tests. 0.0 = the sensitivity
+    where a Free Hit week still adds a transfer.
+    R2 Patch 7 -- model ruling M32 (Free Hit placement). Returns (eligible {gw: value}, info).
     A week is eligible when (1) its Free Hit gain is at least max(`bar_abs`, `bar_pct` x that week's plan XI) and
     (2) the gap is TEMPORARY: the mean gap of the next 2-3 weeks (those with a value) is within `gap_band` of the
     plan's ordinary gap (median gap over all valued weeks). If no week passes and the window reaches the expiry
@@ -3759,8 +3772,8 @@ def m32_fh_filter(fh_table: dict, xi_by_gw: dict, covered: set, planning_gw: int
     (a later expiry week only if it beats the best by more than `gap_band` -- the max picks the best, so ties go early).
     Disclosed simplification: the squad-overlap test (a) is not built -- the app holds only the Free Hit totals per week,
     not the squads; test (b) is the temporary-gap test used."""
-    tab = {int(g): float(v) for g, v in (fh_table or {}).items() if v is not None}
-    info = {"bar": {}, "temp": {}, "expiry": False, "best_fail": None}
+    tab = {int(g): float(v) - float(ft_loss) for g, v in (fh_table or {}).items() if v is not None}
+    info = {"bar": {}, "temp": {}, "expiry": False, "best_fail": None, "ft_loss": float(ft_loss)}
     if not tab:
         return {}, info
     gws = sorted(tab)
@@ -3811,8 +3824,14 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     m32 = None
     _full_fh = dict(tables.get("fh") or {})
     if tables.get("fh"):
-        elig_fh, m32 = m32_fh_filter(_full_fh, {g: v.get("xi_total") for g, v in tabs.items()},
-                                     set(m30.get("covered") or ()), m30.get("planning_gw"))
+        _xi_by = {g: v.get("xi_total") for g, v in tabs.items()}
+        _ftl = float((cfg.get("chip_timing", {}) or {}).get("fh_ft_loss_xpts", 2.0))
+        elig_fh, m32 = m32_fh_filter(_full_fh, _xi_by, set(m30.get("covered") or ()), m30.get("planning_gw"),
+                                     ft_loss=_ftl)
+        # M35: whether a Free Hit week adds a transfer is unconfirmed -> also run accrual 1 (no forfeit) and label
+        # any verdict that differs.
+        _alt, _ = m32_fh_filter(_full_fh, _xi_by, set(m30.get("covered") or ()), m30.get("planning_gw"), ft_loss=0.0)
+        m32["ft_sensitivity"] = {"differs": set(_alt) != set(elig_fh), "if_accrual_1": {int(g): round(v, 2) for g, v in _alt.items()}}
         tables["fh"] = elig_fh
         if not elig_fh:
             tables.pop("fh")
@@ -4084,8 +4103,13 @@ def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | Non
     if not moves:
         cards.append('<div class="mv-card roll"><div class="mv-roll">Roll</div>'
                      '<div class="mv-sub">no move clears the bar</div></div>')
+    gain_note = ""
+    _m0 = moves[0] if moves else None
+    if _m0 and _m0.get("pkg_gw_gain") is not None and _m0.get("horizon_n"):
+        gain_note = (f'<div class="mv-note">This week {float(_m0["pkg_gw_gain"]):+.1f} · next {int(_m0["horizon_n"])} GW '
+                     f'{float(_m0.get("pkg_horizon_gain", 0) or 0):+.1f}</div>')
     head = (f'<div class="mv-head"><span class="mv-gw">GW{int(gw)} moves</span>{badge}</div>{dots}'
-            + (f'<div class="mv-note">{_h.escape(str(note))}</div>' if note else ""))
+            + (f'<div class="mv-note">{_h.escape(str(note))}</div>' if note else "") + gain_note)
     if str(chip or "") == "FH" and moves:
         head = head.replace(f"GW{int(gw)} moves</span>", f"GW{int(gw)} · Free Hit: {len(moves)} changes</span>", 1)
     elif len(moves) > max_cards:
@@ -4263,7 +4287,8 @@ def held_chip_sub(held: tuple, floor: float, free_hit: bool = False) -> str:
     gw, val = held
     if free_hit:
         return (f"best week GW{int(gw)} is {float(val):+.1f} xPts: below the Free Hit bar (8 xPts or 14% of the XI) or "
-                f"the gap is not temporary: held for a bigger one-week gap or the GW16-19 expiry (M32)")
+                f"the gap is not temporary: held for a bigger one-week gap or the GW16-19 expiry (M32). The figure is after the one "
+                f"free transfer a Free Hit week forfeits (about 2, M32(8)); the Free Hit rule is unconfirmed on a real account (M35)")
     return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held, re-check at next run (Rule #34)"
 
 

@@ -72,10 +72,12 @@ def compute_all_scalar_reference(cfg: dict, snap, players: pd.DataFrame,
                                        metric="dc",
                                        current_sample_matches=int(p.get("starts", 0) or 0))
                 p_for_bonus = p.copy()
-                p_for_bonus["bonus_per_start_hist"] = (
-                    p.get("bonus_per_start_cur") if pd.notna(p.get("bonus_per_start_cur"))
-                    else p.get("bonus_per_start_hist")
-                )
+                _bh = p.get("bonus90_hist", p.get("bonus_per_start_hist"))
+                _bc = p.get("bonus90_cur", p.get("bonus_per_start_cur"))
+                _bv = eng.blend_bonus(_bh, _bc, int(gw_list[0]) if gw_list else 1, cfg)
+                if pd.isna(_bv) and bool(p.get("bonus_any_data", False)):
+                    _bv = 0.0
+                p_for_bonus["bonus_per_start_hist"] = _bv
                 res = eng.compute_player_gw_xpts(p_for_bonus, pos, cs_pct, xm, npxg, xa,
                                                   dc90, comp_disc, cfg, override_row)
                 gw_total += res["xpts"]

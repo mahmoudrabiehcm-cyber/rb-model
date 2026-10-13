@@ -85,7 +85,24 @@ def blend_rate(historical: float, current: float, gw: int, cfg: dict, metric: st
     h_w, c_w = decay_weights(gw, cfg, metric)
     if current_sample_matches == 0 or pd.isna(current):
         return historical if not pd.isna(historical) else 0.0
-    historical = 0.0 if pd.isna(historical) else historical
+    if pd.isna(historical):
+        # R2 Patch 10 (M33): no qualifying history is NOT a rate of 0.0 - the current rate takes the full weight
+        # (the schedule's weights renormalised to the one available source). The old 0.0 fill cut a new signing's
+        # rate by the history weight (0.528 x 0.65 = 0.343).
+        return current
+    return h_w * historical + c_w * current
+
+
+def blend_bonus(historical: float, current: float, gw: int, cfg: dict):
+    """R2 Patch 10 (M34): bonus per 90 on one base. Both qualifying -> the DEFCON curve (slowest existing curve,
+    Rule #38: 45% history / 55% current at GW6-8); one -> that one alone; none -> NaN (the caller decides)."""
+    h_w, c_w = decay_weights(gw, cfg, "dc")
+    if pd.isna(historical) and pd.isna(current):
+        return float("nan")
+    if pd.isna(current):
+        return historical
+    if pd.isna(historical):
+        return current
     return h_w * historical + c_w * current
 
 
@@ -124,8 +141,19 @@ def blend_rate_vec(historical: pd.Series, current: pd.Series, gw: int, cfg: dict
     current = pd.to_numeric(current, errors="coerce")
     hist_filled = historical.fillna(0.0)
     blended = h_w * hist_filled + c_w * current
+    # R2 Patch 10 (M33): history missing -> current rate at full weight (not 0.65 x current)
+    blended = blended.where(historical.notna(), current)
     cond_no_sample = (current_sample_matches == 0) | current.isna()
     return hist_filled.where(cond_no_sample, blended)
+
+
+def blend_bonus_vec(historical: pd.Series, current: pd.Series, gw: int, cfg: dict) -> pd.Series:
+    """Vector twin of blend_bonus() (R2 Patch 10, M34); NaN stays NaN when neither source qualifies."""
+    h_w, c_w = decay_weights(gw, cfg, "dc")
+    historical = pd.to_numeric(historical, errors="coerce")
+    current = pd.to_numeric(current, errors="coerce")
+    both = h_w * historical + c_w * current
+    return both.where(historical.notna() & current.notna(), current.where(current.notna(), historical))
 
 
 def defcon_probability_vec(dc90: pd.Series, position: pd.Series, cfg: dict) -> pd.Series:

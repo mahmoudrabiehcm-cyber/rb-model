@@ -337,7 +337,9 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
     df["npxg90_cur"] = df.get("expected_goals", np.nan) / games90
     df["xa90_cur"] = df.get("expected_assists", np.nan) / games90
     df["dc90_cur"] = df.get("defensive_contribution", np.nan) / games90
-    df["bonus_per_start_cur"] = df.get("bonus", 0) / df.get("starts", np.nan).replace(0, np.nan)
+    # R2 Patch 10 (M34): bonus on ONE base - per 90 minutes, not per start (a sub's bonus over one start gave
+    # Isidor 3.0). Gated like the other rates; see the gate below.
+    df["bonus90_cur"] = df.get("bonus", 0) / games90
 
     if hist_df is not None and not hist_df.empty and "code" in hist_df.columns:
         h = hist_df[["code", "expected_goals_per_90", "expected_assists_per_90",
@@ -345,28 +347,33 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
         for c in ["expected_goals_per_90", "expected_assists_per_90",
                   "defensive_contribution_per_90", "bonus", "starts", "minutes"]:
             h[c] = pd.to_numeric(h[c], errors="coerce")
-        h["bonus_per_start_hist"] = h["bonus"] / h["starts"].replace(0, np.nan)
+        h["bonus90_hist"] = h["bonus"] / (h["minutes"] / 90.0).replace(0, np.nan)
         h = h.rename(columns={
             "expected_goals_per_90": "npxg90_hist",
             "expected_assists_per_90": "xa90_hist",
             "defensive_contribution_per_90": "dc90_hist",
             "minutes": "minutes_hist",
-        })[["code", "npxg90_hist", "xa90_hist", "dc90_hist", "bonus_per_start_hist", "minutes_hist"]]
+        })[["code", "npxg90_hist", "xa90_hist", "dc90_hist", "bonus90_hist", "minutes_hist"]]
         df = df.merge(h, on="code", how="left")
     else:
         df["npxg90_hist"] = np.nan
         df["xa90_hist"] = np.nan
         df["dc90_hist"] = np.nan
-        df["bonus_per_start_hist"] = np.nan
+        df["bonus90_hist"] = np.nan
         df["minutes_hist"] = np.nan
 
     # Standing Rule #21 / Step 2b — tiny-sample gate (the "Dowman bug" fix).
     min_min = cfg["data_quality"]["min_sample_minutes"]
-    df["hist_sample_ok"] = df["minutes_hist"].fillna(0) >= min_min
+    # R2 Patch 10 (M33(5)): the cut-off that marks last season's data as missing is its own config number
+    # (data_quality.hist_min_sample_minutes), defaulting to the same 270 minutes as before.
+    hist_min_min = cfg["data_quality"].get("hist_min_sample_minutes", min_min)
+    df["hist_sample_ok"] = df["minutes_hist"].fillna(0) >= hist_min_min
     df["cur_sample_ok"] = df.get("minutes", pd.Series(0, index=df.index)).fillna(0) >= min_min
-    for col in ["npxg90_hist", "xa90_hist", "dc90_hist"]:
+    # bonus: ungated copies are kept only to tell "no data at all" (NaN) from "data below the gate" (0.0) later
+    df["bonus_any_data"] = (df.get("minutes", pd.Series(0, index=df.index)).fillna(0) > 0) | (df["minutes_hist"].fillna(0) > 0)
+    for col in ["npxg90_hist", "xa90_hist", "dc90_hist", "bonus90_hist"]:
         df.loc[~df["hist_sample_ok"], col] = np.nan
-    for col in ["npxg90_cur", "xa90_cur", "dc90_cur"]:
+    for col in ["npxg90_cur", "xa90_cur", "dc90_cur", "bonus90_cur"]:
         df.loc[~df["cur_sample_ok"], col] = np.nan
     df["est_rescue_needed"] = ~df["hist_sample_ok"] & ~df["cur_sample_ok"]
 
@@ -380,6 +387,23 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
             if mask.any():
                 df.loc[mask, dst] = df.loc[mask, src]
                 df.loc[mask, "est_rescue_needed"] = False
+
+    # R2 Patch 10 (M33(3), M28): sample tags. "no qualifying history" = last season's rate was discarded (below the
+    # gate or no row, and no dated rescue value) while this season's sample qualifies, so the rate rests on the
+    # current season alone (EST). "small-sample sensitive" = fewer than 5 starts and the current npxG/90 or bonus/90
+    # more than 3x the prior-season rate (label only, no change to the number).
+    _resc = df["npxg90_rescue"].notna() if "npxg90_rescue" in df.columns else pd.Series(False, index=df.index)
+    for _rc in ("xa90_rescue", "dc90_rescue"):
+        if _rc in df.columns:
+            _resc = _resc | df[_rc].notna()
+    df["no_qual_history"] = (~df["hist_sample_ok"]) & df["cur_sample_ok"] & ~_resc
+    _starts = pd.to_numeric(df.get("starts", 0), errors="coerce").fillna(0)
+    _hn, _cn = df["npxg90_hist"], df["npxg90_cur"]
+    _hb, _cb = df["bonus90_hist"], df["bonus90_cur"]
+    df["small_sample_sensitive"] = (_starts < 5) & (((_hn > 0) & (_cn > 3 * _hn)) | ((_hb > 0) & (_cb > 3 * _hb)))
+    df["sample_tag"] = np.where(df["small_sample_sensitive"], "small-sample sensitive",
+                                np.where(df["no_qual_history"] & (_starts < 5), "no qualifying history; small sample",
+                                         np.where(df["no_qual_history"], "no qualifying history", "")))
 
     return df
 
@@ -549,12 +573,18 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
     del _plh
 
-    # --- bonus (Step "p_for_bonus" override: current takes priority) ---
-    bonus_cur = pd.to_numeric(pl.get("bonus_per_start_cur", pd.Series(np.nan, index=pl.index)),
-                               errors="coerce")
-    bonus_hist = pd.to_numeric(pl.get("bonus_per_start_hist", pd.Series(np.nan, index=pl.index)),
-                                errors="coerce")
-    bonus_eff = bonus_cur.where(bonus_cur.notna(), bonus_hist)
+    # --- bonus (R2 Patch 10, M34): per 90, gated at 270 minutes, blended on the DEFCON curve ---
+    # (was: current bonus / starts if any start else last season's, no gate - Isidor's 3 sub-earned points over
+    # 1 start read as 3.0 per start.) Legacy column names are still read so older callers keep working.
+    bonus_cur = pd.to_numeric(pl["bonus90_cur"] if "bonus90_cur" in pl.columns else
+                               pl.get("bonus_per_start_cur", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    bonus_hist = pd.to_numeric(pl["bonus90_hist"] if "bonus90_hist" in pl.columns else
+                                pl.get("bonus_per_start_hist", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    _bonus_gw = int(gw_list[0]) if gw_list else 1
+    bonus_eff = eng.blend_bonus_vec(bonus_hist, bonus_cur, _bonus_gw, cfg)
+    if "bonus_any_data" in pl.columns:
+        # data exists but nothing qualifies (tiny samples only): no weight on noise -> 0.0, not NaN (M33(2c)).
+        bonus_eff = bonus_eff.where(bonus_eff.notna() | ~pl["bonus_any_data"].fillna(False).astype(bool), 0.0)
     bps_profile_col = pl.get("bps_profile", pd.Series(np.nan, index=pl.index))
     bps_mult_table = cfg["bps_profile_multiplier"]
     bps_mult = bps_profile_col.apply(lambda v: eng._bps_mult_lookup(v, bps_mult_table))
@@ -789,6 +819,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "net_transfers_event": net_transfers.values,
         "xm": eng._pyround(pl["_xm"], 3).values,
         "est_rescue_needed": pl.get("est_rescue_needed", pd.Series(False, index=pl.index)).fillna(False).astype(bool).values,
+        "sample_tag": pl.get("sample_tag", pd.Series("", index=pl.index)).fillna("").astype(str).values,
         "setpiece_flag": (pl["_sp_mult_ref"] > 1.001).values,
         "setpiece_multiplier": eng._pyround(pl["_sp_mult_ref"].astype(float), 3).values,
     })

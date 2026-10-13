@@ -1002,12 +1002,13 @@ def _bench_autosub_total(squad: pd.DataFrame, xi: pd.DataFrame, gw_col: str, xm_
     return total
 
 
+BB_FULL_CREDIT = True   # SCRATCH switch
 _RGV_MEMO: dict = {}
 _RGV_MEMO_MAX = 200_000
 _NAN_KEY = -1.0e18
 
 
-def _rgv_key(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str, bench_weight_scale: float):
+def _rgv_key(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str, bench_weight_scale: float, bb_full: bool = False):
     """Patch 111 (performance, lossless): everything realized_gw_value() reads, as a hashable key --
     row order, index labels (the bench step filters by label), position, the GW points, `xm`, the
     scale and the two config values bench_autosub_prob() uses. NaN is mapped to a sentinel because
@@ -1016,14 +1017,14 @@ def _rgv_key(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str, bench_wei
     vals = np.nan_to_num(squad[gw_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
     xm = (np.nan_to_num(squad[xm_col].to_numpy(dtype=float, na_value=np.nan), nan=_NAN_KEY)
           if xm_col in squad.columns else None)
-    return (gw_col, xm_col, float(bench_weight_scale), bool(tcfg.get("planner_captain", False)),
+    return (gw_col, xm_col, float(bench_weight_scale), bool(bb_full), bool(tcfg.get("planner_captain", False)),
             float(tcfg.get("bench_gk_autosub_prob", 0.05)),
             tuple(tcfg.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15])), tuple(squad.index.tolist()),
             tuple(squad["position"].tolist()), tuple(vals.tolist()), None if xm is None else tuple(xm.tolist()))
 
 
 def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
-                       bench_weight_scale: float = 1.0) -> dict:
+                       bench_weight_scale: float = 1.0, bb_full: bool = False) -> dict:
     """Memoised wrapper (Patch 111): the transfer planner and the Wildcard chain comparison re-score the
     exact same squad/GW thousands of times (measured: 89% of calls were exact repeats). The result is a
     pure function of the key built by _rgv_key(), so caching is lossless (parity-tested against the
@@ -1031,13 +1032,13 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
     if squad is None or squad.empty or gw_col not in squad.columns:
         return {"xi_total": 0.0, "bench_total": 0.0, "total_realized": 0.0}
     try:
-        key = _rgv_key(squad, gw_col, cfg, xm_col, bench_weight_scale)
+        key = _rgv_key(squad, gw_col, cfg, xm_col, bench_weight_scale, bb_full)
     except Exception:
-        return _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale)
+        return _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale, bb_full)
     hit = _RGV_MEMO.get(key)
     if hit is not None:
         return dict(hit)
-    res = _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale)
+    res = _realized_gw_value_uncached(squad, gw_col, cfg, xm_col, bench_weight_scale, bb_full)
     if len(_RGV_MEMO) >= _RGV_MEMO_MAX:
         _RGV_MEMO.clear()
     _RGV_MEMO[key] = dict(res)
@@ -1045,7 +1046,7 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
 
 
 def _realized_gw_value_uncached(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str = "xm",
-                                 bench_weight_scale: float = 1.0) -> dict:
+                                 bench_weight_scale: float = 1.0, bb_full: bool = False) -> dict:
     """Standing Rule #12 (Bench Value Rule): "a bench player's value in any
     comparison is P(autosub triggers) x their points in that scenario, never
     their full 'if they started every week' xPts — and this must actually be
@@ -1074,8 +1075,12 @@ def _realized_gw_value_uncached(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_
         return empty
     xi = xi_result["xi"]
     xi_total = float(xi_result["total"])
-    bench_total = _bench_autosub_total(squad, xi, gw_col, xm_col, cfg)
-    bench_total *= bench_weight_scale
+    if bb_full:
+        # SCRATCH (BB credit): in the Bench Boost week every bench player scores, so the bench counts in full
+        bench_total = float(pd.to_numeric(squad[~squad.index.isin(xi.index)][gw_col], errors="coerce").fillna(0).sum())
+    else:
+        bench_total = _bench_autosub_total(squad, xi, gw_col, xm_col, cfg)
+        bench_total *= bench_weight_scale
     if bool((cfg.get("transfer", {}) if cfg else {}).get("planner_captain", False)):
         # Patch 115 fix 2: OPT-IN sensitivity switch (default OFF = Standing Rule #31, values unchanged). ON adds the
         # XI's top scorer once, like Rule #54 asks of the Wildcard build.
@@ -1101,8 +1106,9 @@ def realized_horizon_value(squad: pd.DataFrame, gw_list: list[int], cfg: dict, x
     every other GW in `gw_list` uses `bench_weight_scale`."""
     total = 0.0
     for gw in gw_list:
+        _bb = bool(BB_FULL_CREDIT and bb_play_gw is not None and gw == bb_play_gw)
         scale = 1.0 if (bb_play_gw is not None and gw == bb_play_gw) else bench_weight_scale
-        total += realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale)["total_realized"]
+        total += realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale, bb_full=_bb)["total_realized"]
     return round(total, 2)
 
 
@@ -1121,7 +1127,8 @@ def realized_horizon_breakdown(squad: pd.DataFrame, gw_list: list[int], cfg: dic
     xi_sum, bench_sum = 0.0, 0.0
     for gw in gw_list:
         scale = 1.0 if (bb_play_gw is not None and gw == bb_play_gw) else bench_weight_scale
-        gv = realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale)
+        gv = realized_gw_value(squad, f"xpts_gw{gw}", cfg, xm_col, bench_weight_scale=scale,
+                               bb_full=bool(BB_FULL_CREDIT and bb_play_gw is not None and gw == bb_play_gw))
         xi_sum += gv["xi_total"]
         bench_sum += gv["bench_total"]
     return {"xi_total": round(xi_sum, 2), "bench_total": round(bench_sum, 2),

@@ -2666,6 +2666,10 @@ data_quality:
   # External Data Rescue (Step 2b) = populate manual_overrides.csv for that
   # player's code once a real external rate (Understat/FBref/etc.) is found.
   min_sample_minutes: 270   # ~3 full matches
+  # R2 Patch 10 (M33(5)): minutes of LAST season below which the prior-season rates are treated as MISSING (the
+  # model text's Step 2b says about 900 min / 10 starts; the app has used 270 and keeps it - the cut-off is untested
+  # between 270, 450 and 900, so it is its own number here and a backtest candidate).
+  hist_min_sample_minutes: 270
 
 xm_heuristic:
   confirmed_current_season_start_floor: 0.88   # Step 4 "xM Floor Rule"
@@ -2821,6 +2825,7 @@ setpiece_signal:
 # which single GW to actually play it on (Standing Rule #32).
 # -----------------------------------------------------------------------------
 chip_timing:
+  fh_ft_loss_xpts: 2.0   # R2 Patch 10 (M32(8), estimate): value of the free transfer a Free Hit week forfeits (M10 evidence ~2)
   bench_boost_min_double_exposure_frac: 0.25   # >= this fraction of your 15 in a double
   free_hit_min_blank_exposure_frac: 0.35        # >= this fraction of your 15 in a blank
   # LEGACY / SUPERSEDED (Patch 30) — these two drove the old pre-v6.4
