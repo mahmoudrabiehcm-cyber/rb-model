@@ -3838,6 +3838,27 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     _kw = dict(covered=set(m30.get("covered") or ()), special=set(m30.get("special") or ()),
                band=float(m30.get("band", 2.0)), blocked=blocked, allowed=allowed_s, floor=m30.get("floor"))
     sel = select_chip_weeks(tables, **_kw)
+    # R2 Patch 13 (M37(3) + manager): if the Bench Boost act-now test says WAIT, the plan is re-paired with the Bench
+    # Boost limited to its later weeks, so the Triple Captain is free to take its own best week (e.g. this week).
+    bb_wait = None
+    _pg = m30.get("planning_gw")
+    if tables.get("bb") and sel.get("bb") and _pg is not None:
+        _raw = {g: v.get("bb_raw") for g, v in tabs.items() if v.get("bb_raw") is not None}
+        _act0 = m37_bb_act(sel["bb"][0], _pg, tables["bb"], _raw, (sel.get("tie_sets") or {}).get("bb"), tc_gw=None)
+        if _act0 and _act0.get("action") == "wait" and _act0.get("window"):
+            _win = tuple(_act0["window"])
+            _prev = (allowed_s or {}).get("bb")
+            if _prev is not None:
+                _win = tuple(w for w in _win if w in set(_prev))
+            if _win:
+                _allowed2 = dict(allowed_s or {})
+                _allowed2["bb"] = _win
+                _kw["allowed"] = _allowed2
+                _sel2 = select_chip_weeks(tables, **_kw)
+                if _sel2.get("bb"):
+                    bb_wait = {"from_gw": int(sel["bb"][0]), "window": list(_act0["window"]), "v_now": _act0["v_now"],
+                               "v_flex": _act0["v_flex"], "cost": _act0["cost"], "q": _act0.get("q")}
+                    sel = _sel2
     if sel.get("fh") and len(tables) > 1:
         # M32 displacement: Free Hit takes a week only if the joint total beats the best without it by more than 2.0
         sel0 = select_chip_weeks({k: v for k, v in tables.items() if k != "fh"}, **_kw)
@@ -3853,7 +3874,7 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
             sel["held"]["fh"] = m32["best_fail"]
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
            "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
-           "held": dict(sel.get("held") or {}), "m32": m32}
+           "held": dict(sel.get("held") or {}), "m32": m32, "bb_wait": bb_wait}
     out["bb_raw_by_gw"] = {g: round(float(v["bb_raw"]), 2) for g, v in tabs.items() if v.get("bb_raw") is not None}
     for slot in ("tc", "bb", "fh"):
         cand = (_full_fh if slot == "fh" else tables.get(slot)) or {}
@@ -4241,6 +4262,17 @@ def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAU
                       tc_gw=(tc[0] if tc else None), q=q)
 
 
+def m37_bb_wait_text(w: dict | None) -> str:
+    """R2 Patch 13: the Bench Boost was moved off this week by the act-now test; the plan was re-paired."""
+    if not w:
+        return ""
+    ws = w.get("window") or []
+    win = f"GW{ws[0]}" if len(ws) == 1 else f"GW{ws[0]}-GW{ws[-1]}"
+    return (f"Waits from GW{w['from_gw']}: playing it then is worth {w['v_now']:.1f} against {w['v_flex']:.1f} for waiting "
+            f"(window {win}, M37 estimate; chance all four bench players fit {float(w.get('q') or M37_Q_DEFAULT):.2f}). "
+            f"The plan is re-paired, so the Triple Captain can take its own best week.")
+
+
 def m37_bb_act_text(act: dict | None) -> str:
     if not act:
         return ""
@@ -4365,6 +4397,7 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
                 e["conf"] = path_chips.get(slot + "_conf")
                 if slot == "bb":
                     e["act"] = m37_bb_act_for_chain(path_chips, planning_gw_hint)
+                    e["bb_wait"] = path_chips.get("bb_wait")
             if key == "3xc":
                 _tp = path_chips.get("tc_player")
                 if _tp and _tp.get("gw") == int(gw):
