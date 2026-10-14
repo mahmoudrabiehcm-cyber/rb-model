@@ -3841,10 +3841,16 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     # R2 Patch 13 (M37(3) + manager): if the Bench Boost act-now test says WAIT, the plan is re-paired with the Bench
     # Boost limited to its later weeks, so the Triple Captain is free to take its own best week (e.g. this week).
     bb_wait = None
+    bb_wait_info = None
     _pg = m30.get("planning_gw")
     if tables.get("bb") and sel.get("bb") and _pg is not None:
         _raw = {g: v.get("bb_raw") for g, v in tabs.items() if v.get("bb_raw") is not None}
-        _act0 = m37_bb_act(sel["bb"][0], _pg, tables["bb"], _raw, (sel.get("tie_sets") or {}).get("bb"), tc_gw=None)
+        _tc_tab = {g: v for g, v in (tables.get("tc") or {}).items() if g in set(m30.get("covered") or tables["tc"])}
+        _tc_own = max(_tc_tab, key=lambda g: (round(_tc_tab[g], 1), -g)) if _tc_tab else None   # M42: TC's own best week
+        _act0 = m37_bb_act(sel["bb"][0], _pg, tables["bb"], _raw, (sel.get("tie_sets") or {}).get("bb"), tc_gw=_tc_own,
+                           **m37_act_params(cfg))
+        if _act0 and _act0.get("reason") != "wait":
+            bb_wait_info = _act0                     # not acted on (below the bar, switch off, or limit): information only
         if _act0 and _act0.get("action") == "wait" and _act0.get("window"):
             _win = tuple(_act0["window"])
             _prev = (allowed_s or {}).get("bb")
@@ -3857,7 +3863,9 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
                 _sel2 = select_chip_weeks(tables, **_kw)
                 if _sel2.get("bb"):
                     bb_wait = {"from_gw": int(sel["bb"][0]), "window": list(_act0["window"]), "v_now": _act0["v_now"],
-                               "v_flex": _act0["v_flex"], "cost": _act0["cost"], "q": _act0.get("q")}
+                               "v_flex": _act0["v_flex"], "cost": _act0["cost"], "q": _act0.get("q"),
+                               "x_wait": _act0.get("x_wait"), "min_gain": _act0.get("min_gain"),
+                               "used": _act0.get("used", 0), "limit": _act0.get("limit", 3)}
                     sel = _sel2
     if sel.get("fh") and len(tables) > 1:
         # M32 displacement: Free Hit takes a week only if the joint total beats the best without it by more than 2.0
@@ -3874,7 +3882,7 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
             sel["held"]["fh"] = m32["best_fail"]
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
            "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
-           "held": dict(sel.get("held") or {}), "m32": m32, "bb_wait": bb_wait}
+           "held": dict(sel.get("held") or {}), "m32": m32, "bb_wait": bb_wait, "bb_wait_info": bb_wait_info}
     out["bb_raw_by_gw"] = {g: round(float(v["bb_raw"]), 2) for g, v in tabs.items() if v.get("bb_raw") is not None}
     for slot in ("tc", "bb", "fh"):
         cand = (_full_fh if slot == "fh" else tables.get(slot)) or {}
@@ -4221,7 +4229,8 @@ def m37_bb_flex(later: list, q: float = M37_Q_DEFAULT, v_blind: float | None = N
 
 
 def m37_bb_act(planned_gw, planning_gw, by_gw_adj: dict | None, raw_by_gw: dict | None, tie_set: list | None,
-               tc_gw=None, q: float = M37_Q_DEFAULT, expiry_gw: int = 16) -> dict | None:
+               tc_gw=None, q: float = M37_Q_DEFAULT, expiry_gw: int = 16, min_gain: float = 1.0,
+               enabled: bool = True, used: int = 0, limit: int = 3) -> dict | None:
     """R2 Patch 12 (M37(3)): act-now test for the Bench Boost. Only asked when the planned week IS the current deadline
     week. V_now = that week's adjusted value (known flags already in); V_flex = flexible value over the later covered
     tie-set weeks (the Triple Captain week is removed, M36(3)). Play only if V_now >= V_flex, else 'wait, window'.
@@ -4241,17 +4250,44 @@ def m37_bb_act(planned_gw, planning_gw, by_gw_adj: dict | None, raw_by_gw: dict 
                           and int(w) in raw)
         later = [(w, raw[w]) for w in later_ws]
         if not later:
-            return {"action": "play", "v_now": round(v_now, 2), "v_flex": None, "cost": None, "window": []}
+            return {"action": "play", "v_now": round(v_now, 2), "v_flex": None, "cost": None, "window": [],
+                    "x_wait": None, "reason": "no_window", "min_gain": min_gain, "used": used, "limit": limit}
         blind = max(adj.get(w, 0.0) for w in later_ws)
         vf = m37_bb_flex(later, q, v_blind=blind)
         cost = v_now - vf
-        return {"action": "play" if cost >= 0 else "wait", "v_now": round(v_now, 2), "v_flex": round(vf, 2),
-                "cost": round(cost, 2), "window": later_ws, "q": q}
+        x = -cost                                    # M43: what waiting is worth, in xPts
+        if int(used) >= int(limit):
+            action, reason = "play", "limit"         # M44: forced play-now after the third deferral
+        elif not enabled:
+            action, reason = "play", "off"           # M43: information only
+        elif x >= float(min_gain) - 1e-9:
+            action, reason = "wait", "wait"
+        else:
+            action, reason = "play", "below_bar"     # M43: the highest bar stays the plan
+        return {"action": action, "v_now": round(v_now, 2), "v_flex": round(vf, 2), "cost": round(cost, 2),
+                "window": later_ws, "q": q, "x_wait": round(x, 2), "reason": reason, "min_gain": float(min_gain),
+                "used": int(used), "limit": int(limit)}
     except (TypeError, ValueError):
         return None
 
 
-def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAULT) -> dict | None:
+def m37_act_params(cfg: dict | None) -> dict:
+    """R2 Patch 14 (M43/M44): the act-now switches from model_config.yaml chip_timing (hand-kept counter)."""
+    c = ((cfg or {}).get("chip_timing") or {})
+    return {"min_gain": float(c.get("bb_deferral_min_gain", 1.0)), "enabled": bool(c.get("bb_deferral_enabled", True)),
+            "used": int(c.get("bb_deferrals_used", 0) or 0), "limit": int(c.get("bb_deferral_limit", 3))}
+
+
+def m44_counter_text(cfg: dict | None) -> str:
+    """R2 Patch 14 (M44): the hand-kept deferral count, shown so it is not forgotten."""
+    p = m37_act_params(cfg)
+    if not p["enabled"]:
+        return "Bench Boost deferral is switched off (information only)."
+    return (f"Bench Boost waits used: {p['used']} of {p['limit']} (set by hand in model_config.yaml chip_timing."
+            f"bb_deferrals_used; add 1 each time you wait).")
+
+
+def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAULT, cfg: dict | None = None) -> dict | None:
     """R2 Patch 12: m37_bb_act on a chain-chips dict (planned week, adjusted and raw bars, tie set, TC week)."""
     chips = chips or {}
     bb = chips.get("bb")
@@ -4259,7 +4295,7 @@ def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAU
         return None
     tc = chips.get("tc")
     return m37_bb_act(bb[0], planning_gw, chips.get("bb_by_gw"), chips.get("bb_raw_by_gw"), chips.get("bb_tie_set"),
-                      tc_gw=(tc[0] if tc else None), q=q)
+                      tc_gw=(tc[0] if tc else None), q=q, **m37_act_params(cfg))
 
 
 def m37_bb_wait_text(w: dict | None) -> str:
@@ -4269,7 +4305,8 @@ def m37_bb_wait_text(w: dict | None) -> str:
     ws = w.get("window") or []
     win = f"GW{ws[0]}" if len(ws) == 1 else f"GW{ws[0]}-GW{ws[-1]}"
     return (f"Waits from GW{w['from_gw']}: playing it then is worth {w['v_now']:.1f} against {w['v_flex']:.1f} for waiting "
-            f"(window {win}, M37 estimate; chance all four bench players fit {float(w.get('q') or M37_Q_DEFAULT):.2f}). "
+            f"(window {win}, +{float(w.get('x_wait') or 0):.1f} xPts, M37/M43 estimate; chance all four bench players fit "
+            f"{float(w.get('q') or M37_Q_DEFAULT):.2f}; deferral {int(w.get('used', 0)) + 1} of {w.get('limit', 3)}). "
             f"The plan is re-paired, so the Triple Captain can take its own best week.")
 
 
@@ -4281,11 +4318,23 @@ def m37_bb_act_text(act: dict | None) -> str:
     w = act["window"]
     win = f"GW{w[0]}" if len(w) == 1 else f"GW{w[0]}-GW{w[-1]}"
     if act["action"] == "play":
-        return (f"Act-now test (M37, estimate): playing now {act['v_now']:.1f} vs waiting {act['v_flex']:.1f} "
+        _x = act.get("x_wait")
+        _r = act.get("reason")
+        if _r == "limit":
+            return (f"Act-now test (M44): waiting would be worth {_x:+.1f} xPts (window {win}), but the Bench Boost has "
+                    f"already waited {act.get('used')} of {act.get('limit')} times, so it plays now.")
+        if _r == "off":
+            return (f"Act-now test (information only; bb_deferral_enabled is off): waiting would be worth {_x:+.1f} xPts "
+                    f"(window {win}); the highest bar stays the plan.")
+        if _x is not None and _x > 0:
+            return (f"Act-now test (M43, estimate): waiting would be worth {_x:+.1f} xPts (window {win}), under the "
+                    f"{float(act.get('min_gain', 1.0)):.1f} xPts needed to move the plan, so the highest bar stays the plan.")
+        return (f"Act-now test (M43, estimate): playing now {act['v_now']:.1f} vs waiting {act['v_flex']:.1f} "
                 f"(window {win}); playing now is ahead by {act['cost']:.1f}.")
-    return (f"Act-now test (M37, estimate): wait, window {win}. Waiting is worth {act['v_flex']:.1f} against "
-            f"{act['v_now']:.1f} now, so playing now costs {-act['cost']:.1f} xPts (chance all four bench players fit "
-            f"{act['q']:.2f}; a bench doubt before the deadline costs nothing).")
+    return (f"Act-now test (M43, estimate): wait, window {win}. Waiting is worth {act['v_flex']:.1f} against "
+            f"{act['v_now']:.1f} now (+{act['x_wait']:.1f}, at least {float(act.get('min_gain', 1.0)):.1f} needed), so playing "
+            f"now costs {-act['cost']:.1f} xPts (chance all four bench players fit {act['q']:.2f}; deferral "
+            f"{int(act.get('used', 0)) + 1} of {act.get('limit', 3)}; a bench doubt before the deadline costs nothing).")
 
 
 def m38_tc_split(chip_value, captain_pts, captain_name: str = "") -> str:
@@ -4366,7 +4415,7 @@ def chip_captain_rows(now: dict | None, planning_gw: int, wc_gw: int | None, wc_
     return rows
 
 
-def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float, planning_gw_hint=None) -> tuple[dict, dict]:
+def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: float, planning_gw_hint=None, cfg: dict | None = None) -> tuple[dict, dict]:
     """Patch 112: swap the joint-sequence weeks of Triple Captain / Bench Boost / Free Hit for the weeks picked on the
     chain's own weekly squads (plain Wildcard rebuild + later transfers). Chips the sequence scheduled are rewritten;
     a chip it did not schedule is added only if its chain value clears `floor`. The Wildcard entry is untouched.
@@ -4396,8 +4445,9 @@ def override_chip_detail(detail: dict | None, path_chips: dict | None, floor: fl
                 e["tie_set"] = [(int(g), float(v)) for g, v in (path_chips.get(slot + "_tie_set") or [])]
                 e["conf"] = path_chips.get(slot + "_conf")
                 if slot == "bb":
-                    e["act"] = m37_bb_act_for_chain(path_chips, planning_gw_hint)
+                    e["act"] = m37_bb_act_for_chain(path_chips, planning_gw_hint, cfg=cfg)
                     e["bb_wait"] = path_chips.get("bb_wait")
+                    e["bb_wait_info"] = path_chips.get("bb_wait_info")
             if key == "3xc":
                 _tp = path_chips.get("tc_player")
                 if _tp and _tp.get("gw") == int(gw):
@@ -4448,6 +4498,21 @@ def held_chip_sub(held: tuple, floor: float, free_hit: bool = False) -> str:
                 f"the gap is not temporary: held for a bigger one-week gap or the GW16-19 expiry (M32). The figure is after the one "
                 f"free transfer a Free Hit week forfeits (about 2, M32(8)); the Free Hit rule is unconfirmed on a real account (M35)")
     return f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the {float(floor):.1f} bar: held, re-check at next run (Rule #34)"
+
+
+def fh_sensitivity_text(m32: dict | None) -> str:
+    """R2 Patch 14 (M35(2)): show the Free Hit accrual-1 sensitivity (computed since Patch 10, not displayed until now).
+    The default plans with accrual 0 (the week forfeits a free transfer); the sensitivity assumes the week adds one."""
+    sens = (m32 or {}).get("ft_sensitivity")
+    if not sens:
+        return ""
+    alt = sens.get("if_accrual_1") or {}
+    if not alt:
+        return "If a Free Hit week did add a free transfer (M35 accrual 1), no week would clear the Free Hit bar either."
+    gw, v = max(alt.items(), key=lambda kv: (kv[1], -int(kv[0])))
+    base = "the verdict would CHANGE" if sens.get("differs") else "the verdict would not change"
+    return (f"If a Free Hit week did add a free transfer (M35 accrual 1), the best week would be GW{int(gw)} at "
+            f"{float(v):+.1f} xPts after the bar test, and {base}.")
 
 
 def chip_window_gws(chip_rows: list, name_prefix: str, gws: list) -> list:

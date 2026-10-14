@@ -2824,6 +2824,9 @@ setpiece_signal:
 # Patch 30 (see wildcard_trigger: below) — what stays a manager call is only
 # which single GW to actually play it on (Standing Rule #32).
 # -----------------------------------------------------------------------------
+shrinkage:          # R2 Patch 14 (M40/M41, backtested by the model chat): w = n/(n+k) on current 90s
+  bonus_k: 8
+  defcon_k: 5
 chip_labels:        # R2 Patch 12 (M39(2), M37(7)): labels on the chip plan; the app cannot read these from the CSV, so set them by hand
   cs_future_source: elevenify      # source of the GW8-GW10 clean-sheet cells in manual_overrides.csv
   cs_future_date: "2026-10-08"     # its date (LOG_SHEET 13 Oct); the label counts the days from here
@@ -2831,6 +2834,10 @@ chip_labels:        # R2 Patch 12 (M39(2), M37(7)): labels on the chip plan; the
   cs_future_expire_days: 14        # M25 / M39: older than this -> labelled "expired", kept, not blanked
   sheet_interim: true              # set false when the final sheet (after the press conferences) is loaded
 chip_timing:
+  bb_deferral_enabled: true     # R2 Patch 14 (M43): false = the act-now test is information only
+  bb_deferral_min_gain: 1.0     # M43 (judgment): the plan moves off the highest bar only if waiting is worth >= this many xPts
+  bb_deferral_limit: 3          # M44: after this many deferrals the Bench Boost is forced to play now
+  bb_deferrals_used: 0          # M44: YOU keep this count by hand (the app has no memory between runs); add 1 each time you wait
   fh_ft_loss_xpts: 2.0   # R2 Patch 10 (M32(8), estimate): value of the free transfer a Free Hit week forfeits (M10 evidence ~2)
   bench_boost_min_double_exposure_frac: 0.25   # >= this fraction of your 15 in a double
   free_hit_min_blank_exposure_frac: 0.35        # >= this fraction of your 15 in a blank

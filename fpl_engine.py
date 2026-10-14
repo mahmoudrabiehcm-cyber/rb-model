@@ -106,6 +106,36 @@ def blend_bonus(historical: float, current: float, gw: int, cfg: dict):
     return h_w * historical + c_w * current
 
 
+BONUS_SHRINK_K = 8.0      # R2 Patch 14 (M40): w = n / (n + 8) on current 90s (backtested by the model chat)
+DEFCON_SHRINK_K = 5.0     # R2 Patch 14 (M41): same shape, k = 5, toward the current-season positional mean
+
+
+def shrink_rate(current, n90, prior, k: float):
+    """R2 Patch 14 (M40/M41): shrink a current per-90 rate toward a prior: w = n/(n+k), value = w*cur + (1-w)*prior.
+    No current rate or no minutes -> the prior alone (NaN when the prior is NaN too)."""
+    try:
+        n = float(n90)
+    except (TypeError, ValueError):
+        n = 0.0
+    if pd.isna(current) or n <= 0 or pd.isna(n):
+        return prior
+    if pd.isna(prior):
+        return current
+    w = n / (n + float(k))
+    return w * float(current) + (1.0 - w) * float(prior)
+
+
+def shrink_rate_vec(current: pd.Series, n90: pd.Series, prior: pd.Series, k: float) -> pd.Series:
+    """Vector twin of shrink_rate()."""
+    cur = pd.to_numeric(current, errors="coerce")
+    n = pd.to_numeric(n90, errors="coerce").fillna(0.0)
+    pr = pd.to_numeric(prior, errors="coerce")
+    w = n / (n + float(k))
+    out = w * cur + (1.0 - w) * pr
+    out = out.where(cur.notna() & (n > 0) & pr.notna(), pr)
+    return out.where(~(cur.notna() & (n > 0) & pr.isna()), cur)
+
+
 def _pyround(series: pd.Series, ndigits: int) -> pd.Series:
     """Element-wise twin of Python's builtin round() -- NOT the same thing
     as numpy/pandas' own .round(), which disagrees with it on some exact

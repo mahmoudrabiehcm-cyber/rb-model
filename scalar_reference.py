@@ -68,15 +68,19 @@ def compute_all_scalar_reference(cfg: dict, snap, players: pd.DataFrame,
                 xa = eng.blend_rate(p.get("xa90_hist"), p.get("xa90_cur"), gw, cfg,
                                      metric="xa",
                                      current_sample_matches=int(p.get("starts", 0) or 0))
-                dc90 = eng.blend_rate(p.get("dc90_hist"), p.get("dc90_cur"), gw, cfg,
+                _dcc = p.get("dc90_cur_shr") if "dc90_cur_shr" in p.index else p.get("dc90_cur")   # R2 Patch 14 (M41)
+                dc90 = eng.blend_rate(p.get("dc90_hist"), _dcc, gw, cfg,
                                        metric="dc",
                                        current_sample_matches=int(p.get("starts", 0) or 0))
                 p_for_bonus = p.copy()
                 _bh = p.get("bonus90_hist", p.get("bonus_per_start_hist"))
                 _bc = p.get("bonus90_cur", p.get("bonus_per_start_cur"))
-                _bv = eng.blend_bonus(_bh, _bc, int(gw_list[0]) if gw_list else 1, cfg)
-                if pd.isna(_bv) and bool(p.get("bonus_any_data", False)):
-                    _bv = 0.0
+                if "bonus90_eff" in p.index:
+                    _bv = p.get("bonus90_eff")                  # R2 Patch 14 (M40): the shrunk rate
+                else:
+                    _bv = eng.blend_bonus(_bh, _bc, int(gw_list[0]) if gw_list else 1, cfg)
+                    if pd.isna(_bv) and bool(p.get("bonus_any_data", False)):
+                        _bv = 0.0
                 p_for_bonus["bonus_per_start_hist"] = _bv
                 res = eng.compute_player_gw_xpts(p_for_bonus, pos, cs_pct, xm, npxg, xa,
                                                   dc90, comp_disc, cfg, override_row)

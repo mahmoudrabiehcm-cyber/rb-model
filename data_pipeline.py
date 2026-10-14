@@ -340,6 +340,16 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
     # R2 Patch 10 (M34): bonus on ONE base - per 90 minutes, not per start (a sub's bonus over one start gave
     # Isidor 3.0). Gated like the other rates; see the gate below.
     df["bonus90_cur"] = df.get("bonus", 0) / games90
+    # R2 Patch 14 (M40/M41): ungated copies of the current bonus and DEFCON rates, the minutes in 90s, and the
+    # minutes-weighted current-season positional means; the shrinkage itself is applied after the history gate below.
+    df["bonus90_cur_raw"] = df["bonus90_cur"]
+    df["dc90_cur_raw"] = df["dc90_cur"]
+    df["n90_cur"] = (df.get("minutes", pd.Series(0, index=df.index)).fillna(0) / 90.0)
+    _g = pd.DataFrame({"p": df["position"], "n": df["n90_cur"], "b": pd.to_numeric(df.get("bonus", 0), errors="coerce").fillna(0.0),
+                       "d": pd.to_numeric(df.get("defensive_contribution", 0), errors="coerce").fillna(0.0)}).groupby("p").sum()
+    _den = _g["n"].replace(0, np.nan)
+    df["bonus90_pm"] = df["position"].map(_g["b"] / _den)
+    df["dc90_pm"] = df["position"].map(_g["d"] / _den)
 
     if hist_df is not None and not hist_df.empty and "code" in hist_df.columns:
         h = hist_df[["code", "expected_goals_per_90", "expected_assists_per_90",
@@ -376,6 +386,22 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
     for col in ["npxg90_cur", "xa90_cur", "dc90_cur", "bonus90_cur"]:
         df.loc[~df["cur_sample_ok"], col] = np.nan
     df["est_rescue_needed"] = ~df["hist_sample_ok"] & ~df["cur_sample_ok"]
+    # R2 Patch 14 (M40): bonus = w*current + (1-w)*prior, w = n/(n+8) on current 90s; prior = last season's rate if it
+    # qualifies (>= the history cut-off) else the current-season positional mean (else last season's positional mean,
+    # else 0). Replaces the zero-fill and the schedule weights.
+    _hb = df["bonus90_hist"]
+    _hb_pm = pd.Series(np.nan, index=df.index)
+    if "bonus" in df.columns and "minutes_hist" in df.columns:
+        _hh = pd.DataFrame({"p": df["position"], "m": df["minutes_hist"].fillna(0) / 90.0,
+                            "b": (df["bonus90_hist"].fillna(0) * df["minutes_hist"].fillna(0) / 90.0)}).groupby("p").sum()
+        _hb_pm = df["position"].map(_hh["b"] / _hh["m"].replace(0, np.nan))
+    _prior_b = _hb.fillna(df["bonus90_pm"]).fillna(_hb_pm).fillna(0.0)
+    _k_b = float((cfg.get("shrinkage") or {}).get("bonus_k", eng.BONUS_SHRINK_K))
+    df["bonus90_eff"] = eng.shrink_rate_vec(df["bonus90_cur_raw"], df["n90_cur"], _prior_b, _k_b)
+    # R2 Patch 14 (M41): DEFCON current rate shrunk toward the current-season positional mean (k = 5); the history
+    # blend on the existing curve is unchanged and UNTESTED (one season of evidence).
+    _k_d = float((cfg.get("shrinkage") or {}).get("defcon_k", eng.DEFCON_SHRINK_K))
+    df["dc90_cur_shr"] = eng.shrink_rate_vec(df["dc90_cur_raw"], df["n90_cur"], df["dc90_pm"], _k_d).where(df["n90_cur"] > 0)
 
     df = df.merge(overrides, left_on="code", right_on="player_code", how="left")
 
@@ -581,7 +607,11 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     bonus_hist = pd.to_numeric(pl["bonus90_hist"] if "bonus90_hist" in pl.columns else
                                 pl.get("bonus_per_start_hist", pd.Series(np.nan, index=pl.index)), errors="coerce")
     _bonus_gw = int(gw_list[0]) if gw_list else 1
-    bonus_eff = eng.blend_bonus_vec(bonus_hist, bonus_cur, _bonus_gw, cfg)
+    if "bonus90_eff" in pl.columns:
+        # R2 Patch 14 (M40): shrunk bonus rate (no schedule weights, no zero-fill)
+        bonus_eff = pd.to_numeric(pl["bonus90_eff"], errors="coerce")
+    else:
+        bonus_eff = eng.blend_bonus_vec(bonus_hist, bonus_cur, _bonus_gw, cfg)
     if "bonus_any_data" in pl.columns:
         # data exists but nothing qualifies (tiny samples only): no weight on noise -> 0.0, not NaN (M33(2c)).
         bonus_eff = bonus_eff.where(bonus_eff.notna() | ~pl["bonus_any_data"].fillna(False).astype(bool), 0.0)
@@ -648,10 +678,11 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
-                   "dc90_hist", "dc90_cur", "starts", "cs_pct_override",
+                   "dc90_hist", "dc90_cur", "dc90_cur_shr", "bonus90_eff", "starts", "cs_pct_override",
                    *sorted(c for c in pl.columns if re.fullmatch(r"cs_pct_gw\d+", str(c))),   # Patch 117k: per-GW sheet values
                    "penalties_order", "corners_and_indirect_freekicks_order",
                    "direct_freekicks_order"]
+    _has_dc_shr = "dc90_cur_shr" in pl.columns          # R2 Patch 14: legacy frames without the shrunk column keep dc90_cur
     for c in player_cols:
         if c not in pl.columns:
             pl[c] = np.nan
@@ -708,7 +739,8 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     npxg_raw = blended("npxg90_hist", "npxg90_cur", "npxg")
     npxg_adj, _ = setpiece.apply_to_npxg_vec(npxg_raw, exploded, exploded["event"], cfg)
     xa_blend = blended("xa90_hist", "xa90_cur", "xa")
-    dc_blend = blended("dc90_hist", "dc90_cur", "dc")
+    # R2 Patch 14 (M41): the current DEFCON rate is the shrunk one when the table carries it
+    dc_blend = blended("dc90_hist", "dc90_cur_shr" if _has_dc_shr else "dc90_cur", "dc")
 
     # Patch 83 (v6.9 Standing Rule #46, team-strength tier) -- fixture-adjust
     # goal/assist terms only (clean sheets/bonus/DEFCON/cards untouched, per
