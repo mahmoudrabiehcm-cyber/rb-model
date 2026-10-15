@@ -3363,3 +3363,7 @@ chip_extended_check:
   tc_week_source: schedule       # Patch 115 (v6.12 ruling 5): the Triple Captain premium in the planner uses the TC week of the Rule #49 harmonized schedule (chain = Patch 114: the chain's own best week)
   chain_guardrail: true          # Patch 115 (v6.12 ruling 6): Rule #52 squad-health guardrail on the chain comparison before a Wildcard week is shown
   chip_span_gws: 12   # Patch 110: BB/TC/FH windows in the extended run (Current..Current+11) -- >=4 GWs past the normal 8-GW window
+
+xm_m52:              # R2 Patch 15 (M52-M70): xM from recent minutes/starts for players with no sheet xm_override
+  enabled: true      # false = the old xM path for everyone (starts floor / starts-per-90 fallback), labelled
+  unconfirmed_below: 0.80   # M54 reading (mine): an M52/M58 xM under this is "unconfirmed" for the no-hit-on-it rule

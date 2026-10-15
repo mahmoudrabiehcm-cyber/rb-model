@@ -431,7 +431,139 @@ def build_player_table(cfg: dict, snap: fpl_data.FplSnapshot, hist_df: pd.DataFr
                                 np.where(df["no_qual_history"] & (_starts < 5), "no qualifying history; small sample",
                                          np.where(df["no_qual_history"], "no qualifying history", "")))
 
+    df = build_m52_inputs(df, snap)
     return df
+
+
+def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
+    """R2 Patch 15 (M52): per player, the minutes in his team's last up to 6 played matches (oldest first) and the starts
+    in them. Source: the live per-gameweek payloads read at load time (fpl_data.fetch_recent_start_ids). Starts: the
+    season total while the team has played 6 or fewer matches (the last 6 = all of them), else the per-match starts flag
+    when the payload carries it, else the 60-minute proxy (labelled). Without live data (mirror path, failed fetches) the
+    columns are left empty and the current xM path is used, labelled."""
+    df = df.copy()
+    df["m52_matches"] = None
+    df["m52_nst"] = np.nan
+    df["m52_nst_src"] = ""
+    fm = getattr(snap, "recent_fixture_minutes", None)
+    gm = getattr(snap, "recent_gw_minutes", None)
+    fetched = set(getattr(snap, "recent_fetched_gws", None) or [])
+    fx = getattr(snap, "fixtures", None)
+    if not fetched or fx is None or fx.empty or "event" not in fx.columns or "id" not in df.columns:
+        return df
+    f = fx.copy()
+    done = pd.Series(False, index=f.index)
+    for c in ("finished", "finished_provisional"):
+        if c in f.columns:
+            done = done | (f[c] == True)  # noqa: E712
+    f = f[done & f["event"].isin(fetched)]
+    if f.empty or not {"team_h", "team_a"} <= set(f.columns):
+        return df
+    fid_col = "id" if "id" in f.columns else None
+    team_matches = {}
+    for _, r in f.sort_values(["event"] + (["kickoff_time"] if "kickoff_time" in f.columns else []), kind="mergesort").iterrows():
+        for t in (r["team_h"], r["team_a"]):
+            team_matches.setdefault(t, []).append((int(r["event"]), r[fid_col] if fid_col else None))
+    n_events = {t: len(v) for t, v in team_matches.items()}
+    out_m, out_n, out_s = [], [], []
+    for _, p in df.iterrows():
+        pid, team = p.get("id"), p.get("team")
+        tm = (team_matches.get(team) or [])[-6:]
+        if not tm:
+            out_m.append(None); out_n.append(np.nan); out_s.append(""); continue
+        pm = (fm or {}).get(pid, {})
+        gmin = (gm or {}).get(pid, {})
+        gcount = {}
+        for ev, _fid in tm:
+            gcount[ev] = gcount.get(ev, 0) + 1
+        ms, flags, ok = [], [], True
+        for ev, fid in tm:
+            if fid is not None and fid in pm:
+                ms.append((ev, pm[fid][0])); flags.append(pm[fid][1])
+            elif gcount[ev] == 1 and ev in gmin:
+                ms.append((ev, gmin[ev])); flags.append(None)        # no per-fixture detail: the gameweek total
+            elif (fm or gm) and (pid in (fm or {}) or pid in (gm or {})) and gcount[ev] == 1:
+                ms.append((ev, 0.0)); flags.append(False)
+            elif gm is not None and pid not in (gm or {}):
+                ms.append((ev, 0.0)); flags.append(False)            # player absent from the payload: did not play
+            else:
+                ok = False
+                break
+        if not ok or not ms:
+            out_m.append(None); out_n.append(np.nan); out_s.append(""); continue
+        tot_played = n_events.get(team, 0)
+        season_starts = pd.to_numeric(p.get("starts"), errors="coerce")
+        if tot_played <= 6 and pd.notna(season_starts):
+            nst, src = float(season_starts), "official season total"
+        elif all(x is not None for x in flags):
+            nst, src = float(sum(1 for x in flags if x)), "per-match starts flag"
+        else:
+            nst, src = float(sum(1 for _e, m in ms if m >= 60)), "60-minute proxy"
+        out_m.append(ms); out_n.append(nst); out_s.append(src)
+    df["m52_matches"] = pd.Series(out_m, index=df.index, dtype=object)
+    df["m52_nst"] = out_n
+    df["m52_nst_src"] = out_s
+    return df
+
+
+def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw) -> pd.DataFrame:
+    """R2 Patch 15 (M52-M70): replace xM for players with no sheet xm_override and enough recent-match data. Sets
+    _xm (planning gameweek), _xm2 (later gameweeks), healthy twins _xm_h / _xm_h2, and _xm_src (label). Players the rule
+    cannot cover keep the current path; those whose current xM comes from the starts-per-90 fallback are labelled
+    "xM unconfirmed (starts-per-90 path)" (M52(4)). Switch: model_config.yaml xm_m52.enabled (default on)."""
+    pl = pl.copy()
+    pl["_xm2"] = pl["_xm"]
+    pl["_xm_h2"] = pl["_xm_h"]
+    pl["_xm_src"] = ""
+    pl["_xm_unconf"] = False
+    _thr = float(((cfg or {}).get("xm_m52") or {}).get("unconfirmed_below", 0.80))
+    on = bool(((cfg or {}).get("xm_m52") or {}).get("enabled", True))
+    heur = cfg["xm_heuristic"]
+    status = pl.get("status", pd.Series("a", index=pl.index)).astype(str)
+    unavailable = status.isin(heur["unavailable_statuses"])
+    cop = pd.to_numeric(pl.get("chance_of_playing_next_round", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    ov = pd.to_numeric(pl.get("xm_override", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    has_m = "m52_matches" in pl.columns
+    starts = pd.to_numeric(pl.get("starts", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    sp90 = pd.to_numeric(pl.get("starts_per_90", pd.Series(np.nan, index=pl.index)), errors="coerce")
+    rs = pl.get("recent_start", pd.Series(None, index=pl.index, dtype=object))
+    for i in pl.index:
+        if pd.notna(ov.get(i)):
+            pl.at[i, "_xm_src"] = "sheet override"
+            continue
+        res = None
+        if on and has_m and isinstance(pl.at[i, "m52_matches"], list):
+            res = eng.m52_compute(pl.at[i, "m52_matches"], pl.at[i, "m52_nst"],
+                                  eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {},
+                                  (None if "xm_dismissal_gw" not in pl.columns or pd.isna(pl.at[i, "xm_dismissal_gw"]) else int(pl.at[i, "xm_dismissal_gw"])),
+                                  (None if "starter_confirm_gw" not in pl.columns or pd.isna(pl.at[i, "starter_confirm_gw"]) else int(pl.at[i, "starter_confirm_gw"])),
+                                  planning_gw)
+        if res is None:
+            # current path: label the starts-per-90 fallback as unconfirmed
+            _rsv = rs.get(i)
+            _not_false = not (_rsv == False)      # noqa: E712  (None / NaN / True count as "not False", like estimate_xm_vec)
+            floor_only = bool(pd.notna(starts.get(i)) and starts.get(i) >= 1 and _not_false)
+            fallback = (not floor_only) and bool(pd.notna(sp90.get(i)) and sp90.get(i) > 0)
+            if fallback and float(pl.at[i, "_xm"]) > 0:
+                pl.at[i, "_xm_src"] = "xM unconfirmed (starts-per-90 path)"
+                pl.at[i, "_xm_unconf"] = True
+            elif floor_only:
+                pl.at[i, "_xm_src"] = "current path (floor)"
+            continue
+        x1h, x2h = res["x1"], res["x2"]
+        pl.at[i, "_xm_h"], pl.at[i, "_xm_h2"] = x1h, x2h
+        if bool(unavailable.get(i, False)):
+            x1, x2 = 0.0, 0.0
+        else:
+            c = cop.get(i)
+            x1 = x1h * (c / 100.0) if pd.notna(c) else x1h          # M67: the chance factor is for the next gameweek only
+            x2 = x2h
+        pl.at[i, "_xm"], pl.at[i, "_xm2"] = x1, x2
+        pl.at[i, "_xm_src"] = res["src"]
+        # M54 (my reading): an estimated xM below `unconfirmed_below`, or any exclusion / return / blend case, is unconfirmed
+        # unless a dated starter confirmation released the floor.
+        pl.at[i, "_xm_unconf"] = bool(("starter confirmed" not in res["src"]) and (x1h < _thr or res["src"] != "M52"))
+    return pl
 
 
 def price(now_cost) -> float | None:
@@ -598,6 +730,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     _plh["chance_of_playing_next_round"] = np.nan
     pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
     del _plh
+    pl = apply_m52(pl, cfg, (int(gw_list[0]) if gw_list else None))      # R2 Patch 15 (M52-M70)
 
     # --- bonus (R2 Patch 10, M34): per 90, gated at 270 minutes, blended on the DEFCON curve ---
     # (was: current bonus / starts if any start else last season's, no gate - Isidor's 3 sub-earned points over
@@ -674,7 +807,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     exploded = exploded.sort_values(["_pidx", "event", "_forder"], kind="mergesort",
                                      na_position="last").reset_index(drop=True)
 
-    player_cols = ["_pidx", "position", "_xm", "_xm_h", "_comp_disc", "_xbonus_adj",
+    player_cols = ["_pidx", "position", "_xm", "_xm_h", "_xm2", "_xm_h2", "_comp_disc", "_xbonus_adj",
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
@@ -687,6 +820,11 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         if c not in pl.columns:
             pl[c] = np.nan
     exploded = exploded.merge(pl[player_cols], on="_pidx", how="left")
+    # R2 Patch 15 (M52): the later-gameweek xM applies from the second planned gameweek on (the planning gameweek keeps _xm)
+    if gw_list:
+        _later = exploded["event"] != int(gw_list[0])
+        exploded["_xm"] = exploded["_xm"].where(~_later, exploded["_xm2"])
+        exploded["_xm_h"] = exploded["_xm_h"].where(~_later, exploded["_xm_h2"])
 
     opp_lookup = team_lookup.rename(columns={
         "_short": "_opp_short",
@@ -850,6 +988,8 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "transfers_out_event": pl.get("transfers_out_event", pd.Series(np.nan, index=pl.index)).values,
         "net_transfers_event": net_transfers.values,
         "xm": eng._pyround(pl["_xm"], 3).values,
+        "xm_src": pl["_xm_src"].fillna("").astype(str).values,
+        "xm_unconf": pl["_xm_unconf"].fillna(False).astype(bool).values,
         "est_rescue_needed": pl.get("est_rescue_needed", pd.Series(False, index=pl.index)).fillna(False).astype(bool).values,
         "sample_tag": pl.get("sample_tag", pd.Series("", index=pl.index)).fillna("").astype(str).values,
         "setpiece_flag": (pl["_sp_mult_ref"] > 1.001).values,

@@ -81,6 +81,9 @@ class FplSnapshot:
                                                  # means the signal is UNAVAILABLE this run.
     recent_start_checked_gws: Optional[list] = None
     recent_start_window: Optional[tuple] = None  # (window_start_gw, window_end_gw)
+    recent_fixture_minutes: Optional[dict] = None   # R2 Patch 15 (M52): {player id: {fixture id: (minutes, starts flag|None)}}
+    recent_gw_minutes: Optional[dict] = None        # {player id: {gw: minutes}} fallback
+    recent_fetched_gws: Optional[list] = None       # gameweeks whose live payload was read (up to 6)
     planning_gw: Optional[int] = None  # next gameweek whose deadline HASN'T
                                         # passed yet -- the one xPts
                                         # projections, transfer suggestions,
@@ -175,7 +178,7 @@ def fetch_event_live_official(gw: int) -> Optional[dict]:
         return None
 
 
-def fetch_recent_start_ids(last_completed_gw: int, window: int) -> dict:
+def fetch_recent_start_ids(last_completed_gw: int, window: int, keep_window: int = 6) -> dict:
     """Standing Rule #19 (Bench GK Verification) support — Patch 14. The xM
     Floor Rule's `confirmed_current_season_start_floor` used to trigger off
     ANY start this season (`starts >= 1`, a season-long total with no
@@ -208,7 +211,11 @@ def fetch_recent_start_ids(last_completed_gw: int, window: int) -> dict:
     started = set()
     checked_gws = []
     window_start = max(1, last_completed_gw - window + 1)
-    _gws = list(range(window_start, last_completed_gw + 1))
+    # R2 Patch 15 (M52): the same live payloads also give minutes per fixture for the last `keep_window` (6) gameweeks.
+    fetch_start = max(1, last_completed_gw - max(window, keep_window or window) + 1)
+    _gws = list(range(fetch_start, last_completed_gw + 1))
+    fixture_minutes = {}     # {player id: {fixture id: (minutes, starts flag or None)}}
+    gw_minutes = {}          # {player id: {gw: total minutes}} (fallback when a payload has no per-fixture detail)
     # R2 Patch 4 (performance, lossless): the per-GW live payloads are fetched side by side, processed in GW order.
     try:
         from concurrent.futures import ThreadPoolExecutor
@@ -223,10 +230,20 @@ def fetch_recent_start_ids(last_completed_gw: int, window: int) -> dict:
         checked_gws.append(gw)
         for el in live["elements"]:
             stats = el.get("stats", {}) or {}
-            if (stats.get("minutes", 0) or 0) >= 60:
-                started.add(el.get("id"))
-    return {"started_ids": started, "checked_gws": checked_gws,
-            "window_start_gw": window_start, "window_end_gw": last_completed_gw}
+            pid = el.get("id")
+            if gw >= window_start and (stats.get("minutes", 0) or 0) >= 60:
+                started.add(pid)
+            gw_minutes.setdefault(pid, {})[gw] = float(stats.get("minutes", 0) or 0)
+            for ex in (el.get("explain") or []):
+                fid = ex.get("fixture")
+                vals = {st.get("identifier"): st.get("value") for st in (ex.get("stats") or []) if isinstance(st, dict)}
+                if fid is None or "minutes" not in vals:
+                    continue
+                fixture_minutes.setdefault(pid, {})[fid] = (float(vals.get("minutes") or 0),
+                                                            (bool(vals.get("starts")) if "starts" in vals else None))
+    return {"started_ids": started, "checked_gws": [g for g in checked_gws if g >= window_start] or checked_gws,
+            "window_start_gw": window_start, "window_end_gw": last_completed_gw,
+            "fixture_minutes": fixture_minutes, "gw_minutes": gw_minutes, "fetched_gws": checked_gws}
 
 
 def fetch_bootstrap_chips(boot: dict) -> list:
@@ -296,6 +313,9 @@ def load_snapshot(season: str = "2026-27", recency_window: int = 4) -> FplSnapsh
                             recent_start_ids=recent["started_ids"],
                             recent_start_checked_gws=recent["checked_gws"],
                             recent_start_window=(recent["window_start_gw"], recent["window_end_gw"]),
+                            recent_fixture_minutes=recent.get("fixture_minutes"),
+                            recent_gw_minutes=recent.get("gw_minutes"),
+                            recent_fetched_gws=recent.get("fetched_gws"),
                             planning_gw=planning_gw)
 
     # ---- fallback: GitHub mirror ----

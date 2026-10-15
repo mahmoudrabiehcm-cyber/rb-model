@@ -62,6 +62,7 @@ def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: s
                 "in_code": i["code"], "in": i["web_name"], "in_team": i["team"], "in_price": i["price"],
                 "in_xpts": i.get("xpts_horizon_sum", 0.0) or 0.0, "in_gw": 0 if pd.isna(i_gw) else i_gw,
                 "in_xm": i.get("xm"),
+                "in_xm_src": i.get("xm_src"), "in_unconf": bool(i.get("xm_unconf", False)),
                 "in_eo": i.get("selected_by_percent"),
                 "setpiece_flag": bool(i.get("setpiece_flag", False)),
             })
@@ -1895,7 +1896,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             net_gain = round(new_total - baseline_total - hit_cost, 2)
             if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
                 candidates[actual_k] = {"squad": new_squad, "total": new_total, "net_gain": net_gain,
-                                         "hit_cost": hit_cost,
+                                         "hit_cost": hit_cost, "in_unconfirmed": m54_in_unconfirmed(new_squad, sim_squad),
                                          "actual_k": actual_k, "data_gap_codes": result.get("data_gap_codes", []),
                                          "baseline_total": baseline_total,
                                          "baseline_adjusted": baseline_info["adjusted"],
@@ -2008,7 +2009,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 [_move_row(p, 0.0, chosen["net_gain"], True) for p in pairs],
                 chosen.get("hit_cost", 0.0), hit_cost_per)]
             move_bits = ", ".join(
-                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
                 for p in pairs)
             hit_note = f" (−{chosen['hit_cost']:.0f} hit)" if chosen.get("hit_cost", 0.0) > 0 else " (free)"
             week_summary = (f"GW{gw}: {move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over the "
@@ -2292,6 +2293,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
                                      "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k,
+                                     "in_unconfirmed": m54_in_unconfirmed(new_squad, squad_df),
                                      "data_gap_codes": result.get("data_gap_codes", []),
                                      "baseline_total": baseline_total,
                                      "baseline_adjusted": baseline_info["adjusted"],
@@ -2500,7 +2502,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             # good net-xPts number doesn't quietly hide an incoming player
             # who isn't actually a confirmed starter.
             move_bits = ", ".join(
-                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
                 for p in pairs)
             hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
             summary.append(f"{move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over {horizon_n} GW(s).")
@@ -2791,6 +2793,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         if actual_k not in candidates or net_gain > candidates[actual_k]["net_gain"]:
             candidates[actual_k] = {"squad": new_squad, "total": new_total,
                                      "hit_cost": hit_cost, "net_gain": net_gain, "actual_k": actual_k,
+                                     "in_unconfirmed": m54_in_unconfirmed(new_squad, squad_df),
                                      "data_gap_codes": result.get("data_gap_codes", [])}
 
     if not candidates:
@@ -2820,7 +2823,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         pairs = _pair_moves(squad_df, cheapest["squad"], this_gw_col)
         moves = [_move_row(p, cheapest["hit_cost"], cheapest["net_gain"], False) for p in pairs]
         move_bits = ", ".join(
-            f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+            f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
             for p in pairs)
         summary = [f"No hit-free way to add this player this run — your sidebar stance is 'No hits', and every "
                     f"legal route found needs at least a {cheapest['hit_cost']:.0f}-pt hit.",
@@ -2847,7 +2850,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
     moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], clears) for p in pairs]
     move_bits = ", ".join(
-        f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg)}"
+        f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
         for p in pairs)
     hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
     verdict_note = ("clears its bar — a genuine improvement" if clears else
@@ -2948,7 +2951,7 @@ def _xm_tier(xm: float | None, cfg: dict | None = None) -> str | None:
     return "risk"
 
 
-def _xm_badge(xm: float | None, cfg: dict | None = None) -> str:
+def _xm_badge(xm: float | None, cfg: dict | None = None, unconf: bool = False) -> str:
     """Patch 33 (manager report: a transfer's xPts already bakes in expected
     minutes via `xm`, but that was never disclosed next to the recommendation
     itself, so a rotation risk masquerading as a good net-xPts number was
@@ -2962,7 +2965,9 @@ def _xm_badge(xm: float | None, cfg: dict | None = None) -> str:
     cls = {"nailed": "nailed", "rotation": "rotation", "risk": "risk"}[tier]
     return (f' <span class="xm-badge {cls}" title="Expected-minutes multiplier (xM) {xm:.2f} — already priced '
             f'into this player\'s xPts above, shown here so rotation risk isn\'t hidden behind a good net number.">'
-            f'xM {xm:.2f} {label}</span>')
+            f'xM {xm:.2f} {label}</span>' + (' <span class="xm-badge risk" title="R2 Patch 15 (M52(4)/M54): this xM is an estimate '
+            'from recent minutes, not a confirmed start. No -4 hit may rest on this player; re-check after the press conferences.">'
+            'xM unconfirmed</span>' if unconf else ''))
 
 
 def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: list[int], cfg: dict,
@@ -3436,7 +3441,7 @@ def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dic
         "out": p["out"], "out_code": p["out_code"], "out_team": p["out_team"], "out_price": p["out_price"],
         "out_xm": p.get("out_xm"),
         "in": p["in"], "in_code": p["in_code"], "in_team": p["in_team"], "in_price": p["in_price"],
-        "in_xm": p.get("in_xm"),
+        "in_xm": p.get("in_xm"), "in_xm_src": p.get("in_xm_src"), "in_unconf": bool(p.get("in_unconf", False)),
         "position": p["position"],
         "xpts_gain": round(p["in_xpts"] - p["out_xpts"], 2),
         "xpts_gain_this_gw": round(p["in_gw"] - p["out_gw"], 2),
@@ -3935,6 +3940,19 @@ def merge_path_held(portfolio: dict | None, path_chips: dict | None) -> dict | N
 # R2 Patch 4 -- model rulings M10 (marginal hit gate), M29(5) (no-Wildcard chip-aware plan variants), M31(6) (chip
 # tables show the adjusted value) and the transfer-chain strip.
 # ---------------------------------------------------------------------------------------------------------------------
+def m54_in_unconfirmed(new_squad, old_squad) -> bool:
+    """R2 Patch 15 (M54): True when the candidate brings in a player whose xM is an estimate (pool column xm_unconf).
+    A -4 hit may not rest on one (the whole hit candidate is refused: disclosed simplification)."""
+    try:
+        if new_squad is None or old_squad is None or "xm_unconf" not in new_squad.columns:
+            return False
+        newc = set(new_squad["code"]) - set(old_squad["code"])
+        sub = new_squad[new_squad["code"].isin(newc)]
+        return bool(sub["xm_unconf"].fillna(False).astype(bool).any())
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
 def m10_hit_gate(cands: dict, k: int, ft_bank: int, threshold: float, hit_cost_per: float) -> bool:
     """M10 (Rule #13, marginal). A candidate with no hit passes (free moves keep their own bar). A candidate that pays a
     hit must (1) beat the best FREE-ONLY candidate's net gain by at least `threshold` after all hits, and (2) for every
@@ -3946,6 +3964,8 @@ def m10_hit_gate(cands: dict, k: int, ft_bank: int, threshold: float, hit_cost_p
         return False
     if float(c.get("hit_cost", 0.0) or 0.0) <= 0.0:
         return True
+    if c.get("in_unconfirmed"):        # R2 Patch 15 (M54): no -4 hit on an unconfirmed-xM target
+        return False
     free = [float(v["net_gain"]) for v in cands.values() if float(v.get("hit_cost", 0.0) or 0.0) <= 0.0]
     best_free = max(free) if free else 0.0
     if float(c["net_gain"]) - best_free < float(threshold) - 1e-9:
@@ -4678,6 +4698,8 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
         _xm_raw = pd.to_numeric(out["xm"], errors="coerce")
         _xm_h = _xm_raw.where(~((status == "d") & (chance > 0)), _xm_raw / (chance / 100.0))
         _w = _xm_h.apply(m31_weight)
+        if "xm_src" in out.columns:      # R2 Patch 15 (M52): no M31 distance factor on top of the M52 / M58 xM (my reading)
+            _w = _w.where(~out["xm_src"].astype(str).str.startswith(("M52", "M58")), 0.0)
     else:
         _w = pd.Series(1.0, index=out.index)
     for g in gws:

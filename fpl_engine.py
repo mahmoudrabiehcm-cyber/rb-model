@@ -41,13 +41,15 @@ def load_overrides(path: Path = OVERRIDES_PATH) -> pd.DataFrame:
     Missing file -> empty frame (engine falls back to automatic values)."""
     cols = ["player_code", "xm_override", "cs_pct_override", "bps_profile",
             "tenure_discount", "npxg90_rescue", "xa90_rescue", "dc90_rescue", "note"]
+    # R2 Patch 15: optional columns, read by name when the sheet has them (M52(2), M53, M58, M62)
+    _opt = ["xm_excl_gws", "xm_dismissal_gw", "starter_confirm_gw"]
     if path.exists():
         df = pd.read_csv(path)
         for c in cols:
             if c not in df.columns:
                 df[c] = pd.NA
         return df
-    return pd.DataFrame(columns=cols)
+    return pd.DataFrame(columns=cols)    # optional columns appear only when the sheet carries them
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +282,103 @@ def estimate_xm_vec(df: pd.DataFrame, cfg: dict) -> pd.Series:
     result = result.where(~unavailable, 0.0)
     result = result.where(override.isna(), override.astype(float))
     return result
+
+
+# ---------------------------------------------------------------------------
+# R2 Patch 15 (models M52-M70): xM from recent minutes and starts for players with no sheet override
+# ---------------------------------------------------------------------------
+M52_COEF = {"h1": (0.07, 0.014, 0.825), "h2": (0.11, 0.166, 0.58)}   # intercept, starts term, minutes term (estimates)
+M52_CAP = 0.88
+M58_COEF = {1: (0.555, 0.340), 2: (0.576, 0.260), 3: (0.578, 0.163), 4: (0.578, 0.163)}   # xM = a + b x pre
+M66_PRE_DEFAULT = 0.80
+
+
+def parse_xm_excl(text) -> dict:
+    """Sheet column xm_excl_gws: "5:SUSP;6:SUSP;4:INJ" -> {5: "SUSP", 6: "SUSP", 4: "INJ"}. Kind FLAG (an undated flagged
+    miss, M64) is also read. Anything unreadable is skipped; blank/NaN -> {}."""
+    out = {}
+    if text is None or (isinstance(text, float) and text != text) or str(text).strip() in ("", "nan", "<NA>"):
+        return out
+    for part in str(text).replace(",", ";").split(";"):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        g, k = part.split(":", 1)
+        try:
+            out[int(g.strip().upper().replace("GW", ""))] = k.strip().upper()
+        except ValueError:
+            continue
+    return out
+
+
+def _m52_vals(nst, E):
+    """M52 / M60 on the eligible matches E (minutes, oldest first). Returns (x_gw1, x_gw2) or None (fewer than 2)."""
+    n = len(E)
+    if n < 2:
+        return None
+    last = E[-3:]
+    s = sum(last) / (90.0 * (2 if n == 2 else 3))
+    term = min(1.0, float(nst) / float(min(6, n)))
+    a1, b1, c1 = M52_COEF["h1"]
+    a2, b2, c2 = M52_COEF["h2"]
+    clip = lambda v: float(min(max(v, 0.0), M52_CAP))
+    return clip(a1 + b1 * term + c1 * s), clip(a2 + b2 * term + c2 * s)
+
+
+def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, planning_gw=None):
+    """One player. `matches` = his team's last up to 6 played matches, oldest first, as (gw, minutes) pairs (0 = did not
+    play); `nst` = starts in those matches; `excl` = {gw: kind} from the sheet (SUSP / INJ / FLAG); `dismissal_gw` = gw of a
+    red card in a start; `confirm_gw` = gw of a dated starter confirmation (releases 0.88 for that match only, M53/M62).
+    Returns {"x1","x2","src"} (unscaled by availability) or None when the rule cannot be applied (current path)."""
+    excl = dict(excl or {})
+    ms = [(int(g), float(m)) for g, m in (matches or []) if m is not None and not (isinstance(m, float) and m != m)]
+    if not ms or nst is None or (isinstance(nst, float) and nst != nst):
+        return None
+    out = None
+    ban = sorted(g for g, k in excl.items() if k == "SUSP")
+    if dismissal_gw is not None and ban and max(ban) >= int(dismissal_gw):
+        # M58/M66/M68: return from a ban after a dismissal in a start
+        last_ban = max(ban)
+        since = [m for m in ms if m[0] > last_ban]
+        k = len(since) + 1
+        if k <= 4:
+            pre_ms = [m for m in ms if m[0] < int(dismissal_gw) and m[0] not in excl][-3:]
+            pre = (sum(m[1] for m in pre_ms) / (90.0 * len(pre_ms))) if len(pre_ms) >= 2 else M66_PRE_DEFAULT
+            a, b = M58_COEF[min(k, 4)]
+            a2, b2 = M58_COEF[min(k + 1, 4)] if k < 4 else (None, None)
+            x1 = min(M52_CAP, a + b * pre)
+            if a2 is None:
+                E = [m[1] for m in ms if m[0] not in excl]
+                v = _m52_vals(nst, E)
+                x2 = v[1] if v else x1
+            else:
+                x2 = min(M52_CAP, a2 + b2 * pre)
+            out = {"x1": x1, "x2": x2, "src": "M58 return from ban" + ("" if len(pre_ms) >= 2 else " (pre default 0.80)")}
+    if out is None:
+        E_ms = [m for m in ms if m[0] not in excl]
+        E = [m[1] for m in E_ms]
+        v = _m52_vals(nst, E)
+        if v is None:
+            return None
+        src = "M52"
+        if ban:
+            src = "M52 (suspension return, untested)"
+        # M64: an UNFLAGGED single miss (exactly one zero among the last 3, none excluded there, latest match 60+):
+        # 50/50 blend of the excluded and the non-excluded reading.
+        last3 = ms[-3:]
+        if (not excl and len(ms) >= 4 and sum(1 for m in last3 if m[1] <= 0) == 1 and ms[-1][1] >= 60):
+            E2 = [m[1] for m in ms if not (m in last3 and m[1] <= 0)]
+            v2 = _m52_vals(nst, E2)
+            if v2 is not None:
+                v = (0.5 * v[0] + 0.5 * v2[0], 0.5 * v[1] + 0.5 * v2[1])
+                src = "M52 (unflagged single miss, 50/50 blend)"
+        elif any(k == "FLAG" for k in excl.values()):
+            src = "M52 (flagged miss excluded)"
+        out = {"x1": v[0], "x2": v[1], "src": src}
+    if confirm_gw is not None and planning_gw is not None and int(confirm_gw) == int(planning_gw):
+        out["x1"] = M52_CAP
+        out["src"] += " + starter confirmed GW%d" % int(confirm_gw)
+    return out
 
 
 # ---------------------------------------------------------------------------
