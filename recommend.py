@@ -3847,13 +3847,15 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     # Boost limited to its later weeks, so the Triple Captain is free to take its own best week (e.g. this week).
     bb_wait = None
     bb_wait_info = None
+    bb_act = None
     _pg = m30.get("planning_gw")
     if tables.get("bb") and sel.get("bb") and _pg is not None:
         _raw = {g: v.get("bb_raw") for g, v in tabs.items() if v.get("bb_raw") is not None}
         _tc_tab = {g: v for g, v in (tables.get("tc") or {}).items() if g in set(m30.get("covered") or tables["tc"])}
-        _tc_own = max(_tc_tab, key=lambda g: (round(_tc_tab[g], 1), -g)) if _tc_tab else None   # M42: TC's own best week
-        _act0 = m37_bb_act(sel["bb"][0], _pg, tables["bb"], _raw, (sel.get("tie_sets") or {}).get("bb"), tc_gw=_tc_own,
-                           **m37_act_params(cfg))
+        # R2 Patch 16 (M71): ONE joint test, run once; the Triple Captain is priced per branch (no week is removed from the window)
+        _act0 = m71_bb_act(sel["bb"][0], _pg, tables["bb"], _raw, (sel.get("tie_sets") or {}).get("bb"), _tc_tab,
+                           **m71_params(cfg))
+        bb_act = _act0
         if _act0 and _act0.get("reason") != "wait":
             bb_wait_info = _act0                     # not acted on (below the bar, switch off, or limit): information only
         if _act0 and _act0.get("action") == "wait" and _act0.get("window"):
@@ -3887,7 +3889,7 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
             sel["held"]["fh"] = m32["best_fail"]
     out = {"tc": sel.get("tc"), "bb": sel.get("bb"), "fh": sel.get("fh") if fh_tab else fixed_fh,
            "tc_player": None, "tc_yield": None, "bb_yield": None, "mode": "m30", "covered": sorted(m30.get("covered") or ()),
-           "held": dict(sel.get("held") or {}), "m32": m32, "bb_wait": bb_wait, "bb_wait_info": bb_wait_info}
+           "held": dict(sel.get("held") or {}), "m32": m32, "bb_wait": bb_wait, "bb_wait_info": bb_wait_info, "bb_act": bb_act}
     out["bb_raw_by_gw"] = {g: round(float(v["bb_raw"]), 2) for g, v in tabs.items() if v.get("bb_raw") is not None}
     for slot in ("tc", "bb", "fh"):
         cand = (_full_fh if slot == "fh" else tables.get(slot)) or {}
@@ -4291,6 +4293,156 @@ def m37_bb_act(planned_gw, planning_gw, by_gw_adj: dict | None, raw_by_gw: dict 
         return None
 
 
+M71_SCALES_DEFAULT = (1.0, 0.97)       # M73/M76 (judgment): later-week values and V_blind scaled by 0.97 in the cautious grid
+M71_Q_DEFAULT = (0.45, 0.53, 0.65)     # M73 (estimate): chance that all four bench players fit
+
+
+def m71_params(cfg: dict | None) -> dict:
+    """R2 Patch 16 (M71/M73): act-now switches and the cautious grid from model_config.yaml chip_timing."""
+    c = ((cfg or {}).get("chip_timing") or {})
+    return {"min_gain": float(c.get("bb_deferral_min_gain", 1.0)), "enabled": bool(c.get("bb_deferral_enabled", True)),
+            "used": int(c.get("bb_deferrals_used", 0) or 0), "limit": int(c.get("bb_deferral_limit", 3)),
+            "grid_scales": tuple(float(x) for x in (c.get("bb_grid_scales") or M71_SCALES_DEFAULT)),
+            "grid_q": tuple(float(x) for x in (c.get("bb_grid_q") or M71_Q_DEFAULT))}
+
+
+def _m71_tc_cost(tc: dict | None, gw) -> float:
+    """M71: c_i = Triple Captain best - Triple Captain best with week i removed (0 unless week i is the unique best week)."""
+    vals = {int(k): float(v) for k, v in (tc or {}).items() if v is not None}
+    if int(gw) not in vals:
+        return 0.0
+    rest = [v for k, v in vals.items() if k != int(gw)]
+    if not rest:
+        return 0.0
+    return max(0.0, max(vals.values()) - max(rest))
+
+
+def m71_bb_act(planned_gw, planning_gw, by_gw_adj: dict | None, raw_by_gw: dict | None, tie_set: list | None,
+               tc_by_gw: dict | None = None, q: float = M37_Q_DEFAULT, expiry_gw: int = 16, min_gain: float = 1.0,
+               enabled: bool = True, used: int = 0, limit: int = 3, grid_scales=M71_SCALES_DEFAULT,
+               grid_q=M71_Q_DEFAULT) -> dict | None:
+    """R2 Patch 16 (M71/M73/M76): joint act-now test for the Bench Boost, run once. The Triple Captain is priced per branch
+    (no week is removed from the wait window): later week i is worth H_i - c_i, playing now is worth V_now - c_now, with
+    c_i = TC best - TC best without week i (exact difference, a tie costs 0). The window is every later tie-set week.
+    X = V_flex_net - V_now_net at the central point (q, scale 1). Wait only if the LOWEST X over the grid
+    {scale 1.00, 0.97 on later values and V_blind} x {q 0.45, 0.53, 0.65} is at least `min_gain` (M73). Returns None when the
+    planned week is not this week, from `expiry_gw`, or without a this-week value. Same fields as the old test plus
+    x_cautious, c_now and borderline (central passes the bar, cautious does not)."""
+    try:
+        if planned_gw is None or planning_gw is None or int(planned_gw) != int(planning_gw):
+            return None
+        if int(planning_gw) >= int(expiry_gw):
+            return None
+        adj = {int(g): float(v) for g, v in (by_gw_adj or {}).items()}
+        raw = {int(g): float(v) for g, v in (raw_by_gw or {}).items()}
+        v_adj = adj.get(int(planned_gw))
+        if v_adj is None:
+            return None
+        c_now = _m71_tc_cost(tc_by_gw, planned_gw)
+        v_now = v_adj - c_now
+        later_ws = sorted(int(w) for w, _ in (tie_set or []) if int(w) > int(planned_gw) and int(w) in raw)
+        if not later_ws:
+            return {"action": "play", "v_now": round(v_now, 2), "v_flex": None, "cost": None, "window": [], "x_wait": None,
+                    "x_cautious": None, "borderline": False, "c_now": round(c_now, 3), "reason": "no_window",
+                    "min_gain": min_gain, "used": used, "limit": limit, "q": q}
+        cs = {w: _m71_tc_cost(tc_by_gw, w) for w in later_ws}
+
+        def _x(scale, qq):
+            later = [(w, raw[w] * scale - cs[w]) for w in later_ws]
+            blind = max(adj.get(w, 0.0) * scale - cs[w] for w in later_ws)
+            vf = m37_bb_flex(later, qq, v_blind=blind)
+            return vf, vf - v_now
+
+        vf, x = _x(1.0, q)
+        pts = [x] + [_x(float(s), float(g))[1] for s in (grid_scales or (1.0,)) for g in (grid_q or (q,))]
+        x_c = min(pts)
+        if int(used) >= int(limit):
+            action, reason = "play", "limit"
+        elif not enabled:
+            action, reason = "play", "off"
+        elif x_c >= float(min_gain) - 1e-9:
+            action, reason = "wait", "wait"
+        else:
+            action, reason = "play", "below_bar"
+        border = bool(x >= float(min_gain) - 1e-9 and x_c < float(min_gain) - 1e-9)
+        return {"action": action, "reason": reason, "v_now": round(v_now, 2), "v_flex": round(vf, 2), "cost": round(-x, 2),
+                "x_wait": round(x, 2), "x_cautious": round(x_c, 2), "borderline": border, "c_now": round(c_now, 3),
+                "window": later_ws, "q": q, "min_gain": float(min_gain), "used": int(used), "limit": int(limit)}
+    except (TypeError, ValueError):
+        return None
+
+
+def m71_bb_act_text(act: dict | None) -> str:
+    """R2 Patch 16 (M74): the plan's answer with the central and the cautious value against the bar."""
+    if not act:
+        return ""
+    if act.get("v_flex") is None:
+        return "No later tie-set week to wait for: play it now."
+    w = act["window"]
+    win = f"GW{w[0]}" if len(w) == 1 else f"GW{w[0]}-GW{w[-1]}"
+    xc, xk, bar = float(act["x_wait"]), float(act["x_cautious"]), float(act.get("min_gain", 1.0))
+    tc = (f" The Triple Captain is priced per week (M71): playing now costs it {float(act.get('c_now') or 0):.1f}."
+          if float(act.get("c_now") or 0) > 0 else "")
+    if act["action"] == "wait":
+        return (f"Act-now test (M71/M73, estimate): wait, window {win}. Waiting is worth {xc:+.1f} xPts and {xk:+.1f} under cautious "
+                f"numbers (later weeks x0.97, chance all four bench players fit 0.45-0.65), both at least {bar:.1f}, so playing now "
+                f"gives up {xc:.1f} xPts (deferral {int(act.get('used', 0)) + 1} of {act.get('limit', 3)}; a bench doubt before the "
+                f"deadline costs nothing)." + tc)
+    r = act.get("reason")
+    if r == "limit":
+        return (f"Act-now test (M44): waiting would be worth {xc:+.1f} xPts (window {win}), but the Bench Boost has already waited "
+                f"{act.get('used')} of {act.get('limit')} times, so it plays now.")
+    if r == "off":
+        return (f"Act-now test (information only; bb_deferral_enabled is off): waiting would be worth {xc:+.1f} xPts (window {win}); "
+                f"the plan stays.")
+    if act.get("borderline"):
+        return (f"Act-now test (M71/M73, estimate): borderline. Waiting is worth {xc:+.1f} xPts centrally (window {win}), but only "
+                f"{xk:+.1f} under cautious numbers, below the {bar:.1f} needed, so the plan stays and plays now." + tc)
+    return (f"Act-now test (M71/M73, estimate): playing now {float(act['v_now']):.1f} against {float(act['v_flex']):.1f} for waiting "
+            f"(window {win}); waiting is worth {xc:+.1f} centrally and {xk:+.1f} under cautious numbers, under the {bar:.1f} needed, "
+            f"so the plan stays." + tc)
+
+
+_M77_LABELS = {"wildcard": "Wildcard", "bboost": "Bench Boost", "3xc": "Triple Captain", "freehit": "Free Hit"}
+M77_BAND_DEFAULT = 2.0
+
+
+def _m77_total(chips: dict | None) -> float:
+    return round(sum(float(v) for _g, v in (chips or {}).values() if _g is not None and v is not None), 6)
+
+
+def _m77_label(chips: dict | None) -> str:
+    parts = [f"{_M77_LABELS.get(k, k)} GW{int(g)}" for k, (g, _v) in sorted((chips or {}).items(), key=lambda kv: (kv[1][0] is None, kv[1][0] or 0))
+             if g is not None]
+    return " + ".join(parts) if parts else "no chips"
+
+
+def m77_extended_decision(baseline: dict | None, now: dict | None, band: float = M77_BAND_DEFAULT) -> dict:
+    """R2 Patch 16 (M77): one plan. `baseline` = the last normal run's chip plan {team, planning_gw, chips:{key:(gw, value)}},
+    `now` = this extended run's. The extended run replaces the plan only when its chip total beats the plan's by MORE than
+    `band` (2.0, my proposal - not model-ruled); otherwise the normal plan stays and the extended result is one labelled line.
+    The comparison is the sum of the scheduled chip values on each card (same definition in both runs); transfers are not
+    part of the number (disclosed). No saved normal plan for the same team and gameweek: shown as is."""
+    now = now or {}
+    if (not baseline or baseline.get("team") != now.get("team") or baseline.get("planning_gw") != now.get("planning_gw")):
+        return {"action": "no_baseline", "gap": None, "base_total": None, "ext_total": _m77_total(now.get("chips")),
+                "same_weeks": False,
+                "text": "Extended check: no normal-run plan saved for this team and gameweek to compare with, so the extended "
+                        "result is shown as is."}
+    bc, ec = baseline.get("chips") or {}, now.get("chips") or {}
+    bt, et = _m77_total(bc), _m77_total(ec)
+    gap = round(et - bt, 6)
+    keys = set(bc) | set(ec)
+    same = all((bc.get(k) or (None, None))[0] == (ec.get(k) or (None, None))[0] for k in keys)
+    if gap > float(band) + 1e-9:
+        return {"action": "takeover", "gap": gap, "base_total": bt, "ext_total": et, "same_weeks": same,
+                "text": f"Extended check took over: {_m77_label(ec)} = {et:.1f} xPts against the plan's {_m77_label(bc)} = {bt:.1f} "
+                        f"({gap:+.1f}, more than the {float(band):.1f} tie band). Chips, transfers and pitch now follow the extended run."}
+    return {"action": "keep_plan", "gap": gap, "base_total": bt, "ext_total": et, "same_weeks": same,
+            "text": f"Extended check: {_m77_label(ec)} = {et:.1f} xPts against the plan's {_m77_label(bc)} = {bt:.1f} "
+                    f"({gap:+.1f}, inside the {float(band):.1f} tie band): the plan is unchanged."}
+
+
 def m37_act_params(cfg: dict | None) -> dict:
     """R2 Patch 14 (M43/M44): the act-now switches from model_config.yaml chip_timing (hand-kept counter)."""
     c = ((cfg or {}).get("chip_timing") or {})
@@ -4308,14 +4460,18 @@ def m44_counter_text(cfg: dict | None) -> str:
 
 
 def m37_bb_act_for_chain(chips: dict | None, planning_gw, q: float = M37_Q_DEFAULT, cfg: dict | None = None) -> dict | None:
-    """R2 Patch 12: m37_bb_act on a chain-chips dict (planned week, adjusted and raw bars, tie set, TC week)."""
+    """R2 Patch 16 (M71/M77): the act-now result for a chain-chips dict. The plan's own result (chips["bb_act"], computed once
+    when the plan was chosen) is returned as is when the planned Bench Boost week is this week, so plan and card cannot
+    disagree. A dict without it (older callers) is computed once with the same joint test."""
     chips = chips or {}
     bb = chips.get("bb")
     if not bb:
         return None
-    tc = chips.get("tc")
-    return m37_bb_act(bb[0], planning_gw, chips.get("bb_by_gw"), chips.get("bb_raw_by_gw"), chips.get("bb_tie_set"),
-                      tc_gw=(tc[0] if tc else None), q=q, **m37_act_params(cfg))
+    if "bb_act" in chips:
+        a = chips.get("bb_act")
+        return a if (a is not None and planning_gw is not None and int(bb[0]) == int(planning_gw)) else None
+    return m71_bb_act(bb[0], planning_gw, chips.get("bb_by_gw"), chips.get("bb_raw_by_gw"), chips.get("bb_tie_set"),
+                      chips.get("tc_by_gw"), q=q, **{k: v for k, v in m71_params(cfg).items()})
 
 
 def m37_bb_wait_text(w: dict | None) -> str:
@@ -4333,6 +4489,8 @@ def m37_bb_wait_text(w: dict | None) -> str:
 def m37_bb_act_text(act: dict | None) -> str:
     if not act:
         return ""
+    if "x_cautious" in act:                       # R2 Patch 16: results of the joint test (M71-M74)
+        return m71_bb_act_text(act)
     if act["v_flex"] is None:
         return "No later tie-set week to wait for: play it now."
     w = act["window"]

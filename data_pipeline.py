@@ -562,7 +562,14 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw) -> pd.DataFrame:
         pl.at[i, "_xm_src"] = res["src"]
         # M54 (my reading): an estimated xM below `unconfirmed_below`, or any exclusion / return / blend case, is unconfirmed
         # unless a dated starter confirmation released the floor.
-        pl.at[i, "_xm_unconf"] = bool(("starter confirmed" not in res["src"]) and (x1h < _thr or res["src"] != "M52"))
+        _unc = bool(("starter confirmed" not in res["src"]) and (x1h < _thr or res["src"] != "M52"))
+        # R2 Patch 16 (M83): a ban return with at least 2 starts in the three matches before the dismissal and official flag "a"
+        # (no chance-of-playing figure below 100) is not "unconfirmed" for the -4 hit gate (60+ minutes = a start: proxy).
+        _c = cop.get(i)
+        if (_unc and res["src"].startswith("M58") and int(res.get("pre_starts", 0) or 0) >= 2
+                and str(status.get(i)) == "a" and (pd.isna(_c) or float(_c) >= 100.0)):
+            _unc = False
+        pl.at[i, "_xm_unconf"] = _unc
     return pl
 
 

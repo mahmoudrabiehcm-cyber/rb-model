@@ -291,6 +291,7 @@ M52_COEF = {"h1": (0.07, 0.014, 0.825), "h2": (0.11, 0.166, 0.58)}   # intercept
 M52_CAP = 0.88
 M58_COEF = {1: (0.555, 0.340), 2: (0.576, 0.260), 3: (0.578, 0.163), 4: (0.578, 0.163)}   # xM = a + b x pre
 M66_PRE_DEFAULT = 0.80
+M82_MIN_STARTS = 4            # R2 Patch 16 (M82): the unflagged-single-miss blend needs at least this many starts in the window
 
 
 def parse_xm_excl(text) -> dict:
@@ -353,7 +354,9 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
                 x2 = v[1] if v else x1
             else:
                 x2 = min(M52_CAP, a2 + b2 * pre)
-            out = {"x1": x1, "x2": x2, "src": "M58 return from ban" + ("" if len(pre_ms) >= 2 else " (pre default 0.80)")}
+            out = {"x1": x1, "x2": x2, "src": "M58 return from ban" + ("" if len(pre_ms) >= 2 else " (pre default 0.80)"),
+                   # R2 Patch 16 (M83): starts (60+ minutes, proxy) in the matches before the dismissal match
+                   "pre_starts": sum(1 for m in pre_ms if m[1] >= 60)}
     if out is None:
         E_ms = [m for m in ms if m[0] not in excl]
         E = [m[1] for m in E_ms]
@@ -366,7 +369,9 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
         # M64: an UNFLAGGED single miss (exactly one zero among the last 3, none excluded there, latest match 60+):
         # 50/50 blend of the excluded and the non-excluded reading.
         last3 = ms[-3:]
-        if (not excl and len(ms) >= 4 and sum(1 for m in last3 if m[1] <= 0) == 1 and ms[-1][1] >= 60):
+        # R2 Patch 16 (M82): the blend also needs at least 4 starts in the window; below that it is plain M52.
+        if (not excl and len(ms) >= 4 and float(nst) >= M82_MIN_STARTS and sum(1 for m in last3 if m[1] <= 0) == 1
+                and ms[-1][1] >= 60):
             E2 = [m[1] for m in ms if not (m in last3 and m[1] <= 0)]
             v2 = _m52_vals(nst, E2)
             if v2 is not None:
