@@ -3338,6 +3338,10 @@ chip_advisor_horizon:
 # extended mode covers (10 => Current..Current+9). Extended mode widens
 # chip_advisor_horizon and chip_shape_test.detection_window_gws to at least
 # this span for that one run; normal runs are unchanged.
+vice_captain:
+  enabled: true            # R2 Patch 17 (the 0.5 is MY proposal, not model-ruled): the app names a vice captain from the starting XI
+  different_club_gap: 0.5  # prefer a vice from another club than the captain when he is within this many xPts of the best one
+
 chip_extended_check:
   plan_variants: true   # R2 Patch 4 (model M29(5)): on the no-Wildcard plan path, also try a Triple Captain route (top-2 non-owned targets above the squad's TC premium, bought before the scheduled TC week), a Bench Boost route (bench in full in the scheduled BB week) and both combined; one replaces the plain plan only if it beats it by more than max(2, 2% of the 8-GW decay-weighted total incl. chips) and passes the Rule #52 checkpoint; ties -> fewer moves now, then single over combined. Free transfers only (the hit form of the TC route is not tried).
   plan_path_chips: true   # R2 Patch 2 (B1, model M29(2)): with no Wildcard comparison this run, Triple Captain / Bench Boost / Free Hit are placed on the squads the free-transfer plan fields each week (false = the Rule #49 joint sequence's one-shot per-week squads, R2 Patch 1 behaviour). Chip weeks follow M30 (near weeks first: GW+0..+5 or the sheet's last per-GW clean-sheet week; a farther week needs +2 xPts over the best near week; doubles/blanks exempt) and M31 (availability factor 0.80+0.20*exp(-(k-1)/3), estimate-tier).

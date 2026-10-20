@@ -4207,6 +4207,38 @@ def gw_points_breakdown(xi_df: pd.DataFrame, bench_df: pd.DataFrame | None, col:
             "text": " + ".join(parts) + f" = {total:.1f}"}
 
 
+def vice_pick(xi_df, col: str, captain_code, gap: float = 0.5, enabled: bool = True):
+    """R2 Patch 17: the vice-captain pick from the starting XI. Best `col` xPts among outfield starters other than the
+    captain; if that player plays for the CAPTAIN's club and an outfield starter from another club is within `gap` xPts,
+    the other-club player is chosen (a postponed match or a shared team-wide collapse then cannot take both armbands).
+    Disclosed simplifications (my reading, not model-ruled): goalkeepers are never the vice; the first-match-day order of
+    the two players is not considered. Returns {code, web_name, team, position, xp, reason, same_club_skipped} or None."""
+    if not enabled or xi_df is None or len(xi_df) == 0 or col not in xi_df.columns:
+        return None
+    d = xi_df.copy()
+    d["_xp"] = pd.to_numeric(d[col], errors="coerce")
+    d = d[d["_xp"].notna()]
+    if captain_code is None:
+        top = d.sort_values("_xp", ascending=False)
+        return None if top.empty else _vice_row(top.iloc[0], "best_xpts", None)
+    cap = d[d["code"] == captain_code]
+    cap_team = cap.iloc[0]["team"] if len(cap) else None
+    cand = d[(d["code"] != captain_code) & (d["position"] != "GK")].sort_values("_xp", ascending=False, kind="mergesort")
+    if cand.empty:
+        return None
+    best = cand.iloc[0]
+    if cap_team is not None and best["team"] == cap_team:
+        other = cand[cand["team"] != cap_team]
+        if not other.empty and float(best["_xp"]) - float(other.iloc[0]["_xp"]) <= float(gap) + 1e-9:
+            return _vice_row(other.iloc[0], "different_club", str(best["web_name"]))
+    return _vice_row(best, "best_xpts", None)
+
+
+def _vice_row(r, reason, skipped):
+    return {"code": r["code"], "web_name": r["web_name"], "team": r["team"], "position": r["position"],
+            "xp": float(r["_xp"]), "reason": reason, "same_club_skipped": skipped}
+
+
 def captain_cost(xi_df: pd.DataFrame, col: str, chosen_code, model_code, chip: str | None = None):
     """R2 Patch 6: points the chosen captain gains (+) or loses (-) against the model's pick this GW (x2 in the TC week).
     None when either player is not in this XI."""
@@ -4857,9 +4889,11 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
         _xm_h = _xm_raw.where(~((status == "d") & (chance > 0)), _xm_raw / (chance / 100.0))
         _w = _xm_h.apply(m31_weight)
         if "xm_src" in out.columns:      # R2 Patch 15 (M52): no M31 distance factor on top of the M52 / M58 xM (my reading)
-            _w = _w.where(~out["xm_src"].astype(str).str.startswith(("M52", "M58")), 0.0)
+            _w = _w.where(~out["xm_src"].astype(str).str.startswith(("M52", "M58", "M85", "M86")), 0.0)
     else:
         _w = pd.Series(1.0, index=out.index)
+    _sched_mask = (out["xm_src"].astype(str).str.startswith(("M85", "M86")) if "xm_src" in out.columns
+                   else pd.Series(False, index=out.index))
     for g in gws:
         col = f"xpts_gw{g}"
         if col not in out.columns:
@@ -4888,6 +4922,11 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
         out[f"avail_gw{g}"] = av
         out[hcol] = h
         out[f"xadj_gw{g}"] = x if k <= 1 else (h * av)
+        # R2 Patch 17 (M85 / M86): a player with a per-gameweek ban / dismissal schedule already carries his dated return in
+        # xpts_gw{g}; the chip layer reads the SAME number (one availability view for pitch, transfers and chips).
+        if _sched_mask.any():
+            out.loc[_sched_mask, f"xadj_gw{g}"] = x[_sched_mask]
+            out.loc[_sched_mask, f"avail_gw{g}"] = np.where(h[_sched_mask] > 0, (x[_sched_mask] / h[_sched_mask]).clip(0.0, 1.0), 0.0)
     return out
 
 

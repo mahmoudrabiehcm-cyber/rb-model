@@ -506,7 +506,79 @@ def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
     return df
 
 
-def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw) -> pd.DataFrame:
+def _deadlines_of(snap) -> dict:
+    """{gw: UTC deadline} from the snapshot's bootstrap events table (empty when absent)."""
+    ev = getattr(snap, "events", None)
+    try:
+        if ev is None or getattr(ev, "empty", True) or "deadline_time" not in ev.columns:
+            return {}
+        return {int(r["id"]): pd.to_datetime(r["deadline_time"], utc=True) for _, r in ev.iterrows()
+                if pd.notna(r.get("deadline_time")) and pd.notna(r.get("id"))}
+    except Exception:
+        return {}
+
+
+def _season_start_year(deadlines) -> int | None:
+    """Same reading as recommend.add_chip_availability: the year of the first deadline (minus one before August)."""
+    if not deadlines:
+        return None
+    first = pd.Timestamp(min(deadlines.values()))
+    return int(first.year - (1 if first.month < 8 else 0))
+
+
+def _m85_apply(pl, i, cfg, planning_gw, deadlines, unavailable, cop, has_m) -> bool:
+    """R2 Patch 17 (M85, M86): fill _xm/_xm2/_xm_h/_xm_h2/_xm_sched/_xm_src/_xm_unconf for player row `i` when a ban or a fresh
+    dismissal applies; returns True when it did (the caller skips the M52 path). Source order (M85): official "s" flag with a
+    dated return in the FPL news text; then the sheet's SUSP entries (xm_excl_gws, a dated club/outlet report); the official
+    flag without a date stays 0 for every week (no date, no return). Injured players are not touched by this patch."""
+    stat = str(pl.at[i, "status"]).lower() if "status" in pl.columns else "a"
+    excl = eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {}
+    dis = (None if "xm_dismissal_gw" not in pl.columns or pd.isna(pl.at[i, "xm_dismissal_gw"]) else int(pl.at[i, "xm_dismissal_gw"]))
+    mats = pl.at[i, "m52_matches"] if (has_m and isinstance(pl.at[i, "m52_matches"], list)) else []
+    P = planning_gw
+    banned, label = None, ""
+    if stat == "s" and deadlines and "news" in pl.columns:
+        import recommend as _rec
+        R = _rec.parse_return_gw(pl.at[i, "news"], deadlines, _season_start_year(deadlines))
+        if R is not None and int(R) > P:
+            banned, label = list(range(P, int(R))), "M85 suspension (official flag, back GW%d)" % int(R)
+    if banned is None:
+        fut = sorted(g for g, k in excl.items() if k == "SUSP" and g >= P)
+        if fut:
+            banned = fut
+            tail = "back GW%d" % (max(fut) + 1)
+            label = ("M85 suspension per outlet, official flag lags (%s)" % tail) if stat not in ("s", "i", "u", "n") \
+                else "M85 suspension (dated report, %s)" % tail
+    c = cop.get(i)
+    # healthy base for weeks before a later ban (current xM path values)
+    base = (float(pl.at[i, "_xm_h"]), float(pl.at[i, "_xm_h2"])) if banned else None
+    if banned and mats:
+        past = {g: k for g, k in excl.items() if g < P or k != "SUSP"}
+        b0 = eng.m52_compute(mats, pl.at[i, "m52_nst"], past, dis, None, P)
+        if b0 is not None:
+            base = (b0["x1"], b0["x2"])
+    if banned:
+        r = eng.m85_schedule(mats, pl.at[i, "m52_nst"] if has_m else None, banned, dis, P, past if (banned and mats) else excl, base)
+    elif dis is not None and stat not in ("i", "s", "u", "n") and not any(k == "SUSP" for k in excl.values()) and mats:
+        r = eng.m86_schedule(mats, dis, P, excl)
+        label = r["src"] if r else ""
+    else:
+        return False
+    if r is None:
+        return False
+    sch = r["sched"]
+    x1, x1h = sch[P]
+    if P not in (banned or []) and pd.notna(c) and stat not in ("i", "s", "u", "n"):
+        x1 = x1 * (float(c) / 100.0)                       # M67: the chance factor is for the next gameweek only
+    pl.at[i, "_xm"], pl.at[i, "_xm_h"] = x1, x1h
+    pl.at[i, "_xm2"], pl.at[i, "_xm_h2"] = r["tail"]
+    pl.at[i, "_xm_sched"] = dict(sch)
+    pl.at[i, "_xm_src"] = label or r["src"]
+    pl.at[i, "_xm_unconf"] = True                          # M54: a ban / dismissal return case is unconfirmed
+    return True
+
+
+def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None = None) -> pd.DataFrame:
     """R2 Patch 15 (M52-M70): replace xM for players with no sheet xm_override and enough recent-match data. Sets
     _xm (planning gameweek), _xm2 (later gameweeks), healthy twins _xm_h / _xm_h2, and _xm_src (label). Players the rule
     cannot cover keep the current path; those whose current xM comes from the starts-per-90 fallback are labelled
@@ -516,6 +588,7 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw) -> pd.DataFrame:
     pl["_xm_h2"] = pl["_xm_h"]
     pl["_xm_src"] = ""
     pl["_xm_unconf"] = False
+    pl["_xm_sched"] = pd.Series([None] * len(pl), index=pl.index, dtype=object)     # R2 Patch 17 (M85/M86): {gw: (xM, healthy xM)}
     _thr = float(((cfg or {}).get("xm_m52") or {}).get("unconfirmed_below", 0.80))
     on = bool(((cfg or {}).get("xm_m52") or {}).get("enabled", True))
     heur = cfg["xm_heuristic"]
@@ -532,6 +605,10 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw) -> pd.DataFrame:
             pl.at[i, "_xm_src"] = "sheet override"
             continue
         res = None
+        # R2 Patch 17 (M85 / M86): a ban that reaches the planning gameweek or later, or a dismissal in the latest match,
+        # gets a per-gameweek schedule instead of one flat later value (and instead of a flat zero for the official "s" flag).
+        if on and planning_gw is not None and _m85_apply(pl, i, cfg, int(planning_gw), deadlines, unavailable, cop, has_m):
+            continue
         if on and has_m and isinstance(pl.at[i, "m52_matches"], list):
             res = eng.m52_compute(pl.at[i, "m52_matches"], pl.at[i, "m52_nst"],
                                   eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {},
@@ -737,7 +814,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     _plh["chance_of_playing_next_round"] = np.nan
     pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
     del _plh
-    pl = apply_m52(pl, cfg, (int(gw_list[0]) if gw_list else None))      # R2 Patch 15 (M52-M70)
+    pl = apply_m52(pl, cfg, (int(gw_list[0]) if gw_list else None), _deadlines_of(snap))      # R2 Patch 15 (M52-M70)
 
     # --- bonus (R2 Patch 10, M34): per 90, gated at 270 minutes, blended on the DEFCON curve ---
     # (was: current bonus / starts if any start else last season's, no gate - Isidor's 3 sub-earned points over
@@ -814,7 +891,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     exploded = exploded.sort_values(["_pidx", "event", "_forder"], kind="mergesort",
                                      na_position="last").reset_index(drop=True)
 
-    player_cols = ["_pidx", "position", "_xm", "_xm_h", "_xm2", "_xm_h2", "_comp_disc", "_xbonus_adj",
+    player_cols = ["_pidx", "position", "_xm", "_xm_h", "_xm2", "_xm_h2", "_xm_sched", "_comp_disc", "_xbonus_adj",
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
@@ -832,6 +909,13 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         _later = exploded["event"] != int(gw_list[0])
         exploded["_xm"] = exploded["_xm"].where(~_later, exploded["_xm2"])
         exploded["_xm_h"] = exploded["_xm_h"].where(~_later, exploded["_xm_h2"])
+        # R2 Patch 17 (M85 / M86): players with a per-gameweek schedule take it for every gameweek it covers
+        if "_xm_sched" in exploded.columns:
+            _sc = exploded["_xm_sched"]
+            for _ix in exploded.index[_sc.apply(lambda d: isinstance(d, dict))]:
+                _hit = _sc.at[_ix].get(int(exploded.at[_ix, "event"]))
+                if _hit is not None:
+                    exploded.at[_ix, "_xm"], exploded.at[_ix, "_xm_h"] = _hit
 
     opp_lookup = team_lookup.rename(columns={
         "_short": "_opp_short",

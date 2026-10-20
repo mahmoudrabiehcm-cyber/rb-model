@@ -386,6 +386,80 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
     return out
 
 
+M86_P_AVAIL = {1: 0.10, 2: 0.60, 3: 0.76, 4: 0.90}    # R2 Patch 17 (M86): P(available) at the next four matches after a dismissal
+
+
+def _m85_pre(ms, dismissal_gw, excl):
+    """Share of full minutes in up to three matches before the dismissal match (all played matches when there is none);
+    returns (pre, pre_starts, used_default). Matches with a sheet exclusion are skipped; fewer than 2 -> M66 default."""
+    excl = excl or {}
+    pre_ms = [m for m in ms if (dismissal_gw is None or m[0] < int(dismissal_gw)) and m[0] not in excl][-3:]
+    if len(pre_ms) >= 2:
+        return sum(m[1] for m in pre_ms) / (90.0 * len(pre_ms)), sum(1 for m in pre_ms if m[1] >= 60), False
+    return M66_PRE_DEFAULT, 0, True
+
+
+def _clean_matches(matches):
+    return [(int(g), float(m)) for g, m in (matches or []) if m is not None and not (isinstance(m, float) and m != m)]
+
+
+def m85_schedule(matches, nst, banned, dismissal_gw=None, planning_gw=None, excl=None, base=None):
+    """R2 Patch 17 (M85, M81): per-gameweek xM for a player banned in the gameweeks `banned` (all >= the planning gameweek).
+    Banned gameweeks = 0; the first match back follows the M58 curve (a + b x pre; matches 3-4 the same, flat beyond; M81),
+    pre taken from the matches before the dismissal match (all played matches when there is no dismissal). Gameweeks before
+    the first ban use `base` = (planning xM, later xM). One match per gameweek (blanks/doubles ignored: disclosed).
+    Returns {"sched": {gw: (xM, healthy xM)}, "tail": (xM, healthy xM) for later gameweeks, "src", "pre", "pre_starts"}
+    or None (no ban / no planning gameweek)."""
+    ban = sorted({int(g) for g in (banned or [])})
+    if not ban or planning_gw is None:
+        return None
+    ms = _clean_matches(matches)
+    pre, pre_starts, dflt = _m85_pre(ms, dismissal_gw, excl)
+    last_ban, first_ban, P = ban[-1], ban[0], int(planning_gw)
+    sched = {}
+    for gw in range(P, last_ban + 5):
+        if gw in ban:
+            sched[gw] = (0.0, min(M52_CAP, M58_COEF[1][0] + M58_COEF[1][1] * pre))
+        elif gw < first_ban or gw < last_ban and gw not in ban:
+            b0, b1 = base if base is not None else (0.0, 0.0)
+            v = b0 if gw == P else b1
+            sched[gw] = (v, v)
+        else:
+            a, b = M58_COEF[min(gw - last_ban, 4)]
+            v = min(M52_CAP, a + b * pre)
+            sched[gw] = (v, v)
+    tail = sched[last_ban + 4]
+    return {"sched": sched, "tail": tail, "pre": pre, "pre_starts": pre_starts,
+            "src": "M85 suspension" + (" (pre default 0.80)" if dflt else "")}
+
+
+def m86_schedule(matches, dismissal_gw, planning_gw, excl=None):
+    """R2 Patch 17 (M86): a dismissal in the player's LATEST played match with no suspension entry -- the M58 curve weighted
+    by P(available) 0.10 / 0.60 / 0.76 / 0.90 at the next four matches (flat 0.90 beyond, my reading). Returns the same shape
+    as m85_schedule or None (no dismissal gameweek, he played again since, or the planning gameweek is not after it)."""
+    ms = _clean_matches(matches)
+    if dismissal_gw is None or planning_gw is None or not ms or int(planning_gw) <= int(dismissal_gw):
+        return None
+    if max(g for g, _ in ms) > int(dismissal_gw):
+        return None
+    D, P = int(dismissal_gw), int(planning_gw)
+    pre, pre_starts, dflt = _m85_pre(ms, D, excl)
+    sched = {}
+    for gw in range(P, D + 5):
+        k = max(1, gw - D)
+        a, b = M58_COEF[min(k, 4)]
+        v = min(M52_CAP, a + b * pre)
+        sched[gw] = (M86_P_AVAIL[min(k, 4)] * v, v)
+    last = D + 4
+    if last not in sched:
+        k = 4
+        a, b = M58_COEF[4]
+        v = min(M52_CAP, a + b * pre)
+        sched[last] = (M86_P_AVAIL[4] * v, v)
+    return {"sched": sched, "tail": sched[max(sched)], "pre": pre, "pre_starts": pre_starts,
+            "src": "M86 recent dismissal, no ban entry" + (" (pre default 0.80)" if dflt else "")}
+
+
 # ---------------------------------------------------------------------------
 # DEFCON probability — calibrated curve (v2.4)
 # ---------------------------------------------------------------------------
