@@ -3338,6 +3338,12 @@ chip_advisor_horizon:
 # extended mode covers (10 => Current..Current+9). Extended mode widens
 # chip_advisor_horizon and chip_shape_test.detection_window_gws to at least
 # this span for that one run; normal runs are unchanged.
+news_scope:
+  enabled: true        # R2 Patch 18 (manager choices 21 Oct 2026): Latest News covers the squad + the transfer plan's ins/outs + hot picks only (false = the old whole-pool list)
+  hot_per_position: 3  # hot picks: top N per position by horizon xPts (non-owned, outside the plan)
+  hot_top_n: 10        # ... plus the top N overall by horizon xPts
+  hot_crowd_n: 10      # ... plus the top N by net transfers this gameweek
+
 vice_captain:
   enabled: true            # R2 Patch 17 (the 0.5 is MY proposal, not model-ruled): the app names a vice captain from the starting XI
   different_club_gap: 0.5  # prefer a vice from another club than the captain when he is within this many xPts of the best one

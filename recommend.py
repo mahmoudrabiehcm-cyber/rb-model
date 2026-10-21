@@ -4207,6 +4207,75 @@ def gw_points_breakdown(xi_df: pd.DataFrame, bench_df: pd.DataFrame | None, col:
             "text": " + ".join(parts) + f" = {total:.1f}"}
 
 
+def plan_move_codes(plan):
+    """R2 Patch 18: ({in_code: first gw}, {out_code: first gw}) from a weekly plan [{gw, moves:[{in_code, out_code}]}]."""
+    ins, outs = {}, {}
+    for w in (plan or []):
+        gw = w.get("gw") if isinstance(w, dict) else None
+        for m in ((w.get("moves") if isinstance(w, dict) else None) or []):
+            if m.get("in_code") is not None:
+                ins.setdefault(m["in_code"], gw)
+            if m.get("out_code") is not None:
+                outs.setdefault(m["out_code"], gw)
+    return ins, outs
+
+
+def news_scope(squad_df, pool_df, plan, per_pos: int = 3, top_n: int = 10, crowd_n: int = 10):
+    """R2 Patch 18 (manager choices, 21 Oct 2026): who the Latest News tab covers. Three exclusive groups:
+      squad = the 15 players (tagged OUT GWn when the plan sells them);
+      plan  = the plan's incoming players not already owned (tagged IN GWn), every week of the chain;
+      hot   = non-owned players outside the plan picked by ANY of: top `per_pos` per position by horizon xPts, top `top_n`
+              overall by horizon xPts, top `crowd_n` by net transfers this gameweek (the reasons are listed in `_why`).
+    `_flagged` = status other than "a" or chance of playing below 100 (same test as the old tab). Returns
+    {"squad","plan","hot": DataFrames with _why/_flagged, "counts": {group: {"total","flagged"}}}. Display only: nothing here
+    changes xPts, rankings or any pick."""
+    sq = squad_df.copy() if squad_df is not None else pd.DataFrame()
+    pool = pool_df.copy() if pool_df is not None else pd.DataFrame()
+    ins, outs = plan_move_codes(plan)
+
+    def _flag(d):
+        if d.empty:
+            return d.assign(_flagged=pd.Series(dtype=bool))
+        st_ = d["status"].fillna("a") if "status" in d.columns else pd.Series("a", index=d.index)
+        cop = pd.to_numeric(d["chance_of_playing_next_round"], errors="coerce") if "chance_of_playing_next_round" in d.columns \
+            else pd.Series(np.nan, index=d.index)
+        return d.assign(_flagged=((st_ != "a") | (cop < 100)).astype(bool))
+
+    if not sq.empty:
+        sq["_why"] = [("OUT GW%s" % outs[c]) if c in outs else "" for c in sq["code"]]
+    else:
+        sq = sq.assign(_why=pd.Series(dtype=object))
+    owned = set(sq["code"]) if "code" in sq.columns else set()
+    pl = pool[pool["code"].isin(set(ins) - owned)].copy() if not pool.empty else pool.copy()
+    pl["_why"] = [("IN GW%s" % ins[c]) for c in pl["code"]] if not pl.empty else pd.Series(dtype=object)
+    taken = owned | set(pl["code"] if not pl.empty else []) | set(ins) | set(outs)
+    cand = pool[~pool["code"].isin(taken)].copy() if not pool.empty else pool.copy()
+    why = {}
+    if not cand.empty:
+        xcol = "xpts_horizon_sum" if "xpts_horizon_sum" in cand.columns else next(
+            (c for c in sorted(cand.columns) if str(c).startswith("xpts_gw")), None)
+        if xcol is not None:
+            xv = pd.to_numeric(cand[xcol], errors="coerce")
+            cand["_x"] = xv
+            if per_pos and per_pos > 0 and "position" in cand.columns:
+                for pos, g in cand.groupby("position"):
+                    for c in g.nlargest(int(per_pos), "_x")["code"]:
+                        why.setdefault(c, []).append("top %d %s by xPts" % (int(per_pos), pos))
+            if top_n and top_n > 0:
+                for c in cand.nlargest(int(top_n), "_x")["code"]:
+                    why.setdefault(c, []).append("top %d by xPts" % int(top_n))
+        if crowd_n and crowd_n > 0 and "net_transfers_event" in cand.columns:
+            nt = pd.to_numeric(cand["net_transfers_event"], errors="coerce")
+            cand["_nt"] = nt
+            for c in cand[cand["_nt"] > 0].nlargest(int(crowd_n), "_nt")["code"]:
+                why.setdefault(c, []).append("top %d net transfers" % int(crowd_n))
+    hot = cand[cand["code"].isin(set(why))].copy() if not cand.empty else cand.copy()
+    hot["_why"] = ["; ".join(why[c]) for c in hot["code"]] if not hot.empty else pd.Series(dtype=object)
+    out = {"squad": _flag(sq), "plan": _flag(pl), "hot": _flag(hot)}
+    out["counts"] = {k: {"total": int(len(v)), "flagged": int(v["_flagged"].sum()) if len(v) else 0} for k, v in list(out.items())}
+    return out
+
+
 def vice_pick(xi_df, col: str, captain_code, gap: float = 0.5, enabled: bool = True):
     """R2 Patch 17: the vice-captain pick from the starting XI. Best `col` xPts among outfield starters other than the
     captain; if that player plays for the CAPTAIN's club and an outfield starter from another club is within `gap` xPts,
