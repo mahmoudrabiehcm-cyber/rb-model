@@ -39,7 +39,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 21 (2026-10-22, manager screenshot): in Current squad mode the moves panel beside the pitch (later gameweeks) and its upcoming strip now show the plain TRANSFER PLAN's moves, not the Chip Plan path's (before: GW9 showed Saka to Foden and Janelt to Rudoni from the chip-shaped path while the transfer plan said Roll). Chip Plan path view and the other modes unchanged. Follows pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
+                  "R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
                   "R2 Patch 19 (2026-10-22, model rulings M95-M99, M101, M102, manager-approved build): flag persistence for REGULAR starters (60+ minutes in at least 3 of the last 6 gameweeks). A doubtful flag (25 / 50 / 75%) no longer applies to the next gameweek only: minutes follow the realised history, e.g. 50% = 23% of normal at GW+1, 45%, 58%, 69%, 74% at GW+5, held to GW+6 then back to full by GW+8 (the hold and the return are my estimates). Same numbers in the pitch, the transfer planner and the chip layer; a flagged player stays unconfirmed (no -4 hit on a target flagged below 100%) until the flag clears. Non-regulars keep the old next-gameweek-only treatment, labelled. M102 (my reading of your go): an undated injury (i flag, no return date) for a regular follows the realised-share table 1% / 13% / 29% / 40% / 52% at GW+1..GW+5; dated returns and suspensions are unchanged; switch xm_flag_persistence.undated_injury_enabled. News cards show a history line for flagged regulars. Switch xm_flag_persistence.enabled. NOT validated in a browser. "
                   "R2 Patch 18 (2026-10-21, manager choices): the Latest News tab now covers the ACTIVE TEAM only: your 15 players, the transfer plan ins and outs (every week of the chain) and hot picks (top 3 per position and top 10 by xPts and top 10 by net transfers, outside the squad and the plan); flagged players only, grouped, with an all-clear line per group; FPL API data, display only (no xPts, ranking or pick changes); switch news_scope.enabled. NOT validated in a browser. "
                   "R2 Patch 17 (2026-10-20, model rulings M85, M86, M81 curve, manager-approved build): (1) ONE availability view for suspensions: a player on the official s flag with a dated return in the FPL news text (or with future SUSP entries in the sheet) is 0 xPts only for the banned gameweeks, then follows the M58 return curve in the pitch, the transfer planner AND the chip layer (before: the pitch and planner read 0 for every week while the chip layer counted him back, so Bench Boost could be recommended with a 0.0 bench player and no transfer). (2) M86: a dismissal in the latest match with no ban entry gets the curve weighted by availability 0.10 / 0.60 / 0.76 / 0.90. (3) Vice captain named by the app (pitch V badge and Captaincy tab line): best outfield starter after the captain, another club preferred when within vice_captain.different_club_gap xPts. Injured players with a dated return are NOT changed by this patch. NOT validated in a browser. "
@@ -6096,7 +6097,7 @@ def _render_scenario_results():
                 _ni("No valid XI to compare", "Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
 
 
-def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label=None, fh_base=None):
+def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label=None, fh_base=None, plain_plan=False):
     """R2 Patch 5: the moves the pitch panel shows for the GW on screen -> (moves, free transfers banked after, note).
     Scenario: its changes vs your current squad. Chip Plan path: that week's planned moves (this week = the recommended
     moves the path starts from). After recommended transfers: that week's moves of the transfer plan. Current squad:
@@ -6138,6 +6139,14 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
         if int(nav_gw) == int(planning_gw):
             mv, f = _rec_now()
             return mv, f, "recommended this week"
+        if plain_plan:
+            # R2 Patch 21: Current squad mode shows the plain transfer plan's moves (no Wildcard / chip shaping) for later weeks
+            for w in rec.get("weekly_plan") or []:
+                if int(w.get("gw", -1)) == int(nav_gw):
+                    return (w.get("moves") or []), w.get("ft_available"), "transfer plan"
+            if not rec.get("is_weekly_schedule"):
+                return [m for m in (rec.get("moves") or []) if m.get("gw", planning_gw) == nav_gw], None, "transfer plan"
+            return [], None, "transfer plan"
         if _chain_path:
             mv, f = _path_week(_chain_path)
             return mv, f, "planned (Chip Plan path)"
@@ -6551,7 +6560,8 @@ def _render_pitch_navigator():
     if _fh_here:
         st.markdown(recommend.ui_chip(f"🎴 Free Hit GW{nav_gw}", "info", "one-week squad, reverts next GW"),
                     unsafe_allow_html=True)
-    _nav_moves, _nav_ft, _nav_note = _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, _active_src, _chain_label, _fh_base)
+    _nav_moves, _nav_ft, _nav_note = _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, _active_src, _chain_label, _fh_base,
+                                                  plain_plan=(not _chip_fx))
     _in_codes = ({m.get("in_code") for m in _nav_moves} & set(nav_squad["code"])) if _nav_moves else set()
     _chip_lab = "TC" if _tc_here else ("BB" if _bb_here else ("FH" if _fh_here else
                                                              ("WC" if (_wc_decision or {}).get("gw") == nav_gw else None)))
@@ -6641,7 +6651,9 @@ def _render_pitch_navigator():
     try:
         _upc = []
         _chip_by_gw = {int(v): {"3xc": "TC", "bboost": "BB", "freehit": "FH"}.get(k, k) for k, v in _final_chip_gw.items()}
-        _pw_by = {int(w.get("gw")): w for w in ((_chain_path or {}).get("plan") or []) if w.get("gw") is not None}
+        # R2 Patch 21: Current squad mode lists the plain transfer plan's upcoming moves, not the Chip Plan path's
+        _pw_src = (rec.get("weekly_plan") or []) if (not _chip_fx and rec.get("is_weekly_schedule")) else ((_chain_path or {}).get("plan") or [])
+        _pw_by = {int(w.get("gw")): w for w in _pw_src if w.get("gw") is not None}
         for _ug in sorted(set(_pw_by) | set(_chip_by_gw)):
             if _ug <= nav_gw:
                 continue
