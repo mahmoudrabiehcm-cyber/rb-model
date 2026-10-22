@@ -629,6 +629,45 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
             continue
         x1h, x2h = res["x1"], res["x2"]
         pl.at[i, "_xm_h"], pl.at[i, "_xm_h2"] = x1h, x2h
+        # R2 Patch 19 (M95-M99, M102): flag persistence for regular starters (config xm_flag_persistence).
+        _fp = (cfg or {}).get("xm_flag_persistence") or {}
+        if _fp.get("enabled", False) and planning_gw is not None:
+            _st = str(status.get(i)).lower()
+            _c = cop.get(i)
+            _reg = eng.m95_is_regular(pl.at[i, "m52_matches"])
+            _base = "" if res["src"] == "M52" else " · base " + res["src"]
+            if _st == "d" and pd.notna(_c) and float(_c) < 100.0:
+                if _reg:
+                    sch, tail = eng.m95_schedule(int(planning_gw), x1h, x2h, float(_c), "d", _fp)
+                    pl.at[i, "_xm"], pl.at[i, "_xm_h"] = sch[int(planning_gw)]
+                    pl.at[i, "_xm2"], pl.at[i, "_xm_h2"] = tail
+                    pl.at[i, "_xm_sched"] = dict(sch)
+                    pl.at[i, "_xm_src"] = "M95 flag persistence (d %d%%, regular)%s" % (eng.m95_level(_c), _base)
+                    pl.at[i, "_xm_unconf"] = True
+                    continue
+                x1n = x1h * (float(_c) / 100.0)
+                pl.at[i, "_xm"], pl.at[i, "_xm2"] = x1n, x2h
+                pl.at[i, "_xm_src"] = res["src"] + " · flag: next GW only (not a regular)"
+                pl.at[i, "_xm_unconf"] = True
+                continue
+            if _st == "i" and _reg and _fp.get("undated_injury_enabled", True):
+                _dated = False
+                if "news" in pl.columns:
+                    import re as _re, recommend as _rec
+                    _nw = pl.at[i, "news"]
+                    _R = _rec.parse_return_gw(_nw, deadlines, _season_start_year(deadlines)) if deadlines else None
+                    # any dated or lengthy-absence wording ("back 8 Nov", "until 31 Dec", "6 weeks", "season") is NOT undated;
+                    # only a date that has already passed (return gameweek <= planning gameweek) is treated as undated again
+                    _txt = bool(isinstance(_nw, str) and _re.search(r"(?:back|until)\s+\d{1,2}\s+[A-Za-z]{3}|\b(?:weeks?|months?|season)\b", _nw, _re.I))
+                    _dated = _txt and not (_R is not None and int(_R) <= int(planning_gw))
+                if not _dated:
+                    sch, tail = eng.m95_schedule(int(planning_gw), x1h, x2h, None, "i", _fp)
+                    pl.at[i, "_xm"], pl.at[i, "_xm_h"] = sch[int(planning_gw)]
+                    pl.at[i, "_xm2"], pl.at[i, "_xm_h2"] = tail
+                    pl.at[i, "_xm_sched"] = dict(sch)
+                    pl.at[i, "_xm_src"] = "M102 undated injury (regular, realised-share table)" + _base
+                    pl.at[i, "_xm_unconf"] = True
+                    continue
         if bool(unavailable.get(i, False)):
             x1, x2 = 0.0, 0.0
         else:

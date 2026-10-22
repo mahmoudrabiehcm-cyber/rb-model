@@ -4276,6 +4276,17 @@ def news_scope(squad_df, pool_df, plan, per_pos: int = 3, top_n: int = 10, crowd
     return out
 
 
+def flag_history_text(chance):
+    """R2 Patch 19 (M101): one-line history for a regular starter flagged below 100% (None for no flag). Figures are the
+    stored table (fpl_engine.M95_TABLE_D): next-gameweek minutes and the week after, as a share of normal."""
+    lv = eng.m95_level(chance) if chance is not None else None
+    if lv is None:
+        return None
+    row = eng.M95_TABLE_D[lv]
+    return "history for regular starters flagged %d%%: next-gameweek minutes %d%% of normal, %d%% the week after" % (
+        lv, round(row[0] * 100), round(row[1] * 100))
+
+
 def vice_pick(xi_df, col: str, captain_code, gap: float = 0.5, enabled: bool = True):
     """R2 Patch 17: the vice-captain pick from the starting XI. Best `col` xPts among outfield starters other than the
     captain; if that player plays for the CAPTAIN's club and an outfield starter from another club is within `gap` xPts,
@@ -4958,10 +4969,10 @@ def add_chip_availability(proj: pd.DataFrame, planning_gw: int, gws: list, deadl
         _xm_h = _xm_raw.where(~((status == "d") & (chance > 0)), _xm_raw / (chance / 100.0))
         _w = _xm_h.apply(m31_weight)
         if "xm_src" in out.columns:      # R2 Patch 15 (M52): no M31 distance factor on top of the M52 / M58 xM (my reading)
-            _w = _w.where(~out["xm_src"].astype(str).str.startswith(("M52", "M58", "M85", "M86")), 0.0)
+            _w = _w.where(~out["xm_src"].astype(str).str.startswith(("M52", "M58", "M85", "M86", "M95", "M102")), 0.0)
     else:
         _w = pd.Series(1.0, index=out.index)
-    _sched_mask = (out["xm_src"].astype(str).str.startswith(("M85", "M86")) if "xm_src" in out.columns
+    _sched_mask = (out["xm_src"].astype(str).str.startswith(("M85", "M86", "M95", "M102")) if "xm_src" in out.columns
                    else pd.Series(False, index=out.index))
     for g in gws:
         col = f"xpts_gw{g}"

@@ -461,6 +461,61 @@ def m86_schedule(matches, dismissal_gw, planning_gw, excl=None):
 
 
 # ---------------------------------------------------------------------------
+# R2 Patch 19 (M95-M99, M102): flag persistence for regular starters
+# ---------------------------------------------------------------------------
+M95_TABLE_D = {25: [0.08, 0.24, 0.40, 0.53, 0.55], 50: [0.23, 0.45, 0.58, 0.69, 0.74], 75: [0.56, 0.78, 0.88, 0.93, 0.96]}
+M102_TABLE_I = [0.01, 0.13, 0.29, 0.40, 0.52]
+
+
+def m95_level(chance):
+    """Chance-of-playing figure -> table row (25 / 50 / 75); None when there is no flag below 100."""
+    if chance is None or (isinstance(chance, float) and chance != chance) or float(chance) >= 100.0:
+        return None
+    c = float(chance)
+    return 25 if c < 37.5 else (50 if c < 62.5 else 75)
+
+
+def m95_factor(chance, k, kind="d", fp=None):
+    """Share of normal minutes at match k after the planning gameweek (k=1 is the planning gameweek). Table for k=1..5, held
+    at the k=5 value for k=6, linear to 1.00 at k=8 (my estimate, M95), 1.00 after. kind "i" = undated injury table (M102)."""
+    fp = fp or {}
+    hold, full = int(fp.get("hold_until_gw", 6)), int(fp.get("full_by_gw", 8))
+    if kind == "i":
+        row = fp.get("table_i") or M102_TABLE_I
+    else:
+        lv = m95_level(chance)
+        if lv is None:
+            return 1.0
+        row = (fp.get("table_d") or M95_TABLE_D).get(lv) or M95_TABLE_D[lv]
+    k = int(k)
+    if k <= len(row):
+        return float(row[k - 1])
+    last = float(row[-1])
+    if k <= hold:
+        return last
+    if k >= full:
+        return 1.0
+    return last + (1.0 - last) * (k - hold) / float(full - hold)
+
+
+def m95_is_regular(matches):
+    """Regular = 60+ minutes in at least 3 of the last 6 played gameweeks (fewer matches: 3 of those that exist)."""
+    ms = sorted(_clean_matches(matches))[-6:]
+    return sum(1 for _, m in ms if m >= 60) >= 3
+
+
+def m95_schedule(planning_gw, x1h, x2h, chance, kind="d", fp=None):
+    """Per-gameweek (xM, healthy xM) from the planning gameweek to planning+7 (GW+8 = full), plus the tail (healthy)."""
+    P = int(planning_gw)
+    full = int((fp or {}).get("full_by_gw", 8))
+    sched = {}
+    for k in range(1, full + 1):
+        h = float(x1h if k == 1 else x2h)
+        sched[P + k - 1] = (h * m95_factor(chance, k, kind, fp), h)
+    return sched, (float(x2h), float(x2h))
+
+
+# ---------------------------------------------------------------------------
 # DEFCON probability — calibrated curve (v2.4)
 # ---------------------------------------------------------------------------
 def defcon_probability(dc90: float, position: str, cfg: dict) -> float:

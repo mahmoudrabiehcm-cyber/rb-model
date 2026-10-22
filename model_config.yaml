@@ -3380,3 +3380,14 @@ chip_extended_check:
 xm_m52:              # R2 Patch 15 (M52-M70): xM from recent minutes/starts for players with no sheet xm_override
   enabled: true      # false = the old xM path for everyone (starts floor / starts-per-90 fallback), labelled
   unconfirmed_below: 0.80   # M54 reading (mine): an M52/M58 xM under this is "unconfirmed" for the no-hit-on-it rule
+
+xm_flag_persistence:   # R2 Patch 19 (M95-M99, M101, M102): minutes for flagged REGULAR starters follow the realised history
+  enabled: true        # false = the old treatment (chance factor on the next gameweek only)
+  undated_injury_enabled: true   # M102 (my reading of "go"): undated "i" regulars follow the realised-share table; false = zero as before
+  hold_until_gw: 6     # GW+6 holds the GW+5 value (estimate)
+  full_by_gw: 8        # linear back to 1.00 by GW+8 (estimate)
+  table_d:             # share of normal minutes at GW+1..GW+5 by chance level (25 / 50 / 75)
+    25: [0.08, 0.24, 0.40, 0.53, 0.55]
+    50: [0.23, 0.45, 0.58, 0.69, 0.74]
+    75: [0.56, 0.78, 0.88, 0.93, 0.96]
+  table_i: [0.01, 0.13, 0.29, 0.40, 0.52]
