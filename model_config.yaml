@@ -3391,3 +3391,6 @@ xm_flag_persistence:   # R2 Patch 19 (M95-M99, M101, M102): minutes for flagged 
     50: [0.23, 0.45, 0.58, 0.69, 0.74]
     75: [0.56, 0.78, 0.88, 0.93, 0.96]
   table_i: [0.01, 0.13, 0.29, 0.40, 0.52]
+
+pitch_chip_follow:     # R2 Patch 20: should the pitch in "Current squad" mode apply the chip plan (Free Hit swap, TC armband, BB bench)?
+  current_squad: false # false = badge only (default); true = old behaviour. Chip Plan path and other modes always follow the chip.
