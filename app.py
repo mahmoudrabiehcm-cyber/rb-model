@@ -39,7 +39,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 21 (2026-10-22, manager screenshot): in Current squad mode the moves panel beside the pitch (later gameweeks) and its upcoming strip now show the plain TRANSFER PLAN's moves, not the Chip Plan path's (before: GW9 showed Saka to Foden and Janelt to Rudoni from the chip-shaped path while the transfer plan said Roll). Chip Plan path view and the other modes unchanged. Follows pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
                   "R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
                   "R2 Patch 19 (2026-10-22, model rulings M95-M99, M101, M102, manager-approved build): flag persistence for REGULAR starters (60+ minutes in at least 3 of the last 6 gameweeks). A doubtful flag (25 / 50 / 75%) no longer applies to the next gameweek only: minutes follow the realised history, e.g. 50% = 23% of normal at GW+1, 45%, 58%, 69%, 74% at GW+5, held to GW+6 then back to full by GW+8 (the hold and the return are my estimates). Same numbers in the pitch, the transfer planner and the chip layer; a flagged player stays unconfirmed (no -4 hit on a target flagged below 100%) until the flag clears. Non-regulars keep the old next-gameweek-only treatment, labelled. M102 (my reading of your go): an undated injury (i flag, no return date) for a regular follows the realised-share table 1% / 13% / 29% / 40% / 52% at GW+1..GW+5; dated returns and suspensions are unchanged; switch xm_flag_persistence.undated_injury_enabled. News cards show a history line for flagged regulars. Switch xm_flag_persistence.enabled. NOT validated in a browser. "
                   "R2 Patch 18 (2026-10-21, manager choices): the Latest News tab now covers the ACTIVE TEAM only: your 15 players, the transfer plan ins and outs (every week of the chain) and hot picks (top 3 per position and top 10 by xPts and top 10 by net transfers, outside the squad and the plan); flagged players only, grouped, with an all-clear line per group; FPL API data, display only (no xPts, ranking or pick changes); switch news_scope.enabled. NOT validated in a browser. "
@@ -1745,6 +1745,18 @@ def _suggest_transfers_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: 
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+def _scenario_path_calc(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict, profile_name: str, hit_stance: str,
+                        free_transfers: int, bank: float, planning_gw: int, gw_list: tuple, target_codes: tuple,
+                        buy_gw, default_plan_items, disrupted_codes_items: tuple | None, bb_play_gw: int | None):
+    """R2 Patch 22: cached wrapper for recommend.plan_scenario_path (same pattern as _suggest_transfers_calc: one MILP-heavy
+    call, so a rerun with unchanged inputs is a cache hit)."""
+    return recommend.plan_scenario_path(
+        squad_df, pool_df, cfg, profile_name, hit_stance, free_transfers, bank, planning_gw, list(gw_list), list(target_codes),
+        buy_gw=buy_gw, default_plan=(list(default_plan_items) if default_plan_items else None),
+        disrupted_codes=(set(disrupted_codes_items) if disrupted_codes_items else None), bb_play_gw=bb_play_gw)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
 def _reachable_ceiling_single_calc(cfg: dict, proj: pd.DataFrame, squad_codes_items: tuple, free_transfers: int):
     """Patch 100 (2026-09-30, manager: "dig deep on the performance") --
     further audit beyond Patch 99's five found data_pipeline.
@@ -2644,13 +2656,16 @@ with st.spinner("Fetching live data and computing xPts..."):
             proj = recommend.apply_sell_prices(proj, _sp)
             squad_df = proj[proj["code"].isin(squad_codes)].copy()
     # Locked players (sidebar): kept by the Wildcard rebuild, never sold by the planner. Reset when the team changes.
-    _lock_names = sorted(squad_df["web_name"].tolist()) if not squad_df.empty else []
+    # R2 Patch 22: Locked players can be anyone in the pool; owned players keep their plain name, others are "Name (TEAM)".
+    # A locked player you do not own is a required buy (see _required_buy_codes below).
+    _lock_names, _lock_map = recommend.lock_options(squad_df, proj[~proj["code"].isin(squad_codes)]) if not squad_df.empty else ([], {})
     _lock_key = f"locked_{entry_id}"
     st.session_state[_lock_key] = [n for n in st.session_state.get(_lock_key, []) if n in _lock_names]
     with _lock_slot:
         locked_names = st.multiselect("🔒 Locked players", _lock_names, key=_lock_key,
-                                      help="Kept in the Wildcard, never sold in transfers.")
-    _name_to_code = dict(zip(squad_df["web_name"], squad_df["code"])) if not squad_df.empty else {}
+                                      help="Owned players: kept in the Wildcard, never sold in transfers. A player you do not own: "
+                                           "a required buy, evaluated for you (Transfers, Evaluate your own scenario) and kept in a Wildcard.")
+    _name_to_code = _lock_map
     locked_codes = [int(_name_to_code[n]) for n in locked_names if n in _name_to_code]
     proj["_locked"] = proj["code"].isin(locked_codes)
     # Patch 117j: Excluded players (sidebar): never bought by the weekly planner, never in a Wildcard rebuild. Same scope as
@@ -2666,6 +2681,12 @@ with st.spinner("Fetching live data and computing xPts..."):
     _ex_by_label = {v: k for k, v in _ex_label.items()}
     excluded_codes = [int(_ex_by_label[n]) for n in excluded_names if n in _ex_by_label]
     proj["_excluded"] = proj["code"].isin(excluded_codes)
+    # R2 Patch 22: locked players outside the squad are required buys (a player that is also Excluded is not: Excluded wins)
+    _owned_locked, _required_buy_codes = recommend.split_locks(locked_codes, set(squad_codes))
+    _required_buy_codes = [c for c in _required_buy_codes if c not in set(excluded_codes)]
+    if _required_buy_codes:
+        with _lock_slot:
+            st.caption(f"{len(_required_buy_codes)} required buy(s): see Transfers")
     squad_df = proj[proj["code"].isin(squad_codes)].copy()
     _lock_flagged = recommend.lock_flags(squad_df, locked_codes)
 
@@ -5842,7 +5863,46 @@ def _nav_optimal_squad(_cfg, _proj, team_value, gw):
 # not just the one right after the click) — so results also no longer
 # disappear the moment the manager interacts with anything else on the page.
 # ---------------------------------------------------------------------------
+def _compute_scenario_path():
+    """R2 Patch 22: the scenario = required buys (a target you name when you click Evaluate, plus Locked players you do not own)
+    followed by the weekly transfer planner. Locked buys are evaluated automatically; the target only on click. Recomputed only
+    when its inputs change (squad, bank, free transfers, targets, buy week)."""
+    clicked = bool(st.session_state.get("scenario_evaluate_btn"))
+    tchoice = st.session_state.get("scenario_target", (None, "— none —"))
+    prev = st.session_state.get("scenario_path_cache")
+    explicit = (tchoice[0] if clicked else (prev or {}).get("explicit"))
+    if clicked and tchoice[0] is None:
+        explicit = None
+    desired = [int(c) for c in _required_buy_codes]
+    if explicit is not None and int(explicit) not in desired and int(explicit) not in set(squad_df["code"]):
+        desired.append(int(explicit))
+    if not desired:
+        st.session_state.pop("scenario_path_cache", None)
+        return
+    sel = st.session_state.get("scenario_buy_gw", "Now (this week)")
+    buy = "best" if sel == "Best week" else (int(str(sel)[2:]) if str(sel).startswith("GW") else None)
+    key = (tuple(desired), str(sel), int(planning_gw), tuple(sorted(int(c) for c in squad_df["code"])),
+           int(ft["free_transfers"]), round(float(bank), 1))
+    if prev and prev.get("key") == key and not clicked:
+        return
+    try:
+        _dp = (rec.get("weekly_plan") if (isinstance(rec, dict) and rec.get("is_weekly_schedule")) else None) or None
+        path = _scenario_path_calc(squad_df, pool_df, cfg, style_name, hit_stance, int(ft["free_transfers"]), float(bank),
+                                   int(planning_gw), tuple(gw_list), tuple(desired), buy, _dp,
+                                   tuple(sorted(_disrupted_codes)) if _disrupted_codes else None, _bb_play_gw)
+    except Exception as _e_sp:
+        print(f"[R2P22] scenario path skipped: {type(_e_sp).__name__}: {_e_sp}", file=sys.stderr)
+        st.session_state.pop("scenario_path_cache", None)
+        return
+    _names = {int(r["code"]): str(r.get("web_name", "")) for _, r in pd.concat([squad_df, pool_df], ignore_index=True, sort=False).iterrows()
+              if int(r["code"]) in set(desired)}
+    label = ", ".join(_names.get(c, str(c)) for c in desired)
+    st.session_state["scenario_path_cache"] = {"key": key, "explicit": explicit, "label": label, "path": path,
+                                                "locked_buys": [int(c) for c in _required_buy_codes]}
+
+
 def _compute_scenario_evaluations():
+    _compute_scenario_path()
     target_choice = st.session_state.get("scenario_target", (None, "— none —"))
     wc_gw_choice = st.session_state.get("scenario_wc_gw")
     fh_gw_choice = st.session_state.get("scenario_fh_gw")
@@ -5981,6 +6041,31 @@ def _render_scenario_results():
                 for line in target_eval["plan"]:
                     st.markdown(f"- {line}")
 
+    pcache = st.session_state.get("scenario_path_cache")
+    if pcache:
+        path = pcache["path"]
+        st.markdown(f"**Scenario plan over the horizon: {pcache['label']}**"
+                    + (" (locked players you do not own: required buys)" if pcache.get("locked_buys") else ""))
+        for line in (path.get("summary") or []):
+            st.markdown(f'<div class="tx-reco">🧪 {line}</div>', unsafe_allow_html=True)
+        if path.get("feasible"):
+            _dmap = {int(w.get("gw")): w for w in (path.get("default_weekly_plan") or [])}
+
+            def _mv_txt(w):
+                mv = (w or {}).get("moves") or []
+                return ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in mv) or "Roll"
+            rows = []
+            for w in path["weekly_plan"]:
+                g = int(w["gw"])
+                rows.append({"GW": g, "Scenario": _mv_txt(w) + (f" (−{w['hit_cost']:.0f} hit)" if w.get("hit_cost") else ""),
+                             "Step": {"scenario buy": "buy", "scenario plan": "plan", "default": "model plan"}.get(w.get("source"), ""),
+                             "Model's own plan": _mv_txt(_dmap.get(g)), "FT available": w.get("ft_available")})
+            _df(pd.DataFrame(rows), hide_index=True, width="stretch")
+            if len(path.get("candidates") or {}) > 1:
+                _nc("Buy-week totals", "Buy-week totals (xPts after hits): " + ", ".join(f"GW{g} {v:.1f}" for g, v in sorted(path["candidates"].items())))
+            _nc("📍 Also in Pitch Navigator", "📍 Also in the Pitch Navigator: pick the scenario in the Squad choice to page its squad week by week. "
+                "No-chip path; hits follow your hit stance. The model's own plan above is unchanged.")
+
     wc_cache = st.session_state.get("scenario_wc_cache")
     if wc_cache:
         wc_gw_choice = wc_cache["wc_gw_choice"]
@@ -6097,7 +6182,7 @@ def _render_scenario_results():
                 _ni("No valid XI to compare", "Couldn't compute a comparison — your current squad has no valid XI for this GW this run.")
 
 
-def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label=None, fh_base=None, plain_plan=False):
+def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label=None, fh_base=None):
     """R2 Patch 5: the moves the pitch panel shows for the GW on screen -> (moves, free transfers banked after, note).
     Scenario: its changes vs your current squad. Chip Plan path: that week's planned moves (this week = the recommended
     moves the path starts from). After recommended transfers: that week's moves of the transfer plan. Current squad:
@@ -6124,6 +6209,11 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
                 return _rec_now()
             return [], None
         if active_src is not None:
+            if active_src.get("plan"):               # R2 Patch 22: that week's moves of the scenario plan
+                for w in active_src["plan"]:
+                    if int(w.get("gw", -1)) == int(nav_gw):
+                        return (w.get("moves") or []), w.get("ft_available"), "scenario plan"
+                return [], None, "scenario plan"
             return recommend._pair_moves(squad_df_adv, nav_squad, nav_col), None, "scenario vs your squad"
         if chain_label is not None and nav_mode == chain_label:
             mv, f = _path_week(_chain_path)
@@ -6139,14 +6229,6 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
         if int(nav_gw) == int(planning_gw):
             mv, f = _rec_now()
             return mv, f, "recommended this week"
-        if plain_plan:
-            # R2 Patch 21: Current squad mode shows the plain transfer plan's moves (no Wildcard / chip shaping) for later weeks
-            for w in rec.get("weekly_plan") or []:
-                if int(w.get("gw", -1)) == int(nav_gw):
-                    return (w.get("moves") or []), w.get("ft_available"), "transfer plan"
-            if not rec.get("is_weekly_schedule"):
-                return [m for m in (rec.get("moves") or []) if m.get("gw", planning_gw) == nav_gw], None, "transfer plan"
-            return [], None, "transfer plan"
         if _chain_path:
             mv, f = _path_week(_chain_path)
             return mv, f, "planned (Chip Plan path)"
@@ -6308,6 +6390,15 @@ def _render_pitch_navigator():
     # horizon; a Free Hit squad is single-GW only, Rule #25), so paging
     # covers whatever GWs THAT scenario actually solved for.
     _nav_scenario_sources = {}
+    # R2 Patch 22: a scenario with a horizon plan is paged week by week (squad and moves per gameweek); the old single-squad
+    # entry is used only when no plan could be built.
+    _sp_cache = st.session_state.get("scenario_path_cache")
+    if _sp_cache and (_sp_cache.get("path") or {}).get("feasible"):
+        _sp_path = _sp_cache["path"]
+        _nav_scenario_sources[f"After scenario ({_sp_cache['label']})"] = {
+            "squad": _sp_path["squads"][min(_sp_path["squads"])], "gw_list": None,
+            "squads_by_gw": _sp_path["squads"], "plan": _sp_path["weekly_plan"]}
+        _nav_squad_scenario = None
     if _nav_squad_scenario is not None:
         _nav_scenario_sources[f"After evaluated scenario ({_scenario_label})"] = {
             "squad": _nav_squad_scenario, "gw_list": None}
@@ -6340,7 +6431,7 @@ def _render_pitch_navigator():
     _chain_label = None
     if _chain_path and _chain_path.get("squads"):
         _cwg = (_wc_decision or {}).get("gw")
-        _chain_label = f"Chip Plan path (Wildcard GW{_cwg})" if _cwg is not None else "Chip Plan path (no Wildcard)"
+        _chain_label = recommend.chip_path_label(_strip_chips)         # R2 Patch 22: named after the chips in the plan
         _nav_options.append(_chain_label)
 
     # Dynamic options (both the 2nd option's wording and the 3rd option's
@@ -6417,6 +6508,9 @@ def _render_pitch_navigator():
     nav_col = f"xpts_gw{nav_gw}"
     if _active_src is not None:
         nav_squad = _active_src["squad"]
+        if _active_src.get("squads_by_gw"):         # R2 Patch 22: the scenario's squad as it stands in the gameweek on screen
+            _sg = [g for g in _active_src["squads_by_gw"] if g <= nav_gw]
+            nav_squad = _active_src["squads_by_gw"][max(_sg)] if _sg else squad_df_adv
     elif _chain_label is not None and nav_mode == _chain_label:
         nav_squad = _path_squad_at(nav_gw)
         if nav_squad is None:
@@ -6560,8 +6654,7 @@ def _render_pitch_navigator():
     if _fh_here:
         st.markdown(recommend.ui_chip(f"🎴 Free Hit GW{nav_gw}", "info", "one-week squad, reverts next GW"),
                     unsafe_allow_html=True)
-    _nav_moves, _nav_ft, _nav_note = _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, _active_src, _chain_label, _fh_base,
-                                                  plain_plan=(not _chip_fx))
+    _nav_moves, _nav_ft, _nav_note = _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, _active_src, _chain_label, _fh_base)
     _in_codes = ({m.get("in_code") for m in _nav_moves} & set(nav_squad["code"])) if _nav_moves else set()
     _chip_lab = "TC" if _tc_here else ("BB" if _bb_here else ("FH" if _fh_here else
                                                              ("WC" if (_wc_decision or {}).get("gw") == nav_gw else None)))
@@ -6651,8 +6744,7 @@ def _render_pitch_navigator():
     try:
         _upc = []
         _chip_by_gw = {int(v): {"3xc": "TC", "bboost": "BB", "freehit": "FH"}.get(k, k) for k, v in _final_chip_gw.items()}
-        # R2 Patch 21: Current squad mode lists the plain transfer plan's upcoming moves, not the Chip Plan path's
-        _pw_src = (rec.get("weekly_plan") or []) if (not _chip_fx and rec.get("is_weekly_schedule")) else ((_chain_path or {}).get("plan") or [])
+        _pw_src = ((_active_src or {}).get("plan") if (_active_src or {}).get("plan") else ((_chain_path or {}).get("plan") or []))   # R2 Patch 22: scenario mode lists the scenario plan
         _pw_by = {int(w.get("gw")): w for w in _pw_src if w.get("gw") is not None}
         for _ug in sorted(set(_pw_by) | set(_chip_by_gw)):
             if _ug <= nav_gw:
@@ -6990,6 +7082,11 @@ with tab_transfers:
         # Patch 60 — explicit key so `_compute_scenario_evaluations()` (called
         # earlier in the script, before the Pitch Navigator) can tell whether
         # THIS click is what triggered the current rerun.
+        # R2 Patch 22: when to buy the target / locked players you do not own (the planner then plans the later weeks)
+        st.selectbox("Buy week for the target and locked players", ["Now (this week)", "Best week"] + [f"GW{g}" for g in gw_list[1:]],
+                     key="scenario_buy_gw",
+                     help="Now = this gameweek. A later gameweek keeps the model's own moves before it. Best week tries each week "
+                          "of the horizon (up to 5) and keeps the highest total after hits; it takes longer.")
         st.button("Evaluate scenario", key="scenario_evaluate_btn")
         _render_scenario_results()
 

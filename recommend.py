@@ -3191,6 +3191,183 @@ def resolve_budget(bank: float, squad_market_price: float, selling_total, overri
 
 
 # --------------------------------------------------------------------------------------------------------------------
+# R2 Patch 22 (manager, 27 Oct 2026): chip view name, pool-wide Locked players, scenario followed by the weekly planner.
+# --------------------------------------------------------------------------------------------------------------------
+def chip_path_label(strip_chips) -> str:
+    """Name of the pitch's chip view: the chips of the plan in gameweek order ("Chip Plan: BB GW9 · TC GW12"; the Wildcard is
+    listed like any chip), or "Chip Plan" when the plan has none. `strip_chips` = {gw: "BB" | "TC" | "FH" | "WC"}."""
+    items = sorted((int(g), str(c)) for g, c in (strip_chips or {}).items())
+    return ("Chip Plan: " + " · ".join(f"{c} GW{g}" for g, c in items)) if items else "Chip Plan"
+
+
+def lock_options(squad_df, pool_df):
+    """Options for the Locked players picker: everyone in the pool. Owned players keep their plain web_name (so saved picks keep
+    working); everyone else is "Name (TEAM)". Returns (sorted labels, {label: code})."""
+    m: dict = {}
+    for df, owned in ((squad_df, True), (pool_df, False)):
+        if df is None or not hasattr(df, "iterrows") or df.empty or "code" not in df.columns:
+            continue
+        for _, r in df.iterrows():
+            name = str(r.get("web_name", ""))
+            lab = name if owned else f"{name} ({r.get('team', '')})"
+            if lab in m and not owned:
+                lab = f"{lab} #{int(r['code'])}"
+            m.setdefault(lab, int(r["code"]))
+    return sorted(m), m
+
+
+def split_locks(locked_codes, squad_codes):
+    """(owned locked codes, required buys): a locked player you do not own is a transfer the plan has to make."""
+    sc = set(squad_codes or [])
+    lc = [int(c) for c in (locked_codes or [])]
+    return [c for c in lc if c in sc], [c for c in lc if c not in sc]
+
+
+def _apply_move_rows(squad, pool, moves):
+    mdf = pd.DataFrame(moves)
+    if mdf.empty or "out_code" not in mdf.columns or "in_code" not in mdf.columns:
+        return squad
+    out_c, in_c = set(mdf["out_code"]), set(mdf["in_code"])
+    new = pd.concat([squad[~squad["code"].isin(out_c)], pool[pool["code"].isin(in_c)]], ignore_index=True, sort=False)
+    return new.drop_duplicates(subset=["code"], keep="first")
+
+
+def _week_hit(w):
+    hs = [float(m.get("hit_cost", 0) or 0) for m in (w.get("moves") or [])]
+    return max(hs) if hs else float(w.get("hit_cost", 0) or 0)
+
+
+def _path_value(squads, plan, gws, cfg, bb_play_gw):
+    """Horizon value of a path: realised value of each week's squad (same measure the planners use) minus hit costs paid."""
+    bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+    tot = 0.0
+    for g in gws:
+        sq = squads.get(g)
+        if sq is None or f"xpts_gw{g}" not in sq.columns:
+            continue
+        tot += opt.realized_horizon_value(sq, [g], cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+    return round(tot - sum(_week_hit(w) for w in plan), 2)
+
+
+def plan_scenario_path(squad_df, pool_df, cfg, profile_name, hit_stance, free_transfers, bank, planning_gw, gw_list,
+                       target_codes, buy_gw=None, default_plan=None, disrupted_codes=None, bb_play_gw=None,
+                       meaningful_bar=None, max_candidate_weeks=5):
+    """R2 Patch 22: a scenario = one or more players you do not own that must be bought (a target you name and/or Locked
+    players outside your squad), followed by the normal weekly transfer planner over the rest of the horizon.
+    `buy_gw`: None = this week, an int, or "best" (the candidate week with the highest path value). Weeks before the buy use
+    `default_plan` (the model's own weekly plan; computed here when None). The buy week uses evaluate_target_transfer for each
+    target in turn (funding found the cheapest legal way, hit costs counted); later weeks use plan_transfer_schedule from the
+    resulting squad with the free transfers and bank left over. The targets are locked after the buy. No-chip path (a
+    Wildcard / Free Hit week of the default plan is carried as the default plan has it).
+    Returns {feasible, summary, buy_gw, weekly_plan (each week has "source": default | scenario buy | scenario plan),
+    squads {gw: squad}, total, default_total, delta, default_weekly_plan, candidates {gw: total}, targets, eval}."""
+    P = int(planning_gw)
+    gws = [int(g) for g in gw_list]
+    base = {"feasible": False, "summary": [], "buy_gw": None, "weekly_plan": [], "squads": {}, "total": None,
+            "default_total": None, "delta": None, "default_weekly_plan": None, "candidates": {}, "targets": [], "eval": []}
+    targets = [int(t) for t in (target_codes or [])]
+    if squad_df is None or squad_df.empty or "code" not in squad_df.columns or not gws:
+        return {**base, "summary": ["No squad or horizon to plan from."]}
+    if not targets:
+        return {**base, "summary": ["No target: pick a player to bring in, or lock a player you do not own."]}
+    own = set(squad_df["code"])
+    if all(t in own for t in targets):
+        return {**base, "targets": targets, "summary": ["Every chosen player is already in your squad: nothing to buy."]}
+    targets = [t for t in targets if t not in own]
+    pool_df = pool_df.copy() if pool_df is not None else pd.DataFrame(columns=squad_df.columns)
+    full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False).drop_duplicates(subset=["code"], keep="first")
+    bank = 0.0 if bank is None or pd.isna(bank) else float(bank)
+    start_value = bank + float(squad_df["price"].sum(skipna=True) or 0.0)
+
+    if default_plan is None:
+        default_plan = plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank, P, gws,
+                                              meaningful_bar, None, bb_play_gw, disrupted_codes, hit_stance)["weekly_plan"]
+    default_plan = [w for w in (default_plan or []) if w.get("gw") in gws]
+    d_squads = build_squad_after_by_gw(squad_df, default_plan, full_pool)
+    last = squad_df
+    for g in gws:                                   # carry the squad over weeks the plan does not list
+        last = d_squads.get(g, last)
+        d_squads[g] = last
+    default_total = _path_value(d_squads, default_plan, gws, cfg, bb_play_gw)
+
+    def _one(b):
+        pre = [w for w in default_plan if w["gw"] < b]
+        pre_sq = build_squad_after_by_gw(squad_df, pre, full_pool)
+        sq = pre_sq[max(pre_sq)] if pre_sq else squad_df
+        ft_at = next((w.get("ft_available") for w in default_plan if w["gw"] == b), None)
+        if ft_at is None:
+            ft_at = free_transfers if b == P else (pre[-1].get("ft_banked_after", free_transfers) if pre else free_transfers)
+        ft_at = int(ft_at)
+        bank_now = round(start_value - float(sq["price"].sum(skipna=True) or 0.0), 1)
+        moves_all, evals, hit_total, k_total, ft_left = [], [], 0.0, 0, ft_at
+        horizon_b = [g for g in gws if g >= b]
+        cur = sq
+        for t in targets:
+            if t in set(cur["code"]):
+                continue
+            ev = evaluate_target_transfer(cur, pool_df, cfg, profile_name, hit_stance, ft_left, bank_now, b, horizon_b, t,
+                                          disrupted_codes=disrupted_codes, bb_play_gw=bb_play_gw)
+            evals.append(ev)
+            if not ev.get("feasible") or not ev.get("moves"):
+                return {"ok": False, "summary": ev.get("summary") or ["No legal way to add this player."], "evals": evals}
+            cur = _apply_move_rows(cur, full_pool, ev["moves"])
+            cur = cur.copy()
+            _prev = cur["_locked"].fillna(False).astype(bool) if "_locked" in cur.columns else pd.Series(False, index=cur.index)
+            cur["_locked"] = _prev | (cur["code"] == t)
+            k = len(ev["moves"])
+            k_total += k
+            hit_total += float(ev.get("hit_cost") or 0.0)
+            ft_left = max(0, ft_left - k)
+            bank_now = round(start_value - float(cur["price"].sum(skipna=True) or 0.0), 1)
+            moves_all += [{**m, "gw": b} for m in ev["moves"]]
+        ft_after = min(transfers.MAX_BANK, ft_left + 1)
+        buy_week = {"gw": b, "moves": moves_all, "net_gain": round(sum(float(e.get("net_gain") or 0.0) for e in evals), 2),
+                    "ft_available": ft_at, "ft_used": min(k_total, ft_at), "ft_banked_after": ft_after,
+                    "hit_cost": round(hit_total, 1), "source": "scenario buy", "chip_played": None, "data_gap_note": None,
+                    "summary": f"GW{b}: required buy, {k_total} transfer(s)" + (f", -{hit_total:.0f} hit" if hit_total > 0 else ", free")}
+        rest = [g for g in gws if g > b]
+        after = []
+        if rest:
+            ps = plan_transfer_schedule(cur, pool_df, cfg, profile_name, ft_after, bank_now, b + 1, rest, meaningful_bar,
+                                        None, bb_play_gw, disrupted_codes, hit_stance)
+            after = [{**w, "source": "scenario plan"} for w in (ps.get("weekly_plan") or [])]
+        plan = [{**w, "source": "default"} for w in pre] + [buy_week] + after
+        squads = build_squad_after_by_gw(squad_df, plan, full_pool)
+        lastq = squad_df
+        for g in gws:
+            lastq = squads.get(g, lastq)
+            squads[g] = lastq
+        return {"ok": True, "plan": plan, "squads": squads, "evals": evals, "total": _path_value(squads, plan, gws, cfg, bb_play_gw)}
+
+    if isinstance(buy_gw, str) and buy_gw.lower() == "best":
+        cands = gws[:max(1, int(max_candidate_weeks))]
+    else:
+        b0 = P if buy_gw is None else int(buy_gw)
+        cands = [b0 if b0 in gws else P]
+    results = {}
+    first_fail = None
+    for b in cands:
+        r = _one(b)
+        if r["ok"]:
+            results[b] = r
+        elif first_fail is None:
+            first_fail = r
+    if not results:
+        return {**base, "targets": targets, "default_total": default_total, "default_weekly_plan": default_plan,
+                "summary": (first_fail or {}).get("summary") or ["No legal way to add this player."],
+                "eval": (first_fail or {}).get("evals", [])}
+    best_b = max(results, key=lambda b: (results[b]["total"], -b))
+    r = results[best_b]
+    delta = round(r["total"] - default_total, 2)
+    names = ", ".join(str(full_pool.loc[full_pool["code"] == t, "web_name"].iloc[0]) for t in targets)
+    summary = [f"Scenario: buy {names} in GW{best_b}, then the weekly plan: {r['total']:.1f} xPts over {len(gws)} GW(s) after hits "
+               f"vs {default_total:.1f} for the model's own plan ({delta:+.1f})."]
+    return {"feasible": True, "summary": summary, "buy_gw": best_b, "weekly_plan": r["plan"], "squads": r["squads"],
+            "total": r["total"], "default_total": default_total, "delta": delta, "default_weekly_plan": default_plan,
+            "candidates": {b: results[b]["total"] for b in results}, "targets": targets, "eval": r["evals"]}
+
+
+# --------------------------------------------------------------------------------------------------------------------
 # Patch 117d helpers: owned players at selling price, Locked players, chained plan, snapshot, short UI chips.
 # --------------------------------------------------------------------------------------------------------------------
 def lock_codes_of(df) -> list:
