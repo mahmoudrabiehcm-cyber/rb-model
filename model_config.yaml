@@ -3394,3 +3394,19 @@ xm_flag_persistence:   # R2 Patch 19 (M95-M99, M101, M102): minutes for flagged 
 
 pitch_chip_follow:     # R2 Patch 20: should the pitch in "Current squad" mode apply the chip plan (Free Hit swap, TC armband, BB bench)?
   current_squad: false # false = badge only (default); true = old behaviour. Chip Plan path and other modes always follow the chip.
+
+style_ownership:       # R2 Patch 23 (M104): raw ownership (selected_by_percent) bands used by the playing styles
+  differential_below: 10.0   # a differential = raw ownership under 10 %
+  template_above: 25.0       # a template player = raw ownership over 25 %
+
+style_rules:           # R2 Patch 23 (M103-M109)
+  enabled: true              # false = the pre-Patch-23 behaviour (tie-break swaps without slots / fade rule, no captain gap rule)
+  maverick_fade_edge: 0.5    # M109: Maverick swaps a template (>25 %) pick only if the alternative gives up less than this
+  maverick_captain_gap: 0.6  # M107: Maverick may captain a differential only if within this of the top captain
+  style_cost_warn: 3.0       # M109: warn when the weekly style cost is above this (or above the Rule #34 band)
+
+flag_buy_rules:        # R2 Patch 23 (manager: flagged players below 75 % are never recommended)
+  enabled: true
+  hard_below_chance: 75      # never recommend BUYING a player with chance of playing under this (or i/s/u/n, or d with no figure)
+  hunter_allow_75: true      # a 75 % flagged buy is allowed for Hunter only, with a free transfer, if it beats the unflagged alternative by more than the Rule #34 band
+  hugger_block_flagged: true # Hugger does not buy any flagged player (waits)

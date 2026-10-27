@@ -39,7 +39,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 23 (2026-10-27, playing styles, model rulings M103-M109, one patch): (1) raw ownership replaces the word EO in the style text (M104); wrong Standing Rule #23 citations fixed. (2) A captain flagged below 100% is never picked, for every style (M107). (3) Maverick may captain a differential (raw ownership under 10%) only if within 0.6 xPts of the best captain, with gap, tier and cost printed. (4) Differential slots are ceilings on new entries: Hugger 1, Maverick 3, Hunter none, Balanced none; nobody is forced out. (5) Maverick fade: a template pick (over 25%) is swapped only for a tie inside the Rule #34 band, no dearer, giving up less than 0.5 xPts. (6) Flagged buys: a player flagged below 75%, injured, suspended or unavailable is never recommended as a buy (all styles, owned players untouched); flagged at 75%: Hugger waits, Hunter only with a free transfer and a lead over the best unflagged option above the Rule #34 band, Maverick and Balanced unchanged. (7) Weekly style cost line with a warning above 3.0 xPts or the Rule #34 band. (8) Hit bar printed as a style threshold, never as Rule #13. (9) The weekly chained plan now has the same style step as the single-decision paths (before this patch it had none). Form B variance scoring and numeric fades are not included (waiting for the M108 backtest). NOT validated in a browser. "
+                  "R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
                   "R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
                   "R2 Patch 19 (2026-10-22, model rulings M95-M99, M101, M102, manager-approved build): flag persistence for REGULAR starters (60+ minutes in at least 3 of the last 6 gameweeks). A doubtful flag (25 / 50 / 75%) no longer applies to the next gameweek only: minutes follow the realised history, e.g. 50% = 23% of normal at GW+1, 45%, 58%, 69%, 74% at GW+5, held to GW+6 then back to full by GW+8 (the hold and the return are my estimates). Same numbers in the pitch, the transfer planner and the chip layer; a flagged player stays unconfirmed (no -4 hit on a target flagged below 100%) until the flag clears. Non-regulars keep the old next-gameweek-only treatment, labelled. M102 (my reading of your go): an undated injury (i flag, no return date) for a regular follows the realised-share table 1% / 13% / 29% / 40% / 52% at GW+1..GW+5; dated returns and suspensions are unchanged; switch xm_flag_persistence.undated_injury_enabled. News cards show a history line for flagged regulars. Switch xm_flag_persistence.enabled. NOT validated in a browser. "
                   "R2 Patch 18 (2026-10-21, manager choices): the Latest News tab now covers the ACTIVE TEAM only: your 15 players, the transfer plan ins and outs (every week of the chain) and hot picks (top 3 per position and top 10 by xPts and top 10 by net transfers, outside the squad and the plan); flagged players only, grouped, with an all-clear line per group; FPL API data, display only (no xPts, ranking or pick changes); switch news_scope.enabled. NOT validated in a browser. "
@@ -2684,6 +2685,10 @@ with st.spinner("Fetching live data and computing xPts..."):
     # R2 Patch 22: locked players outside the squad are required buys (a player that is also Excluded is not: Excluded wins)
     _owned_locked, _required_buy_codes = recommend.split_locks(locked_codes, set(squad_codes))
     _required_buy_codes = [c for c in _required_buy_codes if c not in set(excluded_codes)]
+    # R2 Patch 23: flagged players are never recommended as a BUY (owned players untouched; locked / named targets exempt)
+    _fb_codes, _fb_info = recommend.flag_buy_filter(proj, set(squad_codes), style_name, cfg,
+                                                     keep_codes=set(_required_buy_codes) | set(locked_codes))
+    proj["_flag_excluded"] = proj["code"].isin(_fb_codes)
     if _required_buy_codes:
         with _lock_slot:
             st.caption(f"{len(_required_buy_codes)} required buy(s): see Transfers")
@@ -2928,6 +2933,8 @@ with st.spinner("Fetching live data and computing xPts..."):
         cap_col = f"xpts_gw{gw_list[0]}"
         cap_candidates = starters_df.rename(columns={cap_col: "xpts_this_gw"})[
             ["code", "web_name", "team", "xpts_this_gw", "selected_by_percent"]]
+        # R2 Patch 23 (M107): a captain flagged below 100% is excluded for every style
+        cap_candidates, _cap_flag_names, _cap_flag_fb = style_profiles.captain_flag_filter(cap_candidates, proj)
         cap_result = eng.captaincy_protocol(cap_candidates, cfg)
         # Patch 27 (v6.3 / Standing Rule #40) — team-level results-form
         # tiebreak, built from finished-fixture scores already in `snap`
@@ -2965,6 +2972,12 @@ with st.spinner("Fetching live data and computing xPts..."):
         if cap_alt_row is not None and cap_alt_label.startswith("Near miss"):
             cap_caption += (f" Nearest alternative if this pick disappoints: <b>{cap_alt_row['web_name']}</b> "
                             f"({cap_alt_label.replace('Near miss – ', '')}, outside this week's shortlist).")
+        _cap_style_note = cap_pick_row.get("style_note")
+        if _cap_style_note:
+            cap_caption += f" <i>{_cap_style_note}</i>"
+        if _cap_flag_names:
+            cap_caption += (f" <i>Not captain (flagged below 100%): {', '.join(_cap_flag_names)}."
+                            + (" Everyone flagged, so the list is unfiltered: check the news." if _cap_flag_fb else "") + "</i>")
         team_stability_note = cap_pick_row.get("team_stability_note")
         if team_stability_note:
             cap_caption += (f" <i>Team-Stability tiebreak (Rule #40): {cap_pick_row['web_name']}'s team wins the "
@@ -4007,6 +4020,7 @@ try:
                     ["code", "web_name", "team", "xpts_this_gw", "selected_by_percent"]]
                 _cands0_v = _xi0["xi"].rename(columns={_col0: "xpts_this_gw"})[
                     ["code", "web_name", "team", "position", "xpts_this_gw"]] if "position" in _xi0["xi"].columns else _cands0
+                _cands0, _f0n, _f0fb = style_profiles.captain_flag_filter(_cands0, proj)   # R2 Patch 23 (M107)
                 _res0 = eng.captaincy_protocol(_cands0, cfg)
                 _tt0 = eng.team_league_table(snap.fixtures, snap.teams)
                 _pk0 = style_profiles.captaincy_pick(_res0, style_name, team_table=_tt0, cfg=cfg)
@@ -4156,7 +4170,7 @@ with tab_captain:
             _cap_bar_pct = 100
             _cap_bar_note = "xPts this week"
         _cap_eo = _c_row.get("selected_by_percent")
-        _cap_eo_txt = f"{_cap_eo:.1f}% EO" if _cap_eo is not None and not pd.isna(_cap_eo) else "EO unavailable"
+        _cap_eo_txt = f"{_cap_eo:.1f}% owned" if _cap_eo is not None and not pd.isna(_cap_eo) else "ownership unavailable"
         _cap_photo = _photo_url(_c_row.get("code", 0))
         _cap_initials = "".join([w[0] for w in str(_c_row.get("web_name", "??")).split()][:2]).upper() or "??"
         st.markdown(
@@ -6121,7 +6135,7 @@ def _render_scenario_results():
                 full_show = styled_squad.sort_values(["position", wc_gw_col], ascending=[True, False])[show_cols] \
                     .rename(columns=col_rename) if wc_gw_col in styled_squad.columns else styled_squad
                 _df(full_show, hide_index=True, width="stretch")
-            _nc(f"Style: {wc_cache['style_name']}", f"Style profile **{wc_cache['style_name']}** applied to this rebuild (same EO-pull "
+            _nc(f"Style: {wc_cache['style_name']}", f"Style profile **{wc_cache['style_name']}** applied to this rebuild (same raw-ownership tie-break "
                        f"tie-break as ordinary transfers). Prices, injuries and fixtures can move before "
                        f"GW{wc_gw_choice} — re-run this closer to the date rather than treating it as locked in.")
 
@@ -6971,6 +6985,19 @@ with tab_transfers:
     # "No hits" chained weekly schedule, where "which week's squad" is itself
     # ambiguous), and never touches the header stats above — a local preview only.
     _moves_df_preview = pd.DataFrame(rec["moves"]) if rec.get("moves") else pd.DataFrame()
+    # R2 Patch 23 (M109): weekly style-cost line (xPts given up vs the style-free plan + ownership change) and the flagged-buy filter note
+    try:
+        _sc_all = recommend.style_cost_summary(rec.get("moves") or [], rec.get("margin_of_error", 2.0), cfg)
+        if _sc_all:
+            (_nw if _sc_all["warn"] else _nc)(f"Style cost {_sc_all['cost']:.1f} xPts", _sc_all["text"])
+        for _m_ in (rec.get("moves") or []):
+            if _m_.get("style_note"):
+                _nc("Style swap", _m_["style_note"])
+        if _fb_info:
+            _fb_show = ", ".join(f"{r_['name']} ({r_['xpts']:.1f})" for r_ in _fb_info[:5])
+            _nc(f"{len(_fb_info)} flagged kept out", f"Flagged-buy rule: {len(_fb_info)} flagged player(s) are kept out of purchases for this style; highest xPts: {_fb_show}.")
+    except Exception as _e_sc:
+        print(f"[R2P23] style cost line skipped: {type(_e_sc).__name__}: {_e_sc}", file=sys.stderr)
     if not rec.get("is_weekly_schedule") and not _moves_df_preview.empty \
             and "out_code" in _moves_df_preview.columns and "in_code" in _moves_df_preview.columns:
         _move_out_codes = set(_moves_df_preview["out_code"])
@@ -7007,7 +7034,7 @@ with tab_transfers:
                     f"doesn't hide behind a good net number.")
 
     with st.expander("Why — full trace, rule references, and move-by-move detail"):
-        _nc(f"{style_name} · hit {rec['hit_cost_threshold']} · bar {rec['minimum_meaningful_gain_free']}", f"Style profile: **{style_name}** · hit-cost threshold **{rec['hit_cost_threshold']} xPts** · "
+        _nc(f"{style_name} · style hit threshold {rec['hit_cost_threshold']} · bar {rec['minimum_meaningful_gain_free']}", f"Style profile: **{style_name}** · style threshold for a hit **{rec['hit_cost_threshold']} xPts** (default style {style_profiles.PROFILES[style_profiles.DEFAULT_PROFILE]['hit_cost_threshold']}; a style setting, not a Rule #13 test) · "
                    f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
                    f"margin-of-error floor **{rec.get('margin_of_error', 2.0):.1f} xPts** · "
                    f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
@@ -7141,9 +7168,9 @@ with tab_style:
     # ---------------------------------------------------------------------------
     st.markdown('<div class="section-h">Manager Style Fit</div>', unsafe_allow_html=True)
     st.markdown(f"**{style_name}** — {style_profiles.get_profile(style_name)['description']}",
-                help="Ownership is never a reason on its own to prefer a pick — the EO weighting above only breaks "
-                     "ties once xPts is already close, and any differential still has to clear the pool-average "
-                     "floor on merit.")
+                help="Ownership is never a reason on its own to prefer a pick — the raw-ownership weighting only breaks "
+                     "ties once xPts is already close (inside the Rule #34 band), and any differential still has to clear the "
+                     "pool-average floor on merit. The style never changes xPts, minutes, flags, chips or the bench (M103).")
 
     # -----------------------------------------------------------------------
     # Season rank chart (Patch 66; y-axis reversal Patch 69; Patch 78 —

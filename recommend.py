@@ -73,7 +73,7 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
                     this_gw_col: str, out_codes: set, in_codes: set,
                     retained_club_counts: dict | None = None,
                     retained_codes: set | None = None) -> list[dict]:
-    """Style-Fit tie-break (Rule #23 style consistency), applied AFTER the
+    """Style-Fit tie-break (M103; Standing Rule #31 / Step 8 style consistency), applied AFTER the
     joint xPts solve has already picked the best squad, never instead of
     it: for each chosen IN player, look for a same-position, same-or-
     cheaper alternative in the full pool that is genuinely within
@@ -143,12 +143,38 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
     max_per_club = cfg["squad_rules"]["max_per_club"]
     club_counts = dict(retained_club_counts or {})
 
+    # R2 Patch 23 (M103-M109): ownership bands, differential-slot ceiling and the Maverick template fade. All of it is
+    # inside the existing tie band; with style_rules.enabled false this is the old behaviour.
+    _rules = style_profiles.style_rules(cfg)
+    _rules_on = bool(_rules["enabled"])
+    _d_below, _t_above = style_profiles.ownership_bands(cfg)
+    _slots_max = profile.get("differential_slots_max") if _rules_on else None
+    _fade = bool(profile.get("fade_template")) and _rules_on
+
+    def _own(v):
+        v = pd.to_numeric(v, errors="coerce")
+        return float("nan") if pd.isna(v) else float(v)
+
+    def _is_diff(v):
+        v = _own(v)
+        return (not pd.isna(v)) and v < _d_below
+
+    _slots_used = 0
+    if _slots_max is not None:
+        if retained_codes:
+            _ret = full_pool[full_pool["code"].isin(set(retained_codes)) & (full_pool["position"] != "GK")]
+            _slots_used += int(sum(_is_diff(x) for x in _ret.get("selected_by_percent", [])))
+        _slots_used += sum(1 for _p in pairs if _p["position"] != "GK" and _is_diff(_p.get("in_eo")))
+
     result = []
     for p in pairs:
         pos = p["position"]
         pos_pool = full_pool[(full_pool["position"] == pos) &
                               (full_pool.get("status", pd.Series(dtype=object)) == "a")].copy()
         pos_pool = pos_pool[pos_pool["code"] != p["in_code"]]
+        for _xc in ("_excluded", "_flag_excluded"):   # R2 Patch 23: an Excluded / flag-blocked player is never a style substitute
+            if _xc in pos_pool.columns:
+                pos_pool = pos_pool[~pos_pool[_xc].fillna(False).astype(bool)]
         # Patch 59 — `excluded_codes` now also carries `retained_codes` (see
         # docstring): a substitute must never collide with a squad member
         # who's already staying untouched, not just with this batch's own
@@ -191,6 +217,21 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
             floor = style_profiles.differential_floor(pos_pool, "xpts_horizon_sum", ceiling_key)
             tied = tied[tied["xpts_horizon_sum"] >= floor]
 
+        _orig_own = _own(p.get("in_eo"))
+        _orig_diff = pos != "GK" and _is_diff(p.get("in_eo"))
+        if _fade and not tied.empty:
+            # M109: only a template pick (> template_above) is faded; the alternative must give up less than the fade edge,
+            # be less owned, and be no dearer (already true above).
+            if pd.isna(_orig_own) or _orig_own <= _t_above:
+                tied = tied.iloc[0:0]
+            else:
+                tied = tied[(tied["xpts_horizon_sum"] > p["in_xpts"] - float(_rules["maverick_fade_edge"])) &
+                            (pd.to_numeric(tied["selected_by_percent"], errors="coerce") < _orig_own)]
+        if _slots_max is not None and not tied.empty and pos != "GK":
+            _room = (_slots_used - (1 if _orig_diff else 0)) < _slots_max
+            if not _room:
+                tied = tied[~pd.to_numeric(tied["selected_by_percent"], errors="coerce").lt(_d_below)]
+
         if tied.empty:
             result.append(p)
             taken_in_codes.add(p["in_code"])
@@ -209,16 +250,112 @@ def _apply_eo_pull(pairs: list[dict], full_pool: pd.DataFrame, profile: dict, cf
 
         gw_val = best.get(this_gw_col, 0)
         gw_val = 0 if pd.isna(gw_val) else gw_val
+        _best_own = _own(best.get("selected_by_percent"))
+        _cost = round(float(p["in_xpts"]) - float(best.get("xpts_horizon_sum", 0.0) or 0.0), 2)
+        _own_chg = None if (pd.isna(_best_own) or pd.isna(_orig_own)) else round(_best_own - _orig_own, 1)
+        _note = (f"Style swap ({profile.get('_name', 'style')}): {p['in']} → {best['web_name']}; "
+                 f"xPts {float(best.get('xpts_horizon_sum', 0.0) or 0.0):.1f} vs {float(p['in_xpts']):.1f} "
+                 f"(gap {_cost:+.2f}, inside the {moe:.1f} band); raw ownership "
+                 f"{'n/a' if pd.isna(_orig_own) else format(_orig_own, '.1f')}% → "
+                 f"{'n/a' if pd.isna(_best_own) else format(_best_own, '.1f')}%.")
+        if _slots_max is not None and pos != "GK":
+            _slots_used += (1 if _is_diff(best.get("selected_by_percent")) else 0) - (1 if _orig_diff else 0)
         result.append({**p,
                         "in_code": best["code"], "in": best["web_name"], "in_team": best["team"],
                         "in_price": best["price"], "in_xpts": best.get("xpts_horizon_sum", 0.0) or 0.0,
                         "in_gw": gw_val, "in_eo": best.get("selected_by_percent"),
                         "setpiece_flag": bool(best.get("setpiece_flag", False)),
-                        "eo_pull_applied": True})
+                        "eo_pull_applied": True,
+                        "style_note": _note, "style_cost": _cost, "style_own_change": _own_chg,
+                        "style_from": p["in"], "style_from_code": p["in_code"]})
         taken_in_codes.add(best["code"])
         excluded_codes.add(best["code"])  # Patch 59 — keep excluded_codes in sync with taken_in_codes
         club_counts[best["team"]] = club_counts.get(best["team"], 0) + 1
     return result
+
+
+def style_cost_summary(rows: list[dict], moe: float, cfg: dict | None = None) -> dict | None:
+    """M109: the weekly style cost = horizon xPts given up by the style swaps against the style-free plan (positive parts only), with the
+    ownership change. Warns when the cost is above `style_cost_warn` or above the Rule #34 band `moe`. None when nothing was swapped."""
+    sw = [r for r in (rows or []) if r.get("style_cost") is not None and r.get("eo_pull_applied")]
+    if not sw:
+        return None
+    cost = round(sum(max(0.0, float(r["style_cost"])) for r in sw), 2)
+    own = round(sum(float(r["style_own_change"]) for r in sw if r.get("style_own_change") is not None), 1)
+    warn_at = float(style_profiles.style_rules(cfg)["style_cost_warn"])
+    warn = cost > warn_at or cost > float(moe)
+    txt = (f"Style cost: {cost:.2f} xPts given up vs the style-free plan across {len(sw)} swap(s); raw ownership of the incoming "
+           f"players changes by {own:+.1f} points in total.")
+    if warn:
+        txt += f" WARNING: above {min(warn_at, float(moe)):.1f} - check the swap(s) before accepting."
+    return {"cost": cost, "own_change": own, "swaps": len(sw), "warn": warn, "text": txt}
+
+
+def _fix_squad_after_style(chosen_squad: pd.DataFrame, pairs: list[dict], new_pairs: list[dict], full_pool: pd.DataFrame) -> pd.DataFrame:
+    """The squad after the style substitutions: the original IN rows are swapped for the substituted rows from the pool."""
+    sq = chosen_squad.copy()
+    swapped = {a["in_code"]: b["in_code"] for a, b in zip(pairs, new_pairs) if a["in_code"] != b["in_code"]}
+    if not swapped:
+        return sq
+    keep = sq[~sq["code"].isin(set(swapped))]
+    add = full_pool[full_pool["code"].isin(set(swapped.values()))]
+    cols = [c for c in sq.columns if c in add.columns]
+    return pd.concat([keep, add[cols]], ignore_index=True).drop_duplicates(subset="code")
+
+
+def flag_buy_filter(pool_df: pd.DataFrame, squad_codes, profile_name: str, cfg: dict | None, keep_codes=(),
+                    plan_hit_free: bool = True) -> tuple[set, list[dict]]:
+    """Players that must not be BOUGHT (manager 27 Oct 2026: flagged players below 75 % are never recommended), as a set of codes to
+    add to the Excluded set, plus info rows. Owned players are never touched (selling rules are unchanged, M95-M102), and codes in
+    `keep_codes` (user-locked required buys / named scenario targets) are exempt. Hard rule, all styles: status i/s/u/n, status d with
+    no chance figure, or chance under `hard_below_chance`. At exactly the flagged-75 level: Hugger does not buy (waits);
+    Hunter may buy only with a free transfer and only if he beats the best unflagged same-position no-dearer alternative by more than
+    the Rule #34 band (checked here on horizon xPts, `plan_hit_free` False removes the Hunter exception); Maverick / Balanced unchanged."""
+    rules = (cfg or {}).get("flag_buy_rules", {}) or {}
+    if not rules.get("enabled", True) or pool_df is None or pool_df.empty:
+        return set(), []
+    hard = float(rules.get("hard_below_chance", 75))
+    owned = set(squad_codes or [])
+    keep = set(keep_codes or [])
+    st = pool_df.get("status", pd.Series("a", index=pool_df.index)).fillna("a").astype(str).str.lower()
+    ch = pd.to_numeric(pool_df.get("chance_of_playing_next_round", pd.Series(float("nan"), index=pool_df.index)), errors="coerce")
+    hard_bad = st.isin(["i", "s", "u", "n"]) | ((st == "d") & ch.isna()) | (ch.notna() & (ch < hard))
+    at75 = (~hard_bad) & ((st != "a") | (ch.notna() & (ch < 100)))
+    excl, info = set(), []
+    for idx in pool_df.index[hard_bad]:
+        c = pool_df.at[idx, "code"]
+        if c in owned or c in keep:
+            continue
+        excl.add(c)
+        if st.at[idx] in ("u", "n"):      # departed / not in the squad list: excluded but not worth a line
+            continue
+        info.append({"code": c, "name": pool_df.at[idx, "web_name"], "why": "flagged below 75% (or injured/suspended)",
+                     "xpts": float(pd.to_numeric(pool_df.at[idx, "xpts_horizon_sum"], errors="coerce") or 0.0) if "xpts_horizon_sum" in pool_df.columns else 0.0})
+    prof = style_profiles.get_profile(profile_name)
+    is_hugger = prof.get("eo_pull") == "strong_high_eo"
+    is_hunter = prof.get("eo_pull") == "strong_low_eo"
+    moe_fn = lambda v: eng.margin_of_error_threshold(v, cfg)
+    for idx in pool_df.index[at75]:
+        c = pool_df.at[idx, "code"]
+        if c in owned or c in keep:
+            continue
+        row = pool_df.loc[idx]
+        if is_hugger and rules.get("hugger_block_flagged", True):
+            excl.add(c); why = "flagged 75%: Hugger waits (delay cost = the xPts the flag removes)"
+        elif is_hunter and rules.get("hunter_allow_75", True):
+            alt = pool_df[(pool_df["position"] == row["position"]) & (~at75) & (~hard_bad) & (pool_df["price"] <= row["price"])
+                          & (~pool_df["code"].isin(owned))]
+            best_alt = float(alt["xpts_horizon_sum"].max()) if not alt.empty else float("-inf")
+            xp = float(pd.to_numeric(row.get("xpts_horizon_sum"), errors="coerce") or 0.0)
+            if plan_hit_free and xp > best_alt + moe_fn(xp):
+                continue
+            excl.add(c); why = "flagged 75%: Hunter needs a free transfer and a lead over the best unflagged alternative above the Rule #34 band"
+        else:
+            continue
+        info.append({"code": c, "name": row["web_name"], "why": why,
+                     "xpts": float(pd.to_numeric(row.get("xpts_horizon_sum"), errors="coerce") or 0.0)})
+    info.sort(key=lambda r: -r["xpts"])
+    return excl, info
 
 
 def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, in_codes: set,
@@ -1964,6 +2101,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
 
         ft_used = min(chosen["actual_k"], ft_bank)
         ft_after = min(transfers.MAX_BANK, (ft_bank - ft_used) + 1)
+        _style_sum = None
 
         gap_codes = chosen.get("data_gap_codes", [])
         data_gap_note = None
@@ -1995,6 +2133,28 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             plan.append(f"GW{gw}: Roll — no move clears the bar this week.")
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
+            # R2 Patch 23 (M103-M109): the same style tie-break the single-decision paths use, applied to the chosen week's
+            # moves (before this patch the weekly plan had no style step). Nothing swapped = unchanged.
+            _style_sum = None
+            try:
+                _out_now = set(sim_squad["code"]) - set(chosen["squad"]["code"])
+                _ret_codes = set(sim_squad["code"]) - _out_now
+                _ret_clubs = sim_squad[sim_squad["code"].isin(_ret_codes)]["team"].value_counts().to_dict()
+                _pairs_st = _apply_eo_pull(pairs, full_pool, profile, cfg, this_gw_col, _out_now,
+                                           {q["in_code"] for q in pairs}, _ret_clubs, _ret_codes)
+                if any(a["in_code"] != b["in_code"] for a, b in zip(pairs, _pairs_st)):
+                    _adj = _fix_squad_after_style(chosen["squad"], pairs, _pairs_st, full_pool)
+                    if len(_adj) == len(chosen["squad"]):
+                        _new_total = opt.realized_horizon_value(_adj, remaining_gws, cfg, bench_weight_scale=bench_w,
+                                                                bb_play_gw=bb_play_gw) + _tc_extra(_adj, remaining_gws)
+                        _base = chosen.get("baseline_total", old_total)
+                        chosen = {**chosen, "squad": _adj, "total": _new_total,
+                                  "net_gain": round(_new_total - _base - chosen.get("hit_cost", 0.0), 2)}
+                        pairs = _pairs_st
+                        _style_sum = style_cost_summary(
+                            [_move_row(q, 0.0, 0.0, True) for q in pairs], moe, cfg)
+            except Exception:
+                _style_sum = None
             # R2 Patch 10: the package's own gain for THIS gameweek next to the horizon figure (the horizon sum was
             # read as one week: a GW8 move showing +13.9 was +0.9 that week and the rest over the next weeks).
             _bbw = bool(bb_play_gw is not None and gw == bb_play_gw)
@@ -2039,6 +2199,11 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 plan.append(f"GW{gw}: Baseline note: {zeroed_txt} isn't nailed over the remaining horizon, so "
                             f"net-gain compares the incoming player against {zeroed_txt} benched for free.")
             plan.append(f"GW{gw}: {ft_bank - ft_used} FT left banked → {ft_after} for GW{gw + 1}.")
+            if _style_sum:
+                plan.append(f"GW{gw}: {_style_sum['text']}")
+                for q in pairs:
+                    if q.get("style_note"):
+                        plan.append(f"GW{gw}: {q['style_note']}")
             sim_squad = chosen["squad"]
 
         if data_gap_note:
@@ -2049,6 +2214,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             "ft_available": ft_bank, "ft_used": ft_used, "ft_banked_after": ft_after,
             "summary": week_summary, "data_gap_note": data_gap_note,
             "cap_forced": bool(cap_forced and chosen["actual_k"] > 0),
+            "style_cost": (_style_sum if chosen["actual_k"] > 0 else None),
         })
         summary.append(week_summary)
         plan.append(f"GW{gw}: {chosen['actual_k']} transfer(s) this week (chained pacing plan) — "
@@ -2778,7 +2944,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         min_retain = max(0, 15 - k)
         result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
                                   min_retain=min_retain, must_include_codes=[target_code] + lock_codes_of(squad_df),
-                                  exclude_codes=exclude_codes_of(full_pool),
+                                  exclude_codes=exclude_codes_of(full_pool, exempt=[target_code]),
                                   objective_col="xpts_horizon_sum")
         if result is None:
             continue
@@ -3380,14 +3546,20 @@ def lock_codes_of(df) -> list:
     return sorted(int(c) for c in df.loc[m, "code"].tolist())
 
 
-def exclude_codes_of(df) -> list:
+def exclude_codes_of(df, exempt=()) -> list:
     """Patch 117j: codes of the manager's Excluded players (never bought, never in a Wildcard rebuild), read from the boolean
     `_excluded` column carried on the pool frame (absent or NaN = not excluded). Read by the Wildcard rebuild and the
-    transfer planner only, exactly like Locked players; ceilings, the Free Hit optimum and the Rating % never read it."""
-    if df is None or not hasattr(df, "columns") or "_excluded" not in df.columns or "code" not in df.columns:
+    transfer planner only, exactly like Locked players; ceilings, the Free Hit optimum and the Rating % never read it.
+    R2 Patch 23: also reads `_flag_excluded` (players the flagged-buy rule keeps out of every purchase) and drops `exempt`
+    codes (a named scenario target is never removed by the flag rule)."""
+    if df is None or not hasattr(df, "columns") or "code" not in df.columns:
         return []
-    m = df["_excluded"].fillna(False).astype(bool)
-    return sorted(int(c) for c in df.loc[m, "code"].tolist())
+    m = pd.Series(False, index=df.index)
+    for col in ("_excluded", "_flag_excluded"):
+        if col in df.columns:
+            m = m | df[col].fillna(False).astype(bool)
+    ex = set(int(c) for c in (exempt or []))
+    return sorted(int(c) for c in df.loc[m, "code"].tolist() if int(c) not in ex)
 
 
 def lock_flags(squad_df, lock_codes) -> list:
@@ -3453,7 +3625,7 @@ def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg,
     df["owned"] = df["code"].isin(set(owned_codes))
     df["locked"] = df["code"].isin(set(locked_codes or []))
     df["excluded"] = df["code"].isin(set(excluded_codes or []))
-    df = df.drop(columns=[c for c in ("_locked", "_excluded") if c in df.columns])
+    df = df.drop(columns=[c for c in ("_locked", "_excluded", "_flag_excluded") if c in df.columns])
     m = dict(meta or {})
     m.update({"bank": float(bank), "budget": float(budget), "locked_codes": [int(c) for c in (locked_codes or [])],
               "excluded_codes": [int(c) for c in (excluded_codes or [])],
@@ -3625,6 +3797,8 @@ def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dic
         "in_eo": p["in_eo"], "setpiece_flag": p["setpiece_flag"],
         "hit_cost": hit_cost, "net_gain": net_gain, "justified": justified,
         "eo_pull_applied": bool(p.get("eo_pull_applied", False)),
+        "style_note": p.get("style_note"), "style_cost": p.get("style_cost"),
+        "style_own_change": p.get("style_own_change"),
     }
 
 
