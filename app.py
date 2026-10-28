@@ -39,7 +39,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 23 (2026-10-27, playing styles, model rulings M103-M109, one patch): (1) raw ownership replaces the word EO in the style text (M104); wrong Standing Rule #23 citations fixed. (2) A captain flagged below 100% is never picked, for every style (M107). (3) Maverick may captain a differential (raw ownership under 10%) only if within 0.6 xPts of the best captain, with gap, tier and cost printed. (4) Differential slots are ceilings on new entries: Hugger 1, Maverick 3, Hunter none, Balanced none; nobody is forced out. (5) Maverick fade: a template pick (over 25%) is swapped only for a tie inside the Rule #34 band, no dearer, giving up less than 0.5 xPts. (6) Flagged buys: a player flagged below 75%, injured, suspended or unavailable is never recommended as a buy (all styles, owned players untouched); flagged at 75%: Hugger waits, Hunter only with a free transfer and a lead over the best unflagged option above the Rule #34 band, Maverick and Balanced unchanged. (7) Weekly style cost line with a warning above 3.0 xPts or the Rule #34 band. (8) Hit bar printed as a style threshold, never as Rule #13. (9) The weekly chained plan now has the same style step as the single-decision paths (before this patch it had none). Form B variance scoring and numeric fades are not included (waiting for the M108 backtest). NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
+                  "R2 Patch 23 (2026-10-27, playing styles, model rulings M103-M109, one patch): (1) raw ownership replaces the word EO in the style text (M104); wrong Standing Rule #23 citations fixed. (2) A captain flagged below 100% is never picked, for every style (M107). (3) Maverick may captain a differential (raw ownership under 10%) only if within 0.6 xPts of the best captain, with gap, tier and cost printed. (4) Differential slots are ceilings on new entries: Hugger 1, Maverick 3, Hunter none, Balanced none; nobody is forced out. (5) Maverick fade: a template pick (over 25%) is swapped only for a tie inside the Rule #34 band, no dearer, giving up less than 0.5 xPts. (6) Flagged buys: a player flagged below 75%, injured, suspended or unavailable is never recommended as a buy (all styles, owned players untouched); flagged at 75%: Hugger waits, Hunter only with a free transfer and a lead over the best unflagged option above the Rule #34 band, Maverick and Balanced unchanged. (7) Weekly style cost line with a warning above 3.0 xPts or the Rule #34 band. (8) Hit bar printed as a style threshold, never as Rule #13. (9) The weekly chained plan now has the same style step as the single-decision paths (before this patch it had none). Form B variance scoring and numeric fades are not included (waiting for the M108 backtest). NOT validated in a browser. "
                   "R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
                   "R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
                   "R2 Patch 19 (2026-10-22, model rulings M95-M99, M101, M102, manager-approved build): flag persistence for REGULAR starters (60+ minutes in at least 3 of the last 6 gameweeks). A doubtful flag (25 / 50 / 75%) no longer applies to the next gameweek only: minutes follow the realised history, e.g. 50% = 23% of normal at GW+1, 45%, 58%, 69%, 74% at GW+5, held to GW+6 then back to full by GW+8 (the hold and the return are my estimates). Same numbers in the pitch, the transfer planner and the chip layer; a flagged player stays unconfirmed (no -4 hit on a target flagged below 100%) until the flag clears. Non-regulars keep the old next-gameweek-only treatment, labelled. M102 (my reading of your go): an undated injury (i flag, no return date) for a regular follows the realised-share table 1% / 13% / 29% / 40% / 52% at GW+1..GW+5; dated returns and suspensions are unchanged; switch xm_flag_persistence.undated_injury_enabled. News cards show a history line for flagged regulars. Switch xm_flag_persistence.enabled. NOT validated in a browser. "
@@ -6251,6 +6252,14 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
         return [], None, None
 
 
+def _rerun_lineup():
+    """R2 Patch 24: re-draw the pitch fragment after a lineup change (a full rerun when not inside a fragment rerun)."""
+    try:
+        st.rerun(scope="fragment")
+    except st.errors.StreamlitAPIException:
+        st.rerun()
+
+
 @st.fragment
 def _render_pitch_navigator():
     st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
@@ -6568,6 +6577,14 @@ def _render_pitch_navigator():
         _nc(f"No valid XI GW{nav_gw} (blank?)", f"Couldn't solve a valid starting XI for GW{nav_gw} (common for a genuine blank gameweek).")
         return
 
+    # R2 Patch 24: lineup scenario (Current squad view only). The saved XI is used only while it is still legal for this squad.
+    _lineup_key = f"lineup_xi_{entry_id}_{planning_gw}_{nav_gw}"
+    _lineup_xi = None
+    _model_xi_result = nav_xi_result
+    if nav_mode == "Current squad" and _fh_base is None:
+        _lineup_xi = recommend.lineup_valid_or_none(nav_squad, st.session_state.get(_lineup_key))
+        if _lineup_xi:
+            nav_xi_result = recommend.lineup_result(nav_squad, nav_col, _lineup_xi)
     nav_starters = nav_xi_result["xi"]
     nav_bench = nav_squad[~nav_squad["code"].isin(nav_starters["code"])]
     nav_gw_xpts = round(nav_xi_result["total"], 1)
@@ -6679,6 +6696,8 @@ def _render_pitch_navigator():
 
     # R2 Patch 6: your captain pick for this GW (what-if) replaces the armband when he starts; the points tile shows
     # XI + C / TC / full plain bench (BB, on the squad after this week's recommended moves) / Free Hit squad.
+    if _lineup_xi and nav_cap_code not in set(nav_starters["code"]):      # R2 Patch 24: the swapped-out player held the armband
+        nav_cap_code = nav_starters.sort_values(nav_col, ascending=False).iloc[0]["code"]
     _model_cap = nav_cap_code
     _user_cap = cap_choice.get(int(nav_gw))
     if _user_cap is not None and _user_cap in set(nav_starters["code"]):
@@ -6704,6 +6723,15 @@ def _render_pitch_navigator():
         with _pts_box:
             st.metric(f"GW{nav_gw} points ({_lab})", f"{_brk['total']:.1f}", help=_hov)
             st.markdown(recommend.ui_chip(_brk["text"] + _t_note, "info"), unsafe_allow_html=True)
+            if _lineup_xi:
+                _mxi = _model_xi_result["xi"]
+                _mcap = _mxi.sort_values(nav_col, ascending=False).iloc[0]["code"] if (at_planning_gw is False or cap_pick_row is None) else cap_pick_row["code"]
+                if _mcap not in set(_mxi["code"]):
+                    _mcap = _mxi.sort_values(nav_col, ascending=False).iloc[0]["code"]
+                _mb = recommend.gw_points_breakdown(_mxi, nav_squad[~nav_squad["code"].isin(_mxi["code"])], nav_col, cap_code=_mcap, chip=_t_chip)
+                _dlt = _brk["total"] - _mb["total"]
+                st.markdown(recommend.ui_chip(recommend.lineup_cost_text(_mb["total"], _brk["total"]), "warn" if _dlt < -0.05 else "ok",
+                                              "scenario, not the model XI"), unsafe_allow_html=True)
             if _user_cap is not None and _model_cap is not None and _user_cap != _model_cap:
                 _cst = recommend.captain_cost(_t_xi, nav_col, _user_cap, _model_cap, _t_chip)
                 _mn = nav_starters.loc[nav_starters["code"] == _model_cap, "web_name"]
@@ -6773,6 +6801,30 @@ def _render_pitch_navigator():
     except Exception:
         _panel = ""
     st.markdown('<div class="pitch-wrap">' + nav_html + _panel + '</div>', unsafe_allow_html=True)
+    # R2 Patch 24: My lineup (scenario): swap a starter for a bench player; the points tile above recalculates.
+    if nav_mode == "Current squad" and _fh_base is None and not nav_bench.empty:
+        with st.expander("My lineup (scenario)", expanded=bool(_lineup_xi)):
+            _base_codes = _lineup_xi or [int(c) for c in _model_xi_result["xi"]["code"]]
+            _st_rows = nav_starters.sort_values(["position", nav_col], ascending=[True, False])
+            _bn_rows = nav_bench.sort_values(["position", nav_col], ascending=[True, False])
+            _st_lab = {f"{r['web_name']} ({r['position']}) {float(r[nav_col]):.1f}": int(r["code"]) for _, r in _st_rows.iterrows()}
+            _bn_lab = {f"{r['web_name']} ({r['position']}) {float(r[nav_col]):.1f}": int(r["code"]) for _, r in _bn_rows.iterrows()}
+            _c1, _c2 = st.columns(2)
+            _o_pick = _c1.selectbox("Swap out (starter)", list(_st_lab), key=f"lineup_out_{nav_gw}")
+            _i_pick = _c2.selectbox("Swap in (bench)", list(_bn_lab), key=f"lineup_in_{nav_gw}")
+            _b1, _b2 = st.columns(2)
+            if _b1.button("Swap", key=f"lineup_swap_{nav_gw}"):
+                _new_xi, _why = recommend.lineup_swap(nav_squad, _base_codes, _st_lab[_o_pick], _bn_lab[_i_pick])
+                if _new_xi is None:
+                    _nw("Swap not allowed", _why)
+                else:
+                    st.session_state[_lineup_key] = _new_xi
+                    _rerun_lineup()
+            if _b2.button("Reset to model XI", key=f"lineup_reset_{nav_gw}", disabled=not _lineup_xi):
+                st.session_state.pop(_lineup_key, None)
+                _rerun_lineup()
+            _nc("Scenario only", "Scenario only: the transfer plan, chip plan and Rating % still read the model XI. Bench order is not editable. "
+                "Your choice is kept for this session and dropped when a transfer removes a starter.")
     if nav_show_ticker:
         _nc("● easy · mid · hard (hover)", "Fixture ticker: one dot per GW in your horizon — easy/mid/hard, hover for the opponent. Full opponent + xPts breakdown per GW is in the table below.")
 with tab_pitch:

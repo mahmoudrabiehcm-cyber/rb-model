@@ -358,6 +358,57 @@ def flag_buy_filter(pool_df: pd.DataFrame, squad_codes, profile_name: str, cfg: 
     return excl, info
 
 
+_LINEUP_SHAPES = {(3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3)}   # same list as optimizer.best_starting_xi
+
+
+def lineup_is_legal(squad_df, xi_codes) -> bool:
+    """R2 Patch 24: 11 distinct players from the squad, one keeper and a valid outfield shape (3-5 DEF, 2-5 MID, 1-3 FWD, 10 outfield)."""
+    try:
+        codes = [int(c) for c in (xi_codes or [])]
+    except Exception:
+        return False
+    if len(codes) != 11 or len(set(codes)) != 11 or squad_df is None or squad_df.empty:
+        return False
+    pos = squad_df.drop_duplicates("code").set_index("code")["position"]
+    if any(c not in pos.index for c in codes):
+        return False
+    n = pd.Series([pos[c] for c in codes]).value_counts()
+    return int(n.get("GK", 0)) == 1 and (int(n.get("DEF", 0)), int(n.get("MID", 0)), int(n.get("FWD", 0))) in _LINEUP_SHAPES
+
+
+def lineup_swap(squad_df, xi_codes, out_code, in_code):
+    """Swap one starter for one bench player. Returns (new_xi_codes, None) or (None, reason)."""
+    xi = [int(c) for c in xi_codes]
+    out_code, in_code = int(out_code), int(in_code)
+    if out_code not in xi:
+        return None, "The player you swap out is not in the XI."
+    if in_code in xi or in_code not in set(int(c) for c in squad_df["code"]):
+        return None, "The player you swap in is not on the bench."
+    new = [in_code if c == out_code else c for c in xi]
+    if not lineup_is_legal(squad_df, new):
+        return None, "That swap breaks the formation (one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards)."
+    return new, None
+
+
+def lineup_result(squad_df, col, xi_codes) -> dict:
+    """The same shape optimizer.best_starting_xi returns ({"xi", "total"}) for a chosen XI."""
+    xi = squad_df[squad_df["code"].isin(set(int(c) for c in xi_codes))].drop_duplicates("code")
+    total = float(pd.to_numeric(xi[col], errors="coerce").fillna(0.0).sum())
+    return {"xi": xi, "total": total, "shape": None}
+
+
+def lineup_valid_or_none(squad_df, xi_codes):
+    """The saved scenario XI if it is still legal for this squad (a transfer that removed a starter drops it), else None."""
+    return [int(c) for c in xi_codes] if (xi_codes and lineup_is_legal(squad_df, xi_codes)) else None
+
+
+def lineup_cost_text(model_total: float, scenario_total: float) -> str:
+    d = round(float(scenario_total) - float(model_total), 1)
+    if abs(d) < 0.05:
+        return "Scenario lineup: same points as the model XI"
+    return f"Scenario lineup: {scenario_total:.1f} ({d:+.1f} vs model XI {model_total:.1f})"
+
+
 def starting_xi_impact_check(old_squad: pd.DataFrame, new_squad: pd.DataFrame, in_codes: set,
                               gw_list: list[int], cfg: dict, bb_play_gw: int | None = None,
                               capped_gw_list: list[int] | None = None,
