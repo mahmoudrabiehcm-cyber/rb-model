@@ -39,7 +39,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 25 (2026-10-29, manager request): one way to name a target and one place for the scenario inputs. A Locked player you do not own is the target: it is a required buy, evaluated automatically with the weekly plan after it (Transfers, Your scenarios); the separate Target player picker is removed. The candidate Wildcard gameweek, the candidate Free Hit gameweek and the Evaluate scenario button are now in the sidebar under the Locked / Excluded players; the results (Wildcard, Free Hit, required buys, buy week selector) stay in the Transfers tab under Your scenarios. Evaluate is still a button (each evaluation is a fresh solve), not a recompute on every change. NOT validated in a browser. "
+                  "R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
                   "R2 Patch 23 (2026-10-27, playing styles, model rulings M103-M109, one patch): (1) raw ownership replaces the word EO in the style text (M104); wrong Standing Rule #23 citations fixed. (2) A captain flagged below 100% is never picked, for every style (M107). (3) Maverick may captain a differential (raw ownership under 10%) only if within 0.6 xPts of the best captain, with gap, tier and cost printed. (4) Differential slots are ceilings on new entries: Hugger 1, Maverick 3, Hunter none, Balanced none; nobody is forced out. (5) Maverick fade: a template pick (over 25%) is swapped only for a tie inside the Rule #34 band, no dearer, giving up less than 0.5 xPts. (6) Flagged buys: a player flagged below 75%, injured, suspended or unavailable is never recommended as a buy (all styles, owned players untouched); flagged at 75%: Hugger waits, Hunter only with a free transfer and a lead over the best unflagged option above the Rule #34 band, Maverick and Balanced unchanged. (7) Weekly style cost line with a warning above 3.0 xPts or the Rule #34 band. (8) Hit bar printed as a style threshold, never as Rule #13. (9) The weekly chained plan now has the same style step as the single-decision paths (before this patch it had none). Form B variance scoring and numeric fades are not included (waiting for the M108 backtest). NOT validated in a browser. "
                   "R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
                   "R2 Patch 20 (2026-10-22, manager choice): the pitch in Current squad mode no longer follows the chip plan: it shows your real 15 with the plain XI, model captain, normal bench and points tile, plus a Chip Plan badge line. No Free Hit squad swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch to the Chip Plan path. The Chip Plan path view, the other squad modes and the Chip Plan tab keep the full chip effect. Switch pitch_chip_follow.current_squad (true = old behaviour). NOT validated in a browser. "
@@ -2666,7 +2667,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     with _lock_slot:
         locked_names = st.multiselect("🔒 Locked players", _lock_names, key=_lock_key,
                                       help="Owned players: kept in the Wildcard, never sold in transfers. A player you do not own: "
-                                           "a required buy, evaluated for you (Transfers, Evaluate your own scenario) and kept in a Wildcard.")
+                                           "a required buy, evaluated for you (Transfers, Your scenarios) and kept in a Wildcard.")
     _name_to_code = _lock_map
     locked_codes = [int(_name_to_code[n]) for n in locked_names if n in _name_to_code]
     proj["_locked"] = proj["code"].isin(locked_codes)
@@ -2693,6 +2694,14 @@ with st.spinner("Fetching live data and computing xPts..."):
     if _required_buy_codes:
         with _lock_slot:
             st.caption(f"{len(_required_buy_codes)} required buy(s): see Transfers")
+    # R2 Patch 25: scenario inputs live here (results: Transfers, Your scenarios). Evaluate stays a button: each run is a fresh solve.
+    with _lock_slot:
+        st.selectbox("Candidate Wildcard GW", options=[None] + list(range(planning_gw, 39)),
+                     format_func=lambda g: "— none —" if g is None else f"GW{g}", key="scenario_wc_gw")
+        st.selectbox("Candidate Free Hit GW", options=[None] + list(range(planning_gw, 39)),
+                     format_func=lambda g: "— none —" if g is None else f"GW{g}", key="scenario_fh_gw")
+        st.button("Evaluate scenario", key="scenario_evaluate_btn", help="Evaluates the candidate Wildcard / Free Hit gameweeks. "
+                  "Locked players you do not own are evaluated automatically. Results: Transfers tab, Your scenarios.")
     squad_df = proj[proj["code"].isin(squad_codes)].copy()
     _lock_flagged = recommend.lock_flags(squad_df, locked_codes)
 
@@ -5845,7 +5854,7 @@ def _nav_optimal_squad(_cfg, _proj, team_value, gw):
 
 
 # ---------------------------------------------------------------------------
-# Evaluate your own scenario — compute/display separation (Patch 60, manager,
+# Your scenarios (was: Evaluate your own scenario) — compute/display separation (Patch 60, manager,
 # 2026-09-21: "the point related to the scenario requires a model run after
 # the scenario was calculated to enable the pitch navigator ... please fix
 # that ... once the scenario was calculated the pitch navigation option
@@ -7135,38 +7144,15 @@ with tab_transfers:
     # root-cause writeup. This block only holds the input widgets themselves
     # (unchanged in behavior) plus the call that displays whatever is cached.
     # ---------------------------------------------------------------------------
-    with st.expander("Evaluate your own scenario — a specific target, a candidate Wildcard date, or a Free Hit GW"):
-        _nc("Optional what-if", "Optional. Pick a target player, a candidate Wildcard gameweek, and/or a candidate Free Hit "
-                   "gameweek below, then click Evaluate. Leave all on \"— none —\" and nothing changes — the "
-                   "recommendation above stays the model's own default full-pool pick.")
-        scen_col1, scen_col2, scen_col3 = st.columns(3)
-        with scen_col1:
-            pool_options = [(None, "— none —")]
-            if not pool_df.empty:
-                pool_sorted = pool_df.sort_values("web_name")
-                pool_options += [(r["code"], f"{r['web_name']} ({r.get('team','')}) · £{r.get('price','?')}m")
-                                  for _, r in pool_sorted.iterrows()]
-            st.selectbox("Target player to bring in", options=pool_options,
-                          format_func=lambda t: t[1], key="scenario_target")
-        with scen_col2:
-            wc_gw_options = [None] + list(range(planning_gw, 39))
-            st.selectbox("Candidate Wildcard gameweek", options=wc_gw_options,
-                          format_func=lambda g: "— none —" if g is None else f"GW{g}",
-                          key="scenario_wc_gw")
-        with scen_col3:
-            fh_gw_options = [None] + list(range(planning_gw, 39))
-            st.selectbox("Candidate Free Hit gameweek", options=fh_gw_options,
-                          format_func=lambda g: "— none —" if g is None else f"GW{g}",
-                          key="scenario_fh_gw")
-        # Patch 60 — explicit key so `_compute_scenario_evaluations()` (called
-        # earlier in the script, before the Pitch Navigator) can tell whether
-        # THIS click is what triggered the current rerun.
-        # R2 Patch 22: when to buy the target / locked players you do not own (the planner then plans the later weeks)
-        st.selectbox("Buy week for the target and locked players", ["Now (this week)", "Best week"] + [f"GW{g}" for g in gw_list[1:]],
+    with st.expander("Your scenarios — required buys (Locked players you do not own), a Wildcard date, a Free Hit GW"):
+        _nc("Inputs in the sidebar", "Inputs are in the sidebar: lock a player you do not own to evaluate buying him, and pick a candidate "
+                   "Wildcard or Free Hit gameweek, then press Evaluate scenario there. Nothing here changes the recommendation above: "
+                   "it stays the model's own default full-pool pick.")
+        # R2 Patch 22: when to buy the locked players you do not own (the planner then plans the later weeks)
+        st.selectbox("Buy week for the locked players", ["Now (this week)", "Best week"] + [f"GW{g}" for g in gw_list[1:]],
                      key="scenario_buy_gw",
                      help="Now = this gameweek. A later gameweek keeps the model's own moves before it. Best week tries each week "
                           "of the horizon (up to 5) and keeps the highest total after hits; it takes longer.")
-        st.button("Evaluate scenario", key="scenario_evaluate_btn")
         _render_scenario_results()
 
 
