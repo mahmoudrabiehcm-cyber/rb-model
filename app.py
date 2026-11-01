@@ -39,7 +39,8 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 25 (2026-10-29, manager request): one way to name a target and one place for the scenario inputs. A Locked player you do not own is the target: it is a required buy, evaluated automatically with the weekly plan after it (Transfers, Your scenarios); the separate Target player picker is removed. The candidate Wildcard gameweek, the candidate Free Hit gameweek and the Evaluate scenario button are now in the sidebar under the Locked / Excluded players; the results (Wildcard, Free Hit, required buys, buy week selector) stay in the Transfers tab under Your scenarios. Evaluate is still a button (each evaluation is a fresh solve), not a recompute on every change. NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 26 (2026-10-29, manager request): Proposed team (draft) in the pitch's Squad toggle. It shows the squad after the plan's transfers, gameweek by gameweek (from the Chip Plan path), with chips as badges only (no Free Hit swap, no Triple Captain armband move, no Bench Boost bench), a Draft badge, and the same moves in the panel that the pitch applies. Current squad stays your real 15; for later gameweeks its panel says the planned moves are in Proposed team (it no longer lists moves the pitch does not show). The My lineup scenario box works in Proposed team too. The older After recommended transfers option is shown only when there is no chip-plan path. The Chip Plan view is unchanged (full chip effect). NOT validated in a browser. "
+                  "R2 Patch 25 (2026-10-29, manager request): one way to name a target and one place for the scenario inputs. A Locked player you do not own is the target: it is a required buy, evaluated automatically with the weekly plan after it (Transfers, Your scenarios); the separate Target player picker is removed. The candidate Wildcard gameweek, the candidate Free Hit gameweek and the Evaluate scenario button are now in the sidebar under the Locked / Excluded players; the results (Wildcard, Free Hit, required buys, buy week selector) stay in the Transfers tab under Your scenarios. Evaluate is still a button (each evaluation is a fresh solve), not a recompute on every change. NOT validated in a browser. "
                   "R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
                   "R2 Patch 23 (2026-10-27, playing styles, model rulings M103-M109, one patch): (1) raw ownership replaces the word EO in the style text (M104); wrong Standing Rule #23 citations fixed. (2) A captain flagged below 100% is never picked, for every style (M107). (3) Maverick may captain a differential (raw ownership under 10%) only if within 0.6 xPts of the best captain, with gap, tier and cost printed. (4) Differential slots are ceilings on new entries: Hugger 1, Maverick 3, Hunter none, Balanced none; nobody is forced out. (5) Maverick fade: a template pick (over 25%) is swapped only for a tie inside the Rule #34 band, no dearer, giving up less than 0.5 xPts. (6) Flagged buys: a player flagged below 75%, injured, suspended or unavailable is never recommended as a buy (all styles, owned players untouched); flagged at 75%: Hugger waits, Hunter only with a free transfer and a lead over the best unflagged option above the Rule #34 band, Maverick and Balanced unchanged. (7) Weekly style cost line with a warning above 3.0 xPts or the Rule #34 band. (8) Hit bar printed as a style threshold, never as Rule #13. (9) The weekly chained plan now has the same style step as the single-decision paths (before this patch it had none). Form B variance scoring and numeric fades are not included (waiting for the M108 backtest). NOT validated in a browser. "
                   "R2 Patch 22 (2026-10-27, manager requests, one patch): (1) the pitch's chip view is named after the chips in the plan (Chip Plan: BB GW9; Wildcard listed like any chip; plain Chip Plan when the plan has none) and no longer says no Wildcard. (2) A scenario (a target player you name and/or Locked players you do not own) is now followed by the weekly transfer planner over the horizon: the buy week (this week, a chosen week, or the best week) funds the player the cheapest legal way, the later weeks are planned from the new squad with the free transfers and bank left, and the results show moves per gameweek, total xPts after hits versus the model's own plan, and a per-gameweek pitch view. (3) Locked players can be anyone in the pool; a locked player you do not own is a required buy and is evaluated automatically (shown beside the model's plan, never instead of it). A locked player you do not own is also kept in a Wildcard rebuild. No-chip path; hits follow your hit stance; a lock you cannot afford is reported. NOT validated in a browser. "
@@ -6242,6 +6243,9 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
         if chain_label is not None and nav_mode == chain_label:
             mv, f = _path_week(_chain_path)
             return mv, f, "Chip Plan path"
+        if nav_mode == _PROPOSED_NAV:                                # R2 Patch 26: the draft shows the plan's moves it applies
+            mv, f = _path_week(_chain_path)
+            return mv, f, "proposed plan (draft)"
         if nav_mode.startswith("After recommended transfer"):
             for w in rec.get("weekly_plan") or []:
                 if int(w.get("gw", -1)) == int(nav_gw):
@@ -6253,10 +6257,7 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
         if int(nav_gw) == int(planning_gw):
             mv, f = _rec_now()
             return mv, f, "recommended this week"
-        if _chain_path:
-            mv, f = _path_week(_chain_path)
-            return mv, f, "planned (Chip Plan path)"
-        return [], None, None
+        return [], None, None          # R2 Patch 26: later weeks of Current squad list nothing here (see Proposed team)
     except Exception:
         return [], None, None
 
@@ -6267,6 +6268,9 @@ def _rerun_lineup():
         st.rerun(scope="fragment")
     except st.errors.StreamlitAPIException:
         st.rerun()
+
+
+_PROPOSED_NAV = "Proposed team (draft)"
 
 
 @st.fragment
@@ -6454,7 +6458,10 @@ def _render_pitch_navigator():
     # radio back to "Current squad" on every single GW-step click.
     _after_tx_label = ("After recommended transfers (chained plan)" if rec.get("is_weekly_schedule")
                         else "After recommended transfer")
-    if _nav_can_toggle:
+    _has_chain_squads = bool(_chain_path and _chain_path.get("squads"))
+    if _has_chain_squads:                                                   # R2 Patch 26: the draft replaces the short-horizon option
+        _nav_options.append(_PROPOSED_NAV)
+    elif _nav_can_toggle:
         _nav_options.append(_after_tx_label)
     _nav_options.extend(_nav_scenario_sources.keys())
     # Patch 112: the Chip Plan's own squads (Wildcard rebuild + later transfers) as a navigator mode, so the Pitch,
@@ -6543,7 +6550,7 @@ def _render_pitch_navigator():
         if _active_src.get("squads_by_gw"):         # R2 Patch 22: the scenario's squad as it stands in the gameweek on screen
             _sg = [g for g in _active_src["squads_by_gw"] if g <= nav_gw]
             nav_squad = _active_src["squads_by_gw"][max(_sg)] if _sg else squad_df_adv
-    elif _chain_label is not None and nav_mode == _chain_label:
+    elif _chain_label is not None and nav_mode in (_chain_label, _PROPOSED_NAV):
         nav_squad = _path_squad_at(nav_gw)
         if nav_squad is None:
             _prior = [g for g in (_chain_path or {}).get("squads", {}) if g <= nav_gw]
@@ -6568,7 +6575,7 @@ def _render_pitch_navigator():
     # R2 Patch 20 (manager choice, 22 Oct 2026): "Current squad" is your real 15 -- the chip plan shows as a badge only
     # (no Free Hit swap, no Triple Captain armband move, no Bench Boost relabel, no Wildcard auto-switch). The Chip Plan
     # path and the other modes keep the full chip effect. Switch: model_config.yaml pitch_chip_follow.current_squad.
-    _chip_fx = bool((cfg.get("pitch_chip_follow") or {}).get("current_squad", False)) or nav_mode != "Current squad"
+    _chip_fx = bool((cfg.get("pitch_chip_follow") or {}).get("current_squad", False)) or nav_mode not in ("Current squad", _PROPOSED_NAV)
     if _active_src is None and _chip_fx and _final_chip_gw.get("freehit") == nav_gw and nav_col in nav_squad.columns:
         try:
             _fh_res = _nav_optimal_squad(cfg, chip_adv_proj, team_value, nav_gw)
@@ -6587,10 +6594,10 @@ def _render_pitch_navigator():
         return
 
     # R2 Patch 24: lineup scenario (Current squad view only). The saved XI is used only while it is still legal for this squad.
-    _lineup_key = f"lineup_xi_{entry_id}_{planning_gw}_{nav_gw}"
+    _lineup_key = f"lineup_xi_{entry_id}_{planning_gw}_{nav_gw}_{'p' if nav_mode == _PROPOSED_NAV else 'c'}"
     _lineup_xi = None
     _model_xi_result = nav_xi_result
-    if nav_mode == "Current squad" and _fh_base is None:
+    if nav_mode in ("Current squad", _PROPOSED_NAV) and _fh_base is None:
         _lineup_xi = recommend.lineup_valid_or_none(nav_squad, st.session_state.get(_lineup_key))
         if _lineup_xi:
             nav_xi_result = recommend.lineup_result(nav_squad, nav_col, _lineup_xi)
@@ -6605,6 +6612,10 @@ def _render_pitch_navigator():
         _nc(f"🎴 Chip Plan GW{nav_gw}: {' + '.join(_chips_here)}", "🎴 Chip Plan for GW" + str(nav_gw) + ": **" + " + ".join(_chips_here) + "**"
                    + (" — badge only on this view; switch the Squad view to the Chip Plan path to see the chip applied."
                       if (_chain_label and nav_mode != _chain_label) else ""))
+
+    if nav_mode == _PROPOSED_NAV:
+        st.markdown(recommend.ui_chip("🧪 Draft: proposed by the model, not your team", "warn", "after the plan's transfers"),
+                    unsafe_allow_html=True)
 
     # Header tiles — same mechanic as the main Team Rating % (Patch 20/24):
     # current squad's best XI (captain doubled, bench autosub-discounted)
@@ -6805,13 +6816,15 @@ def _render_pitch_navigator():
                 continue
             _upc.append((_ug, ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in _mvs) or "Roll",
                          _chip_by_gw.get(_ug)))
+        _later_cur = bool(nav_mode == "Current squad" and int(nav_gw) != int(planning_gw) and _has_chain_squads)
         _panel = recommend.pitch_moves_panel_html(nav_gw, _nav_moves, ft=_nav_ft, chip=_chip_lab, chip_value=_chip_val,
-                                                  photo_fn=_photo_url, note=_nav_note, upcoming=_upc[:3])
+                                                  photo_fn=_photo_url, note=_nav_note, upcoming=_upc[:3],
+                                                  empty_text=("Planned moves are in Proposed team (draft)" if _later_cur else None))
     except Exception:
         _panel = ""
     st.markdown('<div class="pitch-wrap">' + nav_html + _panel + '</div>', unsafe_allow_html=True)
     # R2 Patch 24: My lineup (scenario): swap a starter for a bench player; the points tile above recalculates.
-    if nav_mode == "Current squad" and _fh_base is None and not nav_bench.empty:
+    if nav_mode in ("Current squad", _PROPOSED_NAV) and _fh_base is None and not nav_bench.empty:
         with st.expander("My lineup (scenario)", expanded=bool(_lineup_xi)):
             _base_codes = _lineup_xi or [int(c) for c in _model_xi_result["xi"]["code"]]
             _st_rows = nav_starters.sort_values(["position", nav_col], ascending=[True, False])

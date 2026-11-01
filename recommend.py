@@ -4523,7 +4523,8 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
 
 
 def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | None = None, chip_value=None,
-                           photo_fn=None, note: str | None = None, max_cards: int = 6, upcoming: list | None = None) -> str:
+                           photo_fn=None, note: str | None = None, max_cards: int = 6, upcoming: list | None = None,
+                           empty_text: str | None = None) -> str:
     """R2 Patch 5: the moves panel that sits beside the pitch (same look as the pitch cards). Header = GW, chip badge
     (with its value) and banked free-transfer dots; body = OUT -> IN photo cards with net xPts and FREE / -4, or a Roll
     card. More than `max_cards` changes (a Wildcard / Free Hit scenario) -> the first ones plus "N changes"."""
@@ -4556,7 +4557,9 @@ def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | Non
                      f'<div class="mv-nm">{_h.escape(str(m.get("in", "")))}</div></div></div>')
     if len(moves) > max_cards:
         cards.append(f'<div class="mv-more">{len(moves)} changes in total</div>')
-    if not moves:
+    if not moves and empty_text:          # R2 Patch 26: a view that does not apply the plan says where to see it (not a Roll)
+        cards.append('<div class="mv-card roll"><div class="mv-sub">' + _h.escape(str(empty_text)) + '</div></div>')
+    elif not moves:
         cards.append('<div class="mv-card roll"><div class="mv-roll">Roll</div>'
                      '<div class="mv-sub">no move clears the bar</div></div>')
     gain_note = ""
