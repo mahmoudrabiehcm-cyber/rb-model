@@ -5587,3 +5587,18 @@ def style_swap_overlay(plain: pd.DataFrame, styled: pd.DataFrame, window_cols: l
         swaps.append({"out_code": o["code"], "in_code": i["code"], "out": o.get("web_name", o["code"]),
                       "in": i.get("web_name", i["code"]), "cost": round(_v(o) - _v(i), 2)})
     return swaps, round(sum(x["cost"] for x in swaps), 2)
+
+
+def suspended_override_lines(proj) -> list:
+    """R2 Patch 27 (M117): one line per player whose sheet xm_override was suspended by a flag (empty list when none or when the
+    column is missing)."""
+    if proj is None or "xm_override_ignored" not in getattr(proj, "columns", []):
+        return []
+    d = proj[pd.to_numeric(proj["xm_override_ignored"], errors="coerce").notna()]
+    out = []
+    for _, r in d.iterrows():
+        ch = r.get("chance_of_playing_next_round")
+        out.append("%s (%s): sheet override %.2f ignored, flag %s%s; xM now %.2f" % (
+            r.get("web_name", "?"), r.get("team", "?"), float(r["xm_override_ignored"]),
+            str(r.get("status", "?")), (" %d%%" % int(ch)) if pd.notna(ch) else "", float(r.get("xm", float("nan")))))
+    return out

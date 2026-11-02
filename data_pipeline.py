@@ -578,6 +578,43 @@ def _m85_apply(pl, i, cfg, planning_gw, deadlines, unavailable, cop, has_m) -> b
     return True
 
 
+def suspend_flagged_overrides(pl: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """R2 Patch 27 (model M117): an xm_override must not hide a flag. The override applies only when the official status is
+    "a" with chance 100 or blank; otherwise it is suspended (set to NaN, so the player takes the normal flag path: M95/M96
+    for regulars, M102 for undated "i", the chance factor otherwise). Exception (M13, M98): a dated statement newer than the
+    flag, i.e. BOTH xm_override_date and a non-empty xm_override_basis, and the statement's date later than the flag's
+    news_added (date-only values compare by calendar day, so a statement on the same day as the flag does NOT count; a missing
+    or unreadable flag timestamp or date means no exception). Returns a copy with `_ov_susp` (bool) and `_ov_ignored` (the
+    suspended value). cfg["xm_override_flag_rule"]["enabled"] false = the old behaviour (override beats every flag)."""
+    out = pl.copy()
+    out["_ov_susp"] = False
+    out["_ov_ignored"] = np.nan
+    rule = (cfg or {}).get("xm_override_flag_rule") or {}
+    if not rule.get("enabled", True) or "xm_override" not in out.columns:
+        return out
+    ov = pd.to_numeric(out["xm_override"], errors="coerce")
+    status = out["status"].astype(str).str.lower() if "status" in out.columns else pd.Series("a", index=out.index)
+    ch = (pd.to_numeric(out["chance_of_playing_next_round"], errors="coerce")
+          if "chance_of_playing_next_round" in out.columns else pd.Series(np.nan, index=out.index))
+    clean = (status == "a") & (ch.isna() | (ch >= 100.0))
+    flagged = ov.notna() & ~clean
+    exc = pd.Series(False, index=out.index)
+    if "xm_override_date" in out.columns and "xm_override_basis" in out.columns and "news_added" in out.columns:
+        raw = out["xm_override_date"].astype(object)
+        sd = pd.to_datetime(raw, errors="coerce", utc=True)
+        fd = pd.to_datetime(out["news_added"], errors="coerce", utc=True)
+        basis = out["xm_override_basis"].astype(object).map(lambda v: isinstance(v, str) and v.strip() != "")
+        # date-only statement: compare calendar days; a statement carrying a time compares as a timestamp
+        has_time = raw.map(lambda v: isinstance(v, str) and len(v.strip()) > 10)
+        newer = np.where(has_time, sd > fd, sd.dt.normalize() > fd.dt.normalize())
+        exc = pd.Series(newer, index=out.index).fillna(False) & sd.notna() & fd.notna() & basis
+    susp = flagged & ~exc
+    out["_ov_susp"] = susp.values
+    out.loc[susp, "_ov_ignored"] = ov[susp]
+    out.loc[susp, "xm_override"] = np.nan
+    return out
+
+
 def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None = None) -> pd.DataFrame:
     """R2 Patch 15 (M52-M70): replace xM for players with no sheet xm_override and enough recent-match data. Sets
     _xm (planning gameweek), _xm2 (later gameweeks), healthy twins _xm_h / _xm_h2, and _xm_src (label). Players the rule
@@ -844,6 +881,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     pl["_comp_disc"] = pl["_comp_disc"].fillna(domestic_disc)
 
     # --- xM (Step 4), once per player, independent of gw ---
+    pl = suspend_flagged_overrides(pl, cfg)      # R2 Patch 27 (M117): an override never hides a flag
     pl["_xm"] = eng.estimate_xm_vec(pl, cfg)
     # R2 Patch 2 (model M31): the HEALTHY-baseline xM -- the same estimate with the availability flag removed (status
     # treated as available, no chance-of-playing scaling). Used only for the xptsh_gw{n} columns that chip and
@@ -854,6 +892,9 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
     del _plh
     pl = apply_m52(pl, cfg, (int(gw_list[0]) if gw_list else None), _deadlines_of(snap))      # R2 Patch 15 (M52-M70)
+    for _i in pl.index[pl["_ov_susp"].astype(bool)]:        # R2 Patch 27 (M117): say so, and keep the unconfirmed label (M99)
+        pl.at[_i, "_xm_src"] = ("%s \u00b7 override %.2f suspended by flag (M117)" % (str(pl.at[_i, "_xm_src"] or "").strip(), float(pl.at[_i, "_ov_ignored"]))).lstrip(" \u00b7")
+        pl.at[_i, "_xm_unconf"] = True
 
     # --- bonus (R2 Patch 10, M34): per 90, gated at 270 minutes, blended on the DEFCON curve ---
     # (was: current bonus / starts if any start else last season's, no gate - Isidor's 3 sub-earned points over
@@ -1120,6 +1161,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "xm": eng._pyround(pl["_xm"], 3).values,
         "xm_src": pl["_xm_src"].fillna("").astype(str).values,
         "xm_unconf": pl["_xm_unconf"].fillna(False).astype(bool).values,
+        "xm_override_ignored": pl["_ov_ignored"].values,        # R2 Patch 27 (M117): the suspended sheet value, else NaN
         "est_rescue_needed": pl.get("est_rescue_needed", pd.Series(False, index=pl.index)).fillna(False).astype(bool).values,
         "sample_tag": pl.get("sample_tag", pd.Series("", index=pl.index)).fillna("").astype(str).values,
         "setpiece_flag": (pl["_sp_mult_ref"] > 1.001).values,
