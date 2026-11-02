@@ -178,7 +178,7 @@ def fetch_event_live_official(gw: int) -> Optional[dict]:
         return None
 
 
-def fetch_recent_start_ids(last_completed_gw: int, window: int, keep_window: int = 6) -> dict:
+def fetch_recent_start_ids(last_completed_gw: int, window: int, keep_window: int = 12) -> dict:
     """Standing Rule #19 (Bench GK Verification) support — Patch 14. The xM
     Floor Rule's `confirmed_current_season_start_floor` used to trigger off
     ANY start this season (`starts >= 1`, a season-long total with no

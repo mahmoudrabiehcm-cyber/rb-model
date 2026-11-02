@@ -443,6 +443,7 @@ def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
     columns are left empty and the current xM path is used, labelled."""
     df = df.copy()
     df["m52_matches"] = None
+    df["m52_long"] = None            # R2 Patch 28 (M120): the same player's matches over up to 12 gameweeks (pre-dismissal share)
     df["m52_nst"] = np.nan
     df["m52_nst_src"] = ""
     fm = getattr(snap, "recent_fixture_minutes", None)
@@ -465,17 +466,21 @@ def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
         for t in (r["team_h"], r["team_a"]):
             team_matches.setdefault(t, []).append((int(r["event"]), r[fid_col] if fid_col else None))
     n_events = {t: len(v) for t, v in team_matches.items()}
-    out_m, out_n, out_s = [], [], []
+    out_m, out_n, out_s, out_l = [], [], [], []
     for _, p in df.iterrows():
         pid, team = p.get("id"), p.get("team")
+        tm_all = (team_matches.get(team) or [])[-12:]
         tm = (team_matches.get(team) or [])[-6:]
         if not tm:
-            out_m.append(None); out_n.append(np.nan); out_s.append(""); continue
+            out_m.append(None); out_n.append(np.nan); out_s.append(""); out_l.append(None); continue
         pm = (fm or {}).get(pid, {})
         gmin = (gm or {}).get(pid, {})
         gcount = {}
         for ev, _fid in tm:
             gcount[ev] = gcount.get(ev, 0) + 1
+        gcount_all = {}
+        for ev, _fid in tm_all:
+            gcount_all[ev] = gcount_all.get(ev, 0) + 1
         ms, flags, ok = [], [], True
         for ev, fid in tm:
             if fid is not None and fid in pm:
@@ -490,7 +495,17 @@ def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
                 ok = False
                 break
         if not ok or not ms:
-            out_m.append(None); out_n.append(np.nan); out_s.append(""); continue
+            out_m.append(None); out_n.append(np.nan); out_s.append(""); out_l.append(None); continue
+        # R2 Patch 28 (M120): older matches (best effort; one that cannot be read is skipped, never a reason to drop the player)
+        long_ms = []
+        for ev, fid in tm_all[:max(0, len(tm_all) - len(tm))]:
+            if fid is not None and fid in pm:
+                long_ms.append((ev, pm[fid][0]))
+            elif gcount_all.get(ev, 0) == 1 and ev in gmin:
+                long_ms.append((ev, gmin[ev]))
+            elif gm is not None and pid not in (gm or {}) and gcount_all.get(ev, 0) == 1:
+                long_ms.append((ev, 0.0))
+        out_l.append(long_ms + list(ms))
         tot_played = n_events.get(team, 0)
         season_starts = pd.to_numeric(p.get("starts"), errors="coerce")
         if tot_played <= 6 and pd.notna(season_starts):
@@ -501,6 +516,8 @@ def build_m52_inputs(df: pd.DataFrame, snap) -> pd.DataFrame:
             nst, src = float(sum(1 for _e, m in ms if m >= 60)), "60-minute proxy"
         out_m.append(ms); out_n.append(nst); out_s.append(src)
     df["m52_matches"] = pd.Series(out_m, index=df.index, dtype=object)
+    df["m52_long"] = pd.Series([x if x is not None else None for x in out_l] if len(out_l) == len(df) else [None] * len(df),
+                               index=df.index, dtype=object)
     df["m52_nst"] = out_n
     df["m52_nst_src"] = out_s
     return df
@@ -651,7 +668,22 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
                                   eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {},
                                   (None if "xm_dismissal_gw" not in pl.columns or pd.isna(pl.at[i, "xm_dismissal_gw"]) else int(pl.at[i, "xm_dismissal_gw"])),
                                   (None if "starter_confirm_gw" not in pl.columns or pd.isna(pl.at[i, "starter_confirm_gw"]) else int(pl.at[i, "starter_confirm_gw"])),
-                                  planning_gw)
+                                  planning_gw,
+                                  all_matches=(pl.at[i, "m52_long"] if "m52_long" in pl.columns and isinstance(pl.at[i, "m52_long"], list) else None))
+        # R2 Patch 28 (M121): a dated multi-week absence (sheet xm_out_until_gw = first gameweek available) -> 0 until then,
+        # then the 0.58 / 0.64 / 0.64 / 0.61 return curve; later gameweeks = his own M52 reading.
+        if (res is not None and planning_gw is not None and "xm_out_until_gw" in pl.columns
+                and pd.notna(pd.to_numeric(pl.at[i, "xm_out_until_gw"], errors="coerce"))):
+            _cg = (None if "starter_confirm_gw" not in pl.columns or pd.isna(pl.at[i, "starter_confirm_gw"]) else int(pl.at[i, "starter_confirm_gw"]))
+            _s121 = eng.m121_schedule(int(planning_gw), int(float(pl.at[i, "xm_out_until_gw"])), (res["x1"], res["x2"]), _cg)
+            if _s121 is not None:
+                _sch = _s121["sched"]
+                pl.at[i, "_xm"], pl.at[i, "_xm_h"] = _sch[int(planning_gw)]
+                pl.at[i, "_xm2"], pl.at[i, "_xm_h2"] = _s121["tail"]
+                pl.at[i, "_xm_sched"] = dict(_sch)
+                pl.at[i, "_xm_src"] = _s121["src"]
+                pl.at[i, "_xm_unconf"] = True
+                continue
         if res is None:
             # current path: label the starts-per-90 fallback as unconfirmed
             _rsv = rs.get(i)

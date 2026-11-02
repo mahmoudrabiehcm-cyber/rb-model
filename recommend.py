@@ -1770,6 +1770,47 @@ def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_code
     return out
 
 
+def m118_move_band(old_total: float, cfg: dict) -> float:
+    """R2 Patch 28 (M118): the tie band for a single free-transfer decision is the 2-point floor, not 2% of the whole squad's
+    horizon total (a path-sized band). Switch: model_config.yaml m118_move_band.enabled (off = the old Rule #34 band).
+    Whole-path comparisons keep the Rule #34 band elsewhere."""
+    if bool(((cfg or {}).get("m118_move_band") or {}).get("enabled", True)):
+        return float(((cfg or {}).get("margin_of_error") or {}).get("floor_points", 2.0))
+    return eng.margin_of_error_threshold(old_total, cfg)
+
+
+M119_FORGONE_LIMIT = 2.0
+
+
+def m119_tie_protects(forgone_cum: float, cfg: dict | None = None) -> bool:
+    """R2 Patch 28 (M119): once the cumulative xPts forgone by postponing a tied free move exceeds 2.0, the tie no longer
+    protects further postponement."""
+    return float(forgone_cum or 0.0) <= M119_FORGONE_LIMIT
+
+
+def roll_reason_text(best_free_net: float, bar: float, cap: bool, forgone: float) -> str:
+    """R2 Patch 28: why the week rolls. Names the best free move's gain when there was one (the old text said 'no move clears
+    the bar' even when a +3 move lost a tie)."""
+    if best_free_net is not None and best_free_net > 0:
+        t = f"best free move nets {best_free_net:+.1f}, below the {bar:.1f} bar - saving the transfer"
+        if forgone and forgone > 0:
+            t += f" (cumulative xPts forgone by waiting: {forgone:.1f})"
+        return t
+    return "no move clears the bar this week."
+
+
+def _m119_out_exempt(sim_squad: pd.DataFrame, new_squad: pd.DataFrame, gws: list) -> bool:
+    """M119: every outgoing player has availability summing to less than 1.0 match over the next three gameweeks."""
+    out = sim_squad[~sim_squad["code"].isin(set(new_squad["code"]))]
+    cols = [f"avail_gw{g}" for g in list(gws)[:3]]
+    if out.empty or not all(c in out.columns for c in cols):
+        return False
+    tot = out[cols].apply(pd.to_numeric, errors="coerce")
+    if tot.isna().any().any():
+        return False
+    return bool((tot.sum(axis=1) < 1.0).all())
+
+
 def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
@@ -1936,6 +1977,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     sim_squad = squad_df.copy()
     ft_bank = free_transfers
     weekly_plan = []
+    forgone_cum = 0.0        # R2 Patch 28 (M119): xPts forgone so far by rolling a tied free move
     plan = []
     summary = []
     total_net_gain = 0.0
@@ -2036,7 +2078,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
         old_total = opt.realized_horizon_value(sim_squad, remaining_gws, cfg, bench_weight_scale=bench_w,
                                                 bb_play_gw=bb_play_gw) + _tc_extra(sim_squad, remaining_gws)
-        moe = eng.margin_of_error_threshold(old_total, cfg)
+        moe = m118_move_band(old_total, cfg)
 
         candidates = {0: {"squad": sim_squad, "total": old_total, "net_gain": 0.0, "hit_cost": 0.0,
                           "actual_k": 0, "data_gap_codes": []}}
@@ -2091,7 +2133,12 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                          "baseline_zeroed_names": baseline_info["zeroed_names"]}
 
         best_net = max(c["net_gain"] for c in candidates.values())
-        tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
+        _protects = m119_tie_protects(forgone_cum, cfg)
+        if _protects:
+            tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
+        else:        # M119: more than 2.0 xPts already forgone - the tie no longer protects a further postponement
+            tied_ks = [max(candidates, key=lambda _k: candidates[_k]["net_gain"])]
+        _free_bar = meaningful_bar if _protects else 1e-9
         # A candidate that costs a hit this week has to clear the stricter
         # hit_cost_threshold bar (same as suggest_transfers()'s own
         # `bar = threshold if hit_cost > 0 else meaningful_bar` rule) — a
@@ -2100,15 +2147,25 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # threshold and every paid move must earn more than its own hit (m10_hit_gate); a free move keeps its bar.
         viable = [k for k in tied_ks if k == 0
                   or (m10_hit_gate(candidates, k, ft_bank, threshold, hit_cost_per) if candidates[k]["hit_cost"] > 0
-                      else candidates[k]["net_gain"] >= meaningful_bar)]
+                      else candidates[k]["net_gain"] >= _free_bar)]
+        # R2 Patch 28 (M119): a move whose outgoing players are barely available (availability summing under 1.0 match over
+        # the next three gameweeks) is exempt from the tie test: it goes ahead on a positive net gain when nothing else is
+        # viable (free moves only; hits still need Rule #13 and M54).
+        if not any(k != 0 for k in viable):
+            _ex = [k for k, c in candidates.items() if k != 0 and c["hit_cost"] == 0 and c["net_gain"] > 0
+                   and _m119_out_exempt(sim_squad, c["squad"], remaining_gws)]
+            if _ex:
+                viable = [max(_ex, key=lambda _k: candidates[_k]["net_gain"])]       # replaces Roll (k=0)
         # Patch 112 (chain only; `cap_use_bar=None` keeps the old behaviour): with the FT bank AT THE CAP a Roll
         # throws a transfer away (ft_after is capped at transfers.MAX_BANK), so any free move with a real gain
         # >= cap_use_bar is preferred over Rolling. It still has to pass the Starting-XI impact check below, and
         # a hit is never taken to do this.
         cap_forced = False
-        if cap_use_bar is not None and ft_bank >= transfers.MAX_BANK:
+        # R2 Patch 28 (M119): at the cap the move wins any non-negative gain (cap_use_bar None -> 0.0).
+        if ft_bank >= transfers.MAX_BANK:
+            _cap_bar = cap_use_bar if cap_use_bar is not None else 0.0
             _free_ks = [k for k, c in candidates.items()
-                        if k != 0 and c["hit_cost"] == 0 and c["net_gain"] >= cap_use_bar]
+                        if k != 0 and c["hit_cost"] == 0 and c["net_gain"] >= _cap_bar]
             if _free_ks:
                 _best_free = max(candidates[k]["net_gain"] for k in _free_ks)
                 viable = sorted(k for k in _free_ks if (_best_free - candidates[k]["net_gain"]) < moe)
@@ -2181,7 +2238,18 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         elif chosen["actual_k"] == 0:
             week_moves = []
             week_summary = f"GW{gw}: Roll — {ft_bank} FT banked → {ft_after} for GW{gw + 1}."
-            plan.append(f"GW{gw}: Roll — no move clears the bar this week.")
+            _bf = [c["net_gain"] for k, c in candidates.items() if k != 0 and c["hit_cost"] == 0]
+            _bfn = max(_bf) if _bf else 0.0
+            # M119: the xPts this week's best free move would earn in THIS gameweek alone are forgone by rolling it
+            if _bf and _bfn > 0:
+                try:
+                    _bk = max((k for k, c in candidates.items() if k != 0 and c["hit_cost"] == 0), key=lambda _k: candidates[_k]["net_gain"])
+                    _g1 = remaining_gws[:1]
+                    forgone_cum += max(0.0, opt.realized_horizon_value(candidates[_bk]["squad"], _g1, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+                                       - opt.realized_horizon_value(sim_squad, _g1, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw))
+                except Exception:
+                    pass
+            plan.append(f"GW{gw}: Roll — " + roll_reason_text(_bfn, meaningful_bar, False, forgone_cum))
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
             # R2 Patch 23 (M103-M109): the same style tie-break the single-decision paths use, applied to the chosen week's
@@ -2453,7 +2521,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
     if "code" in full_pool.columns:
         full_pool = full_pool.drop_duplicates(subset=["code"], keep="first")
 
-    moe = eng.margin_of_error_threshold(old_total, cfg)
+    moe = m118_move_band(old_total, cfg)
 
     if hit_stance == "Force":
         k_wanted = forced_count if forced_count is not None else free_transfers

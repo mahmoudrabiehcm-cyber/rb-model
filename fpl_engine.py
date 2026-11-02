@@ -42,7 +42,7 @@ def load_overrides(path: Path = OVERRIDES_PATH) -> pd.DataFrame:
     cols = ["player_code", "xm_override", "cs_pct_override", "bps_profile",
             "tenure_discount", "npxg90_rescue", "xa90_rescue", "dc90_rescue", "note"]
     # R2 Patch 15: optional columns, read by name when the sheet has them (M52(2), M53, M58, M62)
-    _opt = ["xm_excl_gws", "xm_dismissal_gw", "starter_confirm_gw"]
+    _opt = ["xm_excl_gws", "xm_dismissal_gw", "starter_confirm_gw", "xm_out_until_gw"]
     if path.exists():
         df = pd.read_csv(path)
         for c in cols:
@@ -291,6 +291,9 @@ M52_COEF = {"h1": (0.07, 0.014, 0.825), "h2": (0.11, 0.166, 0.58)}   # intercept
 M52_CAP = 0.88
 M58_COEF = {1: (0.555, 0.340), 2: (0.576, 0.260), 3: (0.578, 0.163), 4: (0.578, 0.163)}   # xM = a + b x pre
 M66_PRE_DEFAULT = 0.80
+M113_REGULAR_PRE = 0.6       # R2 Patch 28 (M113): pre-ban minutes share that makes a player a regular
+M113_F2, M113_F3 = 0.855, 0.83   # M113: half-strength factors after a substitute first match back (match 2, match 3)
+M120_F3 = 0.72               # M120: match 3 after a match 2 that was a substitute appearance or unused
 M82_MIN_STARTS = 4            # R2 Patch 16 (M82): the unflagged-single-miss blend needs at least this many starts in the window
 
 
@@ -326,11 +329,13 @@ def _m52_vals(nst, E):
     return clip(a1 + b1 * term + c1 * s), clip(a2 + b2 * term + c2 * s)
 
 
-def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, planning_gw=None):
+def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, planning_gw=None, all_matches=None):
     """One player. `matches` = his team's last up to 6 played matches, oldest first, as (gw, minutes) pairs (0 = did not
     play); `nst` = starts in those matches; `excl` = {gw: kind} from the sheet (SUSP / INJ / FLAG); `dismissal_gw` = gw of a
     red card in a start; `confirm_gw` = gw of a dated starter confirmation (releases 0.88 for that match only, M53/M62).
-    Returns {"x1","x2","src"} (unscaled by availability) or None when the rule cannot be applied (current path)."""
+    `all_matches` (R2 Patch 28, M120) = the same player's matches over a longer span of the season (oldest first); used only
+    to find the pre-dismissal share (no window limit). Returns {"x1","x2","src"} (unscaled by availability) or None when
+    the rule cannot be applied (current path)."""
     excl = dict(excl or {})
     ms = [(int(g), float(m)) for g, m in (matches or []) if m is not None and not (isinstance(m, float) and m != m)]
     if not ms or nst is None or (isinstance(nst, float) and nst != nst):
@@ -343,20 +348,41 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
         since = [m for m in ms if m[0] > last_ban]
         k = len(since) + 1
         if k <= 4:
-            pre_ms = [m for m in ms if m[0] < int(dismissal_gw) and m[0] not in excl][-3:]
+            _pool = _clean_matches(all_matches) if all_matches else ms
+            _pool = sorted({g: (g, m) for g, m in (_pool + ms)}.values())     # window matches win on a clash
+            pre_ms = [m for m in _pool if m[0] < int(dismissal_gw) and m[0] not in excl][-3:]
             pre = (sum(m[1] for m in pre_ms) / (90.0 * len(pre_ms))) if len(pre_ms) >= 2 else M66_PRE_DEFAULT
-            a, b = M58_COEF[min(k, 4)]
-            a2, b2 = M58_COEF[min(k + 1, 4)] if k < 4 else (None, None)
-            x1 = min(M52_CAP, a + b * pre)
-            if a2 is None:
-                E = [m[1] for m in ms if m[0] not in excl]
-                v = _m52_vals(nst, E)
-                x2 = v[1] if v else x1
+            tag = "" if len(pre_ms) >= 2 else " (pre default 0.80)"
+            if k == 4:
+                # R2 Patch 28 (M120): from match 4, M52 on the three matches since the return (an unused bench game counts as
+                # 0 and as eligible; divisor 270); no four-match curve.
+                last3 = [m[1] for m in since[-3:]]
+                v = _m52_vals(sum(1 for x in last3 if x >= 60), last3)
+                if v is not None:
+                    out = {"x1": v[0], "x2": v[1], "src": "M120 M52 on the three matches since the ban return" + tag,
+                           "pre_starts": sum(1 for m in pre_ms if m[1] >= 60)}
             else:
+                a, b = M58_COEF[k]
+                a2, b2 = M58_COEF[k + 1]
+                x1 = min(M52_CAP, a + b * pre)
                 x2 = min(M52_CAP, a2 + b2 * pre)
-            out = {"x1": x1, "x2": x2, "src": "M58 return from ban" + ("" if len(pre_ms) >= 2 else " (pre default 0.80)"),
-                   # R2 Patch 16 (M83): starts (60+ minutes, proxy) in the matches before the dismissal match
-                   "pre_starts": sum(1 for m in pre_ms if m[1] >= 60)}
+                f1, f2, note = 1.0, 1.0, ""
+                if pre >= M113_REGULAR_PRE and since:
+                    first = since[0][1]
+                    sub1 = 0.0 < first < 60.0
+                    if k == 2 and sub1:                 # M113: the first match back was a substitute appearance
+                        f1, f2, note = M113_F2, M113_F3, " · M113 substitute return"
+                    elif k == 3:
+                        sec = since[1][1]
+                        f_a = M113_F3 if sub1 else 1.0
+                        f_b = M120_F3 if sec < 60.0 else 1.0       # match 2 a substitute or unused
+                        f1 = f2 = min(f_a, f_b)                    # lowest factor, no stacking (M120)
+                        if f1 < 1.0:
+                            note = " · M120 weak match 2" if f_b <= f_a else " · M113 substitute return"
+                x1, x2 = x1 * f1, x2 * f2
+                out = {"x1": x1, "x2": x2, "src": "M58 return from ban" + tag + note,
+                       # R2 Patch 16 (M83): starts (60+ minutes, proxy) in the matches before the dismissal match
+                       "pre_starts": sum(1 for m in pre_ms if m[1] >= 60)}
     if out is None:
         E_ms = [m for m in ms if m[0] not in excl]
         E = [m[1] for m in E_ms]
@@ -401,6 +427,31 @@ def _m85_pre(ms, dismissal_gw, excl):
 
 def _clean_matches(matches):
     return [(int(g), float(m)) for g, m in (matches or []) if m is not None and not (isinstance(m, float) and m != m)]
+
+
+M121_CURVE = [0.58, 0.64, 0.64, 0.61]      # R2 Patch 28 (M121): xM at matches 1-4 back from a 3-10 match absence (estimate)
+
+
+def m121_schedule(planning_gw, out_until_gw, base, confirm_gw=None):
+    """R2 Patch 28 (M121): a dated multi-week absence. `out_until_gw` = the FIRST gameweek the player is available (my reading
+    of the sheet column xm_out_until_gw). Gameweeks before it = 0; matches 1-4 back = 0.58 / 0.64 / 0.64 / 0.61; later =
+    `base[1]` (the player's own later-gameweek xM, M52 reading). A dated starter statement for a gameweek (`confirm_gw`)
+    lifts that match to the cap (M53). Healthy twin = `base[1]` while out, the curve value after. Returns None when the
+    return was more than four matches before the planning gameweek (the value is stale), else {"sched","tail","src"}."""
+    P, U = int(planning_gw), int(out_until_gw)
+    if P - U >= 4:
+        return None
+    sched = {}
+    for gw in range(P, max(U + 4, P) + 1):
+        m = gw - U + 1
+        if m < 1:
+            sched[gw] = (0.0, float(base[1]))
+        else:
+            v = M121_CURVE[min(m, 4) - 1]
+            if confirm_gw is not None and int(confirm_gw) == gw:
+                v = M52_CAP
+            sched[gw] = (v, v)
+    return {"sched": sched, "tail": (float(base[1]), float(base[1])), "src": "M121 dated absence until GW%d" % U}
 
 
 def m85_schedule(matches, nst, banned, dismissal_gw=None, planning_gw=None, excl=None, base=None):

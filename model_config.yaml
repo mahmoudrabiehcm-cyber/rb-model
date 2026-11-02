@@ -3395,6 +3395,10 @@ xm_flag_persistence:   # R2 Patch 19 (M95-M99, M101, M102): minutes for flagged 
 xm_override_flag_rule:  # R2 Patch 27 (M117): a sheet xm_override never hides an official flag
   enabled: true         # false = the old behaviour (the override beats every flag)
 
+# R2 Patch 28 (M118): tie band for a single free-transfer decision = the 2-point floor (off = old 2%-of-squad-total band)
+m118_move_band:
+  enabled: true
+
 pitch_chip_follow:     # R2 Patch 20: should the pitch in "Current squad" mode apply the chip plan (Free Hit swap, TC armband, BB bench)?
   current_squad: false # false = badge only (default); true = old behaviour. Chip Plan path and other modes always follow the chip.
 
