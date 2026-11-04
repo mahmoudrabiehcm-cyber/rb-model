@@ -3655,6 +3655,25 @@ def plan_scenario_path(squad_df, pool_df, cfg, profile_name, hit_stance, free_tr
 # --------------------------------------------------------------------------------------------------------------------
 # Patch 117d helpers: owned players at selling price, Locked players, chained plan, snapshot, short UI chips.
 # --------------------------------------------------------------------------------------------------------------------
+def scenario_gw_window(gw_list, planning_gw, pool_df, minimum: int = 3) -> list:
+    """R2 Patch 29: the gameweeks a scenario plan covers. At least `minimum` weeks from the planning gameweek (as far as the
+    pool carries xpts_gw columns), or the Horizon slider's weeks when that is longer. Before this, a scenario planned only the
+    slider's weeks, so at the default Horizon 1 nothing after the buy week was ever planned."""
+    base = [int(g) for g in (gw_list or [])]
+    P = int(planning_gw)
+    if not base:
+        base = [P]
+    cols = set(pool_df.columns) if pool_df is not None and hasattr(pool_df, "columns") else set()
+    out = list(base)
+    g = max(out) + 1
+    while len(out) < int(minimum) and f"xpts_gw{g}" in cols:
+        out.append(g)
+        g += 1
+    if not [x for x in (gw_list or [])] and cols:       # no slider weeks at all: start from the planning gameweek
+        out = [x for x in range(P, P + int(minimum)) if f"xpts_gw{x}" in cols] or [P]
+    return out
+
+
 def lock_codes_of(df) -> list:
     """Codes of the manager's Locked players, read from the boolean `_locked` column carried on the squad / pool frame
     (absent or NaN = not locked). Only the Wildcard rebuild and the transfer planner read it; ceilings, the Free Hit
