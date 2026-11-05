@@ -1770,6 +1770,40 @@ def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_code
     return out
 
 
+PLAN_WINDOW_GWS = 5
+
+
+def plan_gw_window(planning_gw, pool_df, n: int = PLAN_WINDOW_GWS) -> list:
+    """R2 Patch 30: the ONE window every transfer decision uses (headline, weekly chain, scenarios): `n` (5) gameweeks from the
+    planning gameweek, cut short where the pool carries no xpts_gw column. Replaces the Horizon slider."""
+    P = int(planning_gw)
+    cols = set(pool_df.columns) if pool_df is not None and hasattr(pool_df, "columns") else set()
+    out = [P]
+    g = P + 1
+    while len(out) < int(n) and f"xpts_gw{g}" in cols:
+        out.append(g)
+        g += 1
+    return out
+
+
+def eligible_best_net(candidates: dict, ft_bank: int, threshold: float, hit_cost_per: float) -> float:
+    """R2 Patch 30 (fixes the horizon-dependent headline): the tie band is anchored on the best net among ELIGIBLE
+    candidates only: Roll (k=0), free moves (their own bar is applied later) and paid packages that pass the M10 hit gate.
+    Before, the anchor was the best raw net, so a hit package that fails the gate (or an unconfirmed-xM target, M54) pulled
+    every eligible free move outside the band and left nothing viable."""
+    best = None
+    for k, c in candidates.items():
+        ok = (k == 0) or float(c.get("hit_cost", 0.0) or 0.0) <= 0.0 or m10_hit_gate(candidates, k, ft_bank, threshold, hit_cost_per)
+        if ok and (best is None or float(c["net_gain"]) > best):
+            best = float(c["net_gain"])
+    return best if best is not None else 0.0
+
+
+def format_run_times(parts: dict) -> str:
+    """R2 Patch 30: 'main plan 3.2s · chain 12.0s · total 20.5s' for the Advanced readout (empty when nothing was timed)."""
+    return " · ".join(f"{k} {float(v):.1f}s" for k, v in (parts or {}).items() if v is not None)
+
+
 def m118_move_band(old_total: float, cfg: dict) -> float:
     """R2 Patch 28 (M118): the tie band for a single free-transfer decision is the 2-point floor, not 2% of the whole squad's
     horizon total (a path-sized band). Switch: model_config.yaml m118_move_band.enabled (off = the old Rule #34 band).
@@ -2132,7 +2166,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                          "baseline_adjusted": baseline_info["adjusted"],
                                          "baseline_zeroed_names": baseline_info["zeroed_names"]}
 
-        best_net = max(c["net_gain"] for c in candidates.values())
+        best_net = eligible_best_net(candidates, ft_bank, threshold, hit_cost_per)      # R2 Patch 30
         _protects = m119_tie_protects(forgone_cum, cfg)
         if _protects:
             tied_ks = sorted(k for k, c in candidates.items() if (best_net - c["net_gain"]) < moe)
@@ -2153,7 +2187,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         # viable (free moves only; hits still need Rule #13 and M54).
         if not any(k != 0 for k in viable):
             _ex = [k for k, c in candidates.items() if k != 0 and c["hit_cost"] == 0 and c["net_gain"] > 0
-                   and _m119_out_exempt(sim_squad, c["squad"], remaining_gws)]
+                   and _m119_out_exempt(sim_squad, c["squad"], list(range(gw, gw + 3)))]       # R2 Patch 30: fixed three weeks
             if _ex:
                 viable = [max(_ex, key=lambda _k: candidates[_k]["net_gain"])]       # replaces Roll (k=0)
         # Patch 112 (chain only; `cap_use_bar=None` keeps the old behaviour): with the FT bank AT THE CAP a Roll
@@ -2653,7 +2687,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             f"free, not his own live-discounted number.")
 
     else:
-        best_net = max(c["net_gain"] for c in candidates.values())
+        best_net = eligible_best_net(candidates, free_transfers, threshold, hit_cost_per)      # R2 Patch 30
 
         def clears_bar(c):
             if c["actual_k"] == 0:

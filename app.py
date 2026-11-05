@@ -13,6 +13,7 @@ import html
 import os
 import re
 import sys
+import time
 
 # Patch 69 — altair, used only for the Season Rank chart's reversed y-axis
 # (st.line_chart itself has no axis-reverse option). Not a new install cost:
@@ -32,6 +33,9 @@ import chip_protocol
 import transfers
 import recommend
 
+_RT_T0 = time.perf_counter()     # R2 Patch 30: run-time readout (Advanced)
+_RT = {}
+
 # Patch 38 (2026-09-14, manager report: "we spent the whole day explaining
 # the logic and still the same issue" — the real cause across that whole day
 # was never being able to tell, from a screenshot alone, whether a fix had
@@ -39,7 +43,7 @@ import recommend
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 29 (2026-11-04, manager go): the scenario plan now covers at least 3 gameweeks from the planning gameweek even at the default Horizon 1 (it used to stop after the buy week, so no later transfers were shown), and the planning window is part of the scenario cache key (raising the Horizon slider after a scenario was calculated kept the old one-week plan). Window = the Horizon slider weeks or 3, whichever is longer, as far as the pool has projections; the slider cap of 3 under Hit if worth it is unchanged. NOT validated in a browser. Previous: R2 Patch 28 (2026-11-02, model rulings M113, M118-M121, manager-approved combined build): (1) LOCK BUG: the scenario cache key now includes the Locked list, Excluded list, style, hit stance, Bench Boost week and disrupted list, so locking an owned player (João Pedro) recomputes the plan; before, a lock added after the first run was ignored until squad, bank or free transfers changed. (2) M118: a single free-transfer decision uses the 2-point floor as its tie band, not 2% of the whole squad horizon total (about 4-5 points) - a +4 swap is no longer a tie with Roll; the floor is also the banked-transfer value (about 2, M32(8)), so it is not subtracted twice (my reading). (3) M119: at the 5-transfer cap any non-negative free gain beats Roll; a move whose outgoing players total under 1.0 match of availability over three gameweeks goes ahead on a positive gain; the xPts forgone by rolling a move are added up and once they pass 2.0 the tie no longer protects further waiting (the Rule #42 one-gameweek extension is NOT built). (4) Roll text names the best move and why it lost instead of always saying no move clears the bar. (5) M113/M120: a regular back from a ban whose first match was a substitute gets xM x0.855 at match 2 and x0.83 at match 3; a weak match 2 gives x0.72 at match 3 (lowest factor, no stacking); from match 4 xM = M52 on the three matches since the return; the pre-ban share looks up to 12 gameweeks back; match 4 uses the match-3 factor (my reading); substitute = 1-59 minutes (proxy). (6) M121: new optional sheet column xm_out_until_gw = first gameweek available: xM 0 before, then 0.58 / 0.64 / 0.64 / 0.61, then his own M52; a dated starter statement lifts the return match to the cap. NOT validated in a browser or against the live FPL feed. Previous: R2 Patch 27 (2026-11-02, model ruling M117, manager-approved build): a sheet xm_override no longer hides an official flag. The override applies only when the status is a with chance 100 or blank; otherwise it is set aside and the player goes through the normal flag path (the M95/M96 table for regulars, M102 for an undated injury, the chance factor otherwise). Exception: a dated statement newer than the flag, which needs BOTH xm_override_date and xm_override_basis in the sheet and a date later than the flag's news date (a same-day statement does not count, my conservative reading; the sheet columns do not exist yet, so today every flagged override is set aside). The set-aside value is shown in the xM source text and in a sidebar list, and the player stays marked as unconfirmed xM. config xm_override_flag_rule.enabled false restores the old behaviour. NOT validated in a browser. "
+PATCH_VERSION = ("R2 Patch 30 (2026-11-05, manager go): (1) ONE planning window of 5 gameweeks for every transfer decision - the headline GW moves, the weekly chain, the draft, the scenario planner, the evaluate-a-target check and the buy-week list (before, the headline used the Horizon slider while the chain used 5, so the same GW10 move changed with the slider: Isak at 3 weeks, Thomas to Van Hecke plus Joao Pedro to N.Jackson at 1-2). The Horizon slider is removed; the tables and ratings keep their 1-GW display window. (2) The tie band is anchored on the best ELIGIBLE candidate (Roll, free moves, hit packages that pass the M10 gate), not the best raw net: a failing 5-move hit package (+23.6) used to push every free move outside the band and leave nothing viable. (3) The M119 availability exemption always reads three fixed gameweeks (week to week+2), not the first three of the window. (4) Advanced shows the run time of the last run (main plan, chip chain, total). The old suggest_transfers single-decision path is kept, now used only by the Force stance; the headline is the chain by construction. NOT timed in the live app, NOT validated in a browser. Previous: R2 Patch 29 (2026-11-04, manager go): the scenario plan now covers at least 3 gameweeks from the planning gameweek even at the default Horizon 1 (it used to stop after the buy week, so no later transfers were shown), and the planning window is part of the scenario cache key (raising the Horizon slider after a scenario was calculated kept the old one-week plan). Window = the Horizon slider weeks or 3, whichever is longer, as far as the pool has projections; the slider cap of 3 under Hit if worth it is unchanged. NOT validated in a browser. Previous: R2 Patch 28 (2026-11-02, model rulings M113, M118-M121, manager-approved combined build): (1) LOCK BUG: the scenario cache key now includes the Locked list, Excluded list, style, hit stance, Bench Boost week and disrupted list, so locking an owned player (João Pedro) recomputes the plan; before, a lock added after the first run was ignored until squad, bank or free transfers changed. (2) M118: a single free-transfer decision uses the 2-point floor as its tie band, not 2% of the whole squad horizon total (about 4-5 points) - a +4 swap is no longer a tie with Roll; the floor is also the banked-transfer value (about 2, M32(8)), so it is not subtracted twice (my reading). (3) M119: at the 5-transfer cap any non-negative free gain beats Roll; a move whose outgoing players total under 1.0 match of availability over three gameweeks goes ahead on a positive gain; the xPts forgone by rolling a move are added up and once they pass 2.0 the tie no longer protects further waiting (the Rule #42 one-gameweek extension is NOT built). (4) Roll text names the best move and why it lost instead of always saying no move clears the bar. (5) M113/M120: a regular back from a ban whose first match was a substitute gets xM x0.855 at match 2 and x0.83 at match 3; a weak match 2 gives x0.72 at match 3 (lowest factor, no stacking); from match 4 xM = M52 on the three matches since the return; the pre-ban share looks up to 12 gameweeks back; match 4 uses the match-3 factor (my reading); substitute = 1-59 minutes (proxy). (6) M121: new optional sheet column xm_out_until_gw = first gameweek available: xM 0 before, then 0.58 / 0.64 / 0.64 / 0.61, then his own M52; a dated starter statement lifts the return match to the cap. NOT validated in a browser or against the live FPL feed. Previous: R2 Patch 27 (2026-11-02, model ruling M117, manager-approved build): a sheet xm_override no longer hides an official flag. The override applies only when the status is a with chance 100 or blank; otherwise it is set aside and the player goes through the normal flag path (the M95/M96 table for regulars, M102 for an undated injury, the chance factor otherwise). Exception: a dated statement newer than the flag, which needs BOTH xm_override_date and xm_override_basis in the sheet and a date later than the flag's news date (a same-day statement does not count, my conservative reading; the sheet columns do not exist yet, so today every flagged override is set aside). The set-aside value is shown in the xM source text and in a sidebar list, and the player stays marked as unconfirmed xM. config xm_override_flag_rule.enabled false restores the old behaviour. NOT validated in a browser. "
                   "R2 Patch 26 (2026-10-29, manager request): Proposed team (draft) in the pitch's Squad toggle. It shows the squad after the plan's transfers, gameweek by gameweek (from the Chip Plan path), with chips as badges only (no Free Hit swap, no Triple Captain armband move, no Bench Boost bench), a Draft badge, and the same moves in the panel that the pitch applies. Current squad stays your real 15; for later gameweeks its panel says the planned moves are in Proposed team (it no longer lists moves the pitch does not show). The My lineup scenario box works in Proposed team too. The older After recommended transfers option is shown only when there is no chip-plan path. The Chip Plan view is unchanged (full chip effect). NOT validated in a browser. "
                   "R2 Patch 25 (2026-10-29, manager request): one way to name a target and one place for the scenario inputs. A Locked player you do not own is the target: it is a required buy, evaluated automatically with the weekly plan after it (Transfers, Your scenarios); the separate Target player picker is removed. The candidate Wildcard gameweek, the candidate Free Hit gameweek and the Evaluate scenario button are now in the sidebar under the Locked / Excluded players; the results (Wildcard, Free Hit, required buys, buy week selector) stay in the Transfers tab under Your scenarios. Evaluate is still a button (each evaluation is a fresh solve), not a recompute on every change. NOT validated in a browser. "
                   "R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
@@ -2350,6 +2354,7 @@ with st.sidebar:
     with st.expander("Advanced", expanded=False):
         budget_override = st.number_input("Budget override £m (squad value + bank; 0 = auto)",
                                           min_value=0.0, max_value=150.0, value=0.0, step=0.1, format="%.1f")
+        _rt_slot = st.empty()        # R2 Patch 30: filled at the end of the run (run-time readout)
     forced_count = None
     if hit_stance == "Force":
         forced_count = st.number_input("Transfers to force", min_value=1, max_value=5, value=2, step=1)
@@ -2374,14 +2379,9 @@ with st.sidebar:
     # The cap only applies to the two hit-stances that actually route through
     # the chained planner; "Force" always does a single one-shot solve over
     # the whole horizon regardless of length; so it keeps the full 1-6 range.
-    _horizon_max = 3 if hit_stance in ("No hits", "Hit if worth it") else 6
-    horizon = st.slider("Horizon (gameweeks)", min_value=1, max_value=_horizon_max, value=1,
-                         help="xPts are always shown per-GW too — widen this when you want a multi-week transfer plan view, not just this week's picture."
-                         + ("" if _horizon_max == 6 else
-                            " Capped at 3 GWs for this hit stance — beyond that, the chained weekly planner's "
-                            "own full-strength search (k=0-5 every week, plus the near-tie full-pool scan) "
-                            "takes 1-3+ minutes per run (measured, Patch 45); switch to \"Force\" for a longer "
-                            "one-shot horizon instead."))
+    # R2 Patch 30: the Horizon slider is gone. Every transfer decision (headline, weekly chain, scenarios) uses ONE planning
+    # window of 5 gameweeks (`plan_gw_list`, below). `horizon` is only the 1-GW display window for the tables and ratings.
+    horizon = 1
 
     # Patch 28 (v6.4 / Standing Rule #41) — this app has no persistent memory
     # between runs (fresh container each time, Step 2), so it cannot discover
@@ -2475,6 +2475,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     squad_gw = snap.current_gw
     planning_gw = cfg["meta"].get("current_gw_override") or snap.planning_gw
     gw_list = list(range(planning_gw, planning_gw + horizon))
+    _plan_gws0 = [g for g in range(planning_gw, planning_gw + recommend.PLAN_WINDOW_GWS) if g <= 38]   # R2 Patch 30
 
     # Patch 43 (2026-09-15, performance) — chip-availability status and the
     # GW *windows* the chip shape-test / Chip Advisor need are computed here,
@@ -2620,7 +2621,7 @@ with st.spinner("Fetching live data and computing xPts..."):
     if _extended_mode:
         _extend_proj_gws = set(recommend.extended_proj_gws(
             planning_gw, _ext_span, cfg.get("chip_portfolio", {}).get("window_value_len", 4)))
-    _gw_union = sorted(set(gw_list) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
+    _gw_union = sorted(set(gw_list) | set(_plan_gws0) | set(detect_gw_list or []) | set(chip_adv_gw_list or [])
                         | set(compliant_gw_list) | {_tie_break_lookahead_gw} | _extend_proj_gws)
     proj = _project(snap, hist_df, overrides, cfg, _gw_union, fixture_baselines)
     # R2 Patch 2 (model M31): per-week availability (distance factor, next-GW-only flags, dated returns from the FPL news
@@ -2732,6 +2733,7 @@ with st.spinner("Fetching live data and computing xPts..."):
         gw_xpts_total = round(starters_df[opt_col].sum(), 1) if (opt_col in starters_df.columns and not starters_df.empty) else 0.0
 
     pool_df = proj[~proj["code"].isin(squad_codes)].copy()
+    plan_gw_list = recommend.plan_gw_window(planning_gw, pool_df)      # R2 Patch 30: the ONE transfer-planning window
 
     # rank history + points from entry history
     cur_hist = history.get("current", []) if history else []
@@ -3099,10 +3101,10 @@ with st.spinner("Fetching live data and computing xPts..."):
     # the same `flagged_players` definition as the Wildcard trigger above so
     # the two never disagree. Only produces a capped horizon / note when a
     # squad player is actually currently disrupted; a silent no-op otherwise.
-    disruption = eng.disruption_check(squad_df, gw_list, planned_chip_gw)
-    transfer_gw_list = gw_list
+    disruption = eng.disruption_check(squad_df, plan_gw_list, planned_chip_gw)
+    transfer_gw_list = plan_gw_list
     if disruption["capped_gw_list"] is not None:
-        transfer_gw_list = disruption["capped_gw_list"] or gw_list[:1]
+        transfer_gw_list = disruption["capped_gw_list"] or plan_gw_list[:1]
 
     # Patch 28 (v6.4 / Step 8c shape-test) — cross-checks whatever Wildcard/
     # Free Hit signal already fired above against a genuine multi-GW optimal-
@@ -3439,6 +3441,7 @@ with st.spinner("Fetching live data and computing xPts..."):
         _chip_schedule["freehit_gw"] = _harmonized_fh_gw
 
     transfer_error = None
+    _t_main = time.perf_counter()
     try:
         # Patch 99 -- routed through the new @st.cache_data-wrapped
         # _suggest_transfers_calc() instead of calling recommend.
@@ -3459,6 +3462,7 @@ with st.spinner("Fetching live data and computing xPts..."):
                "hit_stance": hit_stance, "free_transfers": ft["free_transfers"],
                "weekly_plan": [], "is_weekly_schedule": False}
 
+_RT["main plan"] = time.perf_counter() - _t_main
 # Patch 46 (2026-09-15, manager report: the Wildcard trigger's own reachable-
 # ceiling benchmark ignores what the "Transfer Recommendations" section is
 # ALREADY telling you to do -- it's a one-shot rebuild using only today's
@@ -3869,6 +3873,7 @@ if wc_flag and wc_trigger and wc_trigger.get("avg_gap_pct") is not None:
 # and the Transfer page all read the same weeks. Fallback (chain chips unavailable): the Rule #49 re-pick on the
 # Wildcard candidate's own 4-GW rebuild.
 _chips_repicked = None
+_t_chain = time.perf_counter()
 _chain_path = None
 # R2 Patch 2 (B1, model M29(2)): no Wildcard comparison this run (Wildcard used or not triggered) -> place Triple Captain /
 # Bench Boost / Free Hit on the squads the free-transfer plan fields each week (the chain's no-chip path), not on one-shot
@@ -3975,6 +3980,7 @@ except Exception:
     pass
 
 
+_RT["chip chain"] = time.perf_counter() - _t_chain
 # R2 Patch 1 (A2): the re-picks above can rewrite chip weeks; apply the same floor once more (idempotent).
 try:
     chip_portfolio, _ = recommend.apply_chip_floor(chip_portfolio, float(meaningful_bar_override))
@@ -5914,8 +5920,7 @@ def _compute_scenario_path():
         return
     sel = st.session_state.get("scenario_buy_gw", "Now (this week)")
     buy = "best" if sel == "Best week" else (int(str(sel)[2:]) if str(sel).startswith("GW") else None)
-    _scen_gws = recommend.scenario_gw_window(gw_list, planning_gw, pool_df)       # R2 Patch 29
-    key = (tuple(desired), str(sel), int(planning_gw), tuple(_scen_gws), tuple(sorted(int(c) for c in squad_df["code"])),
+    key = (tuple(desired), str(sel), int(planning_gw), tuple(plan_gw_list), tuple(sorted(int(c) for c in squad_df["code"])),
            int(ft["free_transfers"]), round(float(bank), 1),
            # R2 Patch 28: everything the scenario planner reads. The old key missed the Locked list (a Lock added on an owned
            # player was ignored until some other input changed), the Excluded list, the style, the hit stance, the Bench
@@ -5929,7 +5934,7 @@ def _compute_scenario_path():
     try:
         _dp = (rec.get("weekly_plan") if (isinstance(rec, dict) and rec.get("is_weekly_schedule")) else None) or None
         path = _scenario_path_calc(squad_df, pool_df, cfg, style_name, hit_stance, int(ft["free_transfers"]), float(bank),
-                                   int(planning_gw), tuple(_scen_gws), tuple(desired), buy, _dp,
+                                   int(planning_gw), tuple(plan_gw_list), tuple(desired), buy, _dp,
                                    tuple(sorted(_disrupted_codes)) if _disrupted_codes else None, _bb_play_gw)
     except Exception as _e_sp:
         print(f"[R2P22] scenario path skipped: {type(_e_sp).__name__}: {_e_sp}", file=sys.stderr)
@@ -5958,7 +5963,7 @@ def _compute_scenario_evaluations():
     if target_choice[0] is not None:
         target_eval = recommend.evaluate_target_transfer(
             squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank,
-            planning_gw, gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
+            planning_gw, plan_gw_list, target_choice[0], default_net_gain=rec.get("net_gain"),
             disrupted_codes=_disrupted_codes, bb_play_gw=_bb_play_gw)
         st.session_state["scenario_target_cache"] = {"label": target_choice[1], "eval": target_eval}
         if target_eval["moves"]:
@@ -6958,8 +6963,8 @@ with tab_transfers:
     # available on demand rather than shown by default.
     if rec.get("is_weekly_schedule"):
         _hs_txt = rec.get("hit_stance", "No hits")
-        st.caption(f"{_hs_txt} + {horizon}-GW chained pacing plan",
-                   help=f"{_hs_txt} + {horizon}-GW horizon → this is a chained, week-by-week pacing plan (each week's "
+        st.caption(f"{_hs_txt} + {len(transfer_gw_list)}-GW chained pacing plan",
+                   help=f"{_hs_txt} + {len(transfer_gw_list)}-GW horizon → this is a chained, week-by-week pacing plan (each week's "
                         f"move assumes every earlier week's suggested move already happened), not a single this-week "
                         f"decision. Free-transfer accrual (+1/week, cap 5) is modeled explicitly below."
                         + (" Hits are allowed where a paid move still clears the stricter hit-cost bar."
@@ -7127,7 +7132,7 @@ with tab_transfers:
         _nc(f"{style_name} · style hit threshold {rec['hit_cost_threshold']} · bar {rec['minimum_meaningful_gain_free']}", f"Style profile: **{style_name}** · style threshold for a hit **{rec['hit_cost_threshold']} xPts** (default style {style_profiles.PROFILES[style_profiles.DEFAULT_PROFILE]['hit_cost_threshold']}; a style setting, not a Rule #13 test) · "
                    f"free-transfer materiality bar **{rec['minimum_meaningful_gain_free']} xPts** · "
                    f"margin-of-error floor **{rec.get('margin_of_error', 2.0):.1f} xPts** · "
-                   f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{horizon} GW**")
+                   f"free transfers available: **{ft['free_transfers']}** (bank £{bank}m) · horizon **{len(transfer_gw_list)} GW**")
         # Patch 14 — Standing Rule #4 disclosure: whether the recency signal
         # behind the xM Floor Rule's Rule #19 check was actually available this
         # run, not just assumed. If it wasn't, any player's "confirmed nailed"
@@ -7178,7 +7183,7 @@ with tab_transfers:
                    "Wildcard or Free Hit gameweek, then press Evaluate scenario there. Nothing here changes the recommendation above: "
                    "it stays the model's own default full-pool pick.")
         # R2 Patch 22: when to buy the locked players you do not own (the planner then plans the later weeks)
-        st.selectbox("Buy week for the locked players", ["Now (this week)", "Best week"] + [f"GW{g}" for g in gw_list[1:]],
+        st.selectbox("Buy week for the locked players", ["Now (this week)", "Best week"] + [f"GW{g}" for g in plan_gw_list[1:]],
                      key="scenario_buy_gw",
                      help="Now = this gameweek. A later gameweek keeps the model's own moves before it. Best week tries each week "
                           "of the horizon (up to 5) and keeps the highest total after hits; it takes longer.")
@@ -7297,3 +7302,10 @@ with tab_style:
             _nc("No rank data yet", "No overall-rank data yet this season — chart will populate once a gameweek finishes.")
     else:
         _nc("No season history yet", "No season history yet — nothing finished before GW1.")
+
+# R2 Patch 30: run-time readout (Advanced). Seconds for this run; cached steps show near zero.
+try:
+    _RT["total"] = time.perf_counter() - _RT_T0
+    _rt_slot.caption("Last run: " + recommend.format_run_times(_RT))
+except Exception:
+    pass
