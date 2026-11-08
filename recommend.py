@@ -3542,6 +3542,113 @@ def split_locks(locked_codes, squad_codes):
     return [c for c in lc if c in sc], [c for c in lc if c not in sc]
 
 
+def merge_same_week_round_trips(moves):
+    """R2 Patch 31: a player bought and sold inside the same gameweek is never a real transfer. Chains are merged (A->B and
+    B->C in one week = A->C; A->B and B->A = nothing). A safety net only: the joint buy-week solve cannot produce one."""
+    rows = [dict(m) for m in (moves or [])]
+    merged_any = False
+    while True:
+        hit = None
+        for i, a in enumerate(rows):
+            if a.get("in_code") is None:
+                continue
+            j = next((j for j, b in enumerate(rows) if j != i and a["in_code"] == b.get("out_code")), None)
+            if j is not None:
+                hit = (i, j)
+                break
+        if hit is None:
+            break
+        i, j = hit
+        a, b = rows[i], rows[j]
+        repl = None if b.get("in_code") == a.get("out_code") else {**a, **{k: v for k, v in b.items() if k.startswith("in")}}
+        rows = [r for n, r in enumerate(rows) if n not in (i, j)]
+        if repl is not None:
+            rows.insert(min(i, j), repl)
+        merged_any = True
+    return rows if merged_any else list(moves or [])
+
+
+def evaluate_required_buys(squad_df, pool_df, cfg, profile_name, hit_stance, free_transfers, bank, current_gw, gw_list,
+                           target_codes, disrupted_codes=None, bb_play_gw=None):
+    """R2 Patch 31: ONE joint solve for every required buy of a scenario's buy week (the old planner evaluated them one after
+    another, each step choosing its own funding moves and its own hit, so the same buys gave 4, 5 or 6 transfers depending on
+    their order, and a funding player bought in one step could be sold in the next). All targets plus the Locked owned players
+    are must-include in the same MILP for each k = 1..5 transfers; the hit is charged once for the whole week
+    (4 x transfers above the free ones); a player is either in or out against the starting squad, so a same-week round trip
+    cannot exist. The week's choice follows the same rule as evaluate_target_transfer: the best net after hits, fewest
+    transfers within the margin of error; under 'No hits' a hit-free route wins when one exists. A required buy is never
+    skipped: when every route needs a hit the cheapest one is returned and said so.
+    Returns {feasible, moves (batch hit and net on every row), net_gain, hit_cost, chosen_k, summary, free_route_exists}."""
+    hit_cost_per = cfg["transfer"]["hit_cost_per_transfer"]
+    this_gw_col = f"xpts_gw{current_gw}"
+    empty = {"feasible": False, "summary": [], "moves": [], "net_gain": None, "hit_cost": None, "chosen_k": None}
+    targets = [int(t) for t in (target_codes or [])]
+    if squad_df is None or squad_df.empty or "code" not in squad_df.columns or not targets:
+        return empty
+    own = set(squad_df["code"])
+    targets = [t for t in targets if t not in own]
+    if not targets:
+        return {**empty, "feasible": True, "summary": ["Every chosen player is already in the squad."]}
+    squad_df = squad_df.copy()
+    pool_df = pool_df.copy() if pool_df is not None else pd.DataFrame(columns=squad_df.columns)
+    for df in (squad_df, pool_df):
+        for col in ("price", "xpts_horizon_sum", this_gw_col):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+    bank = 0.0 if bank is None or pd.isna(bank) else float(bank)
+    full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False).drop_duplicates(subset=["code"], keep="first")
+    missing = [t for t in targets if t not in set(full_pool["code"])]
+    if missing:
+        return {**empty, "summary": ["A chosen player is not in the current projection pool, so this week cannot be planned."]}
+    bench_w = cfg.get("transfer", {}).get("bench_weight_non_bb_gw", 0.08)
+    old_total = opt.realized_horizon_value(squad_df, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+    team_value = round(bank + (squad_df["price"].sum(skipna=True) or 0.0), 1)
+    moe = eng.margin_of_error_threshold(old_total, cfg)
+    current_codes = list(squad_df["code"])
+    out_all = set(current_codes)
+    must = list(dict.fromkeys(targets + lock_codes_of(squad_df)))
+    excl = exclude_codes_of(full_pool, exempt=targets)
+    candidates = {}
+    for k in range(1, 6):
+        if k < len(targets):
+            continue                                            # fewer transfers than players to buy cannot work
+        result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
+                                  min_retain=max(0, 15 - k), must_include_codes=must, exclude_codes=excl,
+                                  objective_col="xpts_horizon_sum")
+        if result is None:
+            continue
+        new_squad = result["squad"]
+        actual_k = len(out_all - set(new_squad["code"]))
+        if actual_k == 0 or not set(targets) <= set(new_squad["code"]):
+            continue
+        hit = hit_cost_per * max(0, actual_k - int(free_transfers))
+        new_total = opt.realized_horizon_value(new_squad, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+        net = round(new_total - old_total - hit, 2)
+        if actual_k not in candidates or net > candidates[actual_k]["net_gain"]:
+            candidates[actual_k] = {"squad": new_squad, "hit_cost": hit, "net_gain": net, "actual_k": actual_k}
+    if not candidates:
+        return {**empty, "summary": ["No legal, budget-fitting way to add all of these players together (tried 1 to 5 transfers)."]}
+    free_c = {k: c for k, c in candidates.items() if c["hit_cost"] == 0}
+    no_free_route = (hit_stance == "No hits" and not free_c)
+    working = free_c if (hit_stance == "No hits" and free_c) else candidates
+    if no_free_route:                                           # required buys cannot be skipped: cheapest hit route
+        chosen_k = min(candidates, key=lambda k: (candidates[k]["hit_cost"], -candidates[k]["net_gain"]))
+    else:
+        best_net = max(c["net_gain"] for c in working.values())
+        tied = sorted(k for k, c in working.items() if (best_net - c["net_gain"]) < moe)
+        chosen_k = min(tied) if tied else min(working, key=lambda k: working[k]["net_gain"])
+    chosen = candidates[chosen_k]
+    pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
+    moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], True) for p in pairs]
+    note = (f"{chosen['actual_k']} transfer(s) in one joint solve, "
+            + (f"-{chosen['hit_cost']:.0f} hit" if chosen["hit_cost"] > 0 else "free")
+            + f", package net {chosen['net_gain']:+.1f} xPts")
+    if no_free_route:
+        note += " (stance is No hits, but every route to these required buys needs a hit)"
+    return {"feasible": True, "summary": [note], "moves": moves, "net_gain": chosen["net_gain"],
+            "hit_cost": chosen["hit_cost"], "chosen_k": chosen["actual_k"], "free_route_exists": bool(free_c)}
+
+
 def _apply_move_rows(squad, pool, moves):
     mdf = pd.DataFrame(moves)
     if mdf.empty or "out_code" not in mdf.columns or "in_code" not in mdf.columns:
@@ -3621,29 +3728,26 @@ def plan_scenario_path(squad_df, pool_df, cfg, profile_name, hit_stance, free_tr
         moves_all, evals, hit_total, k_total, ft_left = [], [], 0.0, 0, ft_at
         horizon_b = [g for g in gws if g >= b]
         cur = sq
-        for t in targets:
-            if t in set(cur["code"]):
-                continue
-            ev = evaluate_target_transfer(cur, pool_df, cfg, profile_name, hit_stance, ft_left, bank_now, b, horizon_b, t,
-                                          disrupted_codes=disrupted_codes, bb_play_gw=bb_play_gw)
+        missing = [t for t in targets if t not in set(cur["code"])]
+        if missing:
+            ev = evaluate_required_buys(cur, pool_df, cfg, profile_name, hit_stance, ft_at, bank_now, b, horizon_b, missing,
+                                        disrupted_codes=disrupted_codes, bb_play_gw=bb_play_gw)
             evals.append(ev)
             if not ev.get("feasible") or not ev.get("moves"):
-                return {"ok": False, "summary": ev.get("summary") or ["No legal way to add this player."], "evals": evals}
-            cur = _apply_move_rows(cur, full_pool, ev["moves"])
-            cur = cur.copy()
+                return {"ok": False, "summary": ev.get("summary") or ["No legal way to add these players."], "evals": evals}
+            cur = _apply_move_rows(cur, full_pool, ev["moves"]).copy()
             _prev = cur["_locked"].fillna(False).astype(bool) if "_locked" in cur.columns else pd.Series(False, index=cur.index)
-            cur["_locked"] = _prev | (cur["code"] == t)
-            k = len(ev["moves"])
-            k_total += k
-            hit_total += float(ev.get("hit_cost") or 0.0)
-            ft_left = max(0, ft_left - k)
+            cur["_locked"] = _prev | cur["code"].isin(set(missing))
+            k_total = len(ev["moves"])
+            hit_total = float(ev.get("hit_cost") or 0.0)
+            ft_left = max(0, ft_at - k_total)
             bank_now = round(start_value - float(cur["price"].sum(skipna=True) or 0.0), 1)
-            moves_all += [{**m, "gw": b} for m in ev["moves"]]
+            moves_all = merge_same_week_round_trips([{**m, "gw": b} for m in ev["moves"]])
         ft_after = min(transfers.MAX_BANK, ft_left + 1)
         buy_week = {"gw": b, "moves": moves_all, "net_gain": round(sum(float(e.get("net_gain") or 0.0) for e in evals), 2),
                     "ft_available": ft_at, "ft_used": min(k_total, ft_at), "ft_banked_after": ft_after,
                     "hit_cost": round(hit_total, 1), "source": "scenario buy", "chip_played": None, "data_gap_note": None,
-                    "summary": f"GW{b}: required buy, {k_total} transfer(s)" + (f", -{hit_total:.0f} hit" if hit_total > 0 else ", free")}
+                    "summary": f"GW{b}: required buy(s), {k_total} transfer(s) in one joint solve" + (f", -{hit_total:.0f} hit" if hit_total > 0 else ", free")}
         rest = [g for g in gws if g > b]
         after = []
         if rest:
