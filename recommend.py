@@ -58,10 +58,10 @@ def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: s
                 "position": pos,
                 "out_code": o["code"], "out": o["web_name"], "out_team": o["team"], "out_price": o["price"],
                 "out_xpts": o.get("xpts_horizon_sum", 0.0) or 0.0, "out_gw": 0 if pd.isna(o_gw) else o_gw,
-                "out_xm": o.get("xm"),
+                "out_xm": o.get("xm"), "out_nr": o.get("nailed_rule"),
                 "in_code": i["code"], "in": i["web_name"], "in_team": i["team"], "in_price": i["price"],
                 "in_xpts": i.get("xpts_horizon_sum", 0.0) or 0.0, "in_gw": 0 if pd.isna(i_gw) else i_gw,
-                "in_xm": i.get("xm"),
+                "in_xm": i.get("xm"), "in_nr": i.get("nailed_rule"),
                 "in_xm_src": i.get("xm_src"), "in_unconf": bool(i.get("xm_unconf", False)),
                 "in_eo": i.get("selected_by_percent"),
                 "setpiece_flag": bool(i.get("setpiece_flag", False)),
@@ -2164,7 +2164,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                          "actual_k": actual_k, "data_gap_codes": result.get("data_gap_codes", []),
                                          "baseline_total": baseline_total,
                                          "baseline_adjusted": baseline_info["adjusted"],
-                                         "baseline_zeroed_names": baseline_info["zeroed_names"]}
+                                         "baseline_zeroed_names": baseline_info["zeroed_names"],
+                                         "baseline_scaled": baseline_info.get("scaled", {})}
 
         best_net = eligible_best_net(candidates, ft_bank, threshold, hit_cost_per)      # R2 Patch 30
         _protects = m119_tie_protects(forgone_cum, cfg)
@@ -2322,7 +2323,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 [_move_row(p, 0.0, chosen["net_gain"], True) for p in pairs],
                 chosen.get("hit_cost", 0.0), hit_cost_per)]
             move_bits = ", ".join(
-                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg, False, p.get('out_nr'))} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False), p.get('in_nr'))}"
                 for p in pairs)
             hit_note = f" (−{chosen['hit_cost']:.0f} hit)" if chosen.get("hit_cost", 0.0) > 0 else " (free)"
             week_summary = (f"GW{gw}: {move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over the "
@@ -2347,7 +2348,9 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             if shift_bits:
                 plan.append(f"GW{gw}: Side effect — already on your bench, no transfer needed: "
                             f"{'; '.join(shift_bits)}.")
-            if chosen.get("baseline_adjusted"):
+            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
+                plan.append(f"GW{gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{gw}: Baseline note: {zeroed_txt} isn't nailed over the remaining horizon, so "
                             f"net-gain compares the incoming player against {zeroed_txt} benched for free.")
@@ -2617,6 +2620,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                      "baseline_total": baseline_total,
                                      "baseline_adjusted": baseline_info["adjusted"],
                                      "baseline_zeroed_names": baseline_info["zeroed_names"],
+                                     "baseline_scaled": baseline_info.get("scaled", {}),
                                      "new_xi": new_breakdown["xi_total"], "new_bench": new_breakdown["bench_total"],
                                      "baseline_xi": baseline_info.get("baseline_xi", baseline_total),
                                      "baseline_bench": baseline_info.get("baseline_bench", 0.0)}
@@ -2680,7 +2684,9 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             plan.append(f"GW{current_gw}: Forced {chosen['actual_k']} transfer(s) — bypasses the materiality bar "
                         f"by design; net {chosen['net_gain']:+.2f} xPts after the {chosen['hit_cost']:.0f}-pt "
                         f"hit ({old_total:.1f} → {chosen['total']:.1f} xPts over {horizon_n} GW(s)).")
-            if chosen.get("baseline_adjusted"):
+            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
+                plan.append(f"GW{current_gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{current_gw}: Baseline note: {zeroed_txt} isn't a nailed starter over this "
                             f"horizon, so net-gain compares the incoming player against {zeroed_txt} benched for "
@@ -2821,7 +2827,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             # good net-xPts number doesn't quietly hide an incoming player
             # who isn't actually a confirmed starter.
             move_bits = ", ".join(
-                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
+                f"{p['out']}{_xm_badge(p.get('out_xm'), cfg, False, p.get('out_nr'))} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False), p.get('in_nr'))}"
                 for p in pairs)
             hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
             summary.append(f"{move_bits}{hit_note} — net {chosen['net_gain']:+.1f} xPts over {horizon_n} GW(s).")
@@ -2867,7 +2873,9 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             # against the free bench replacement he'd have gotten anyway,
             # not against his own (possibly near-zero) live projection —
             # say so explicitly rather than leaving the number unexplained.
-            if chosen.get("baseline_adjusted"):
+            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
+                plan.append(f"GW{current_gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{current_gw}: Baseline note: {zeroed_txt} isn't a nailed starter over this "
                             f"horizon (xM tier: rotation/bench risk), so the net-gain above compares the "
@@ -3142,7 +3150,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
         pairs = _pair_moves(squad_df, cheapest["squad"], this_gw_col)
         moves = [_move_row(p, cheapest["hit_cost"], cheapest["net_gain"], False) for p in pairs]
         move_bits = ", ".join(
-            f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
+            f"{p['out']}{_xm_badge(p.get('out_xm'), cfg, False, p.get('out_nr'))} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False), p.get('in_nr'))}"
             for p in pairs)
         summary = [f"No hit-free way to add this player this run — your sidebar stance is 'No hits', and every "
                     f"legal route found needs at least a {cheapest['hit_cost']:.0f}-pt hit.",
@@ -3169,7 +3177,7 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     pairs = _pair_moves(squad_df, chosen["squad"], this_gw_col)
     moves = [_move_row(p, chosen["hit_cost"], chosen["net_gain"], clears) for p in pairs]
     move_bits = ", ".join(
-        f"{p['out']}{_xm_badge(p.get('out_xm'), cfg)} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False))}"
+        f"{p['out']}{_xm_badge(p.get('out_xm'), cfg, False, p.get('out_nr'))} → {p['in']}{_xm_badge(p.get('in_xm'), cfg, p.get('in_unconf', False), p.get('in_nr'))}"
         for p in pairs)
     hit_note = f" (−{chosen['hit_cost']:.0f} pt hit)" if chosen["hit_cost"] > 0 else " (free)"
     verdict_note = ("clears its bar — a genuine improvement" if clears else
@@ -3270,7 +3278,17 @@ def _xm_tier(xm: float | None, cfg: dict | None = None) -> str | None:
     return "risk"
 
 
-def _xm_badge(xm: float | None, cfg: dict | None = None, unconf: bool = False) -> str:
+def _rule70_badge(nr) -> str:
+    """R2 Patch 32 (M125): display-only badge for the manager's 70% rule. Empty when no label."""
+    if nr not in ("yes", "no"):
+        return ""
+    return (f' <span class="xm-badge {"nailed" if nr == "yes" else "rotation"}" title="Manager\'s 70% rule (M125), display only: '
+            f'starts (60+ minute proxy) in at least 70% of the last 5-10 matches and 80+ minutes in at least 70% of those starts, '
+            f'matches with a sheet exclusion skipped. It does not set xM, the nailed label, Patch 36 or the no-hit rule.">'
+            f'70% rule: {nr}</span>')
+
+
+def _xm_badge(xm: float | None, cfg: dict | None = None, unconf: bool = False, nr: str | None = None) -> str:
     """Patch 33 (manager report: a transfer's xPts already bakes in expected
     minutes via `xm`, but that was never disclosed next to the recommendation
     itself, so a rotation risk masquerading as a good net-xPts number was
@@ -3286,7 +3304,7 @@ def _xm_badge(xm: float | None, cfg: dict | None = None, unconf: bool = False) -
             f'into this player\'s xPts above, shown here so rotation risk isn\'t hidden behind a good net number.">'
             f'xM {xm:.2f} {label}</span>' + (' <span class="xm-badge risk" title="R2 Patch 15 (M52(4)/M54): this xM is an estimate '
             'from recent minutes, not a confirmed start. No -4 hit may rest on this player; re-check after the press conferences.">'
-            'xM unconfirmed</span>' if unconf else ''))
+            'xM unconfirmed</span>' if unconf else '') + _rule70_badge(nr))
 
 
 def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: list[int], cfg: dict,
@@ -3339,33 +3357,69 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
         else:
             bd = {"xi_total": 0.0, "bench_total": 0.0, "total": 0.0}
         return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
-                "adjusted": False, "zeroed_names": []}
+                "adjusted": False, "zeroed_names": [], "scaled": {}}
 
     non_nailed = []
     for code in out_codes:
         row = squad_df[squad_df["code"] == code]
         if row.empty:
             continue
-        tier = _xm_tier(row.iloc[0].get("xm"), cfg)
+        xm_v = row.iloc[0].get("xm")
+        tier = _xm_tier(xm_v, cfg)
         if tier in ("rotation", "risk"):
-            non_nailed.append((code, row.iloc[0].get("web_name")))
+            non_nailed.append((code, row.iloc[0].get("web_name"), baseline_keep_factor(xm_v, cfg)))
 
     if not non_nailed:
         bd = opt.realized_horizon_breakdown(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
                                              bb_play_gw=bb_play_gw)
         return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
-                "adjusted": False, "zeroed_names": []}
+                "adjusted": False, "zeroed_names": [], "scaled": {}}
 
     zeroed_squad = squad_df.copy()
-    for code, _ in non_nailed:
+    for code, _, keep in non_nailed:
         for gw in gw_list:
             col = f"xpts_gw{gw}"
             if col in zeroed_squad.columns:
-                zeroed_squad.loc[zeroed_squad["code"] == code, col] = 0.0
+                zeroed_squad.loc[zeroed_squad["code"] == code, col] = zeroed_squad.loc[zeroed_squad["code"] == code, col] * keep
     bd = opt.realized_horizon_breakdown(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w,
                                          bb_play_gw=bb_play_gw)
     return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
-            "adjusted": True, "zeroed_names": [n for _, n in non_nailed]}
+            "adjusted": True, "zeroed_names": [n for _, n, _k in non_nailed],
+            "scaled": {n: float(k) for _, n, k in non_nailed}}
+
+
+def baseline_keep_factor(xm, cfg: dict | None = None) -> float:
+    """R2 Patch 32 (model M127 open question): the share of an OUT candidate's own projection that Patch 36's baseline keeps.
+    Mode "zero" (default, Patch 36 as built): 1.0 for a nailed player (xM >= 0.80), 0.0 below it. Mode "xm_ramp": 0 at or
+    below xM 0.50 (bench risk), 1 at or above the nailed cut, linear between, so a 0.79 player is no longer valued like a
+    0.30 one. A missing xM fails open (1.0). My design, estimate tier; not ruled on by the model chat."""
+    if xm is None or pd.isna(xm):
+        return 1.0
+    mode = ((cfg or {}).get("transfer", {}) or {}).get("baseline_nailed_mode", "zero")
+    nailed_cut = (cfg or {}).get("xm_heuristic", {}).get("confirmed_current_season_start_floor", 0.88) - 0.08
+    if float(xm) >= nailed_cut:
+        return 1.0
+    if mode != "xm_ramp":
+        return 0.0
+    return float(min(1.0, max(0.0, (float(xm) - 0.5) / (nailed_cut - 0.5))))
+
+
+def baseline_ramp_partial(scaled) -> bool:
+    """True when at least one OUT candidate keeps a share strictly between 0 and 1 (xM ramp mode)."""
+    return bool(scaled) and any(0.0 < float(v) < 1.0 for v in scaled.values())
+
+
+def baseline_note_text(names, scaled=None) -> str:
+    """R2 Patch 32: wording of the Patch 36 baseline note. All-zero (or no factors): the old 'benched for free' sentence;
+    partial shares (xm_ramp mode): says what share of his projection the baseline kept."""
+    names = list(names or [])
+    txt = ", ".join(names)
+    if not baseline_ramp_partial(scaled):
+        return (f"{txt} isn't nailed over the remaining horizon, so net-gain compares the incoming player against "
+                f"{txt} benched for free.")
+    bits = [f"{n} {int(round(float(scaled.get(n, 0.0)) * 100))}%" for n in names]
+    return (f"{txt} isn't nailed (xM below 0.80), so net-gain compares the incoming player against a baseline that keeps "
+            f"only part of his own projection (xM ramp, estimate: {', '.join(bits)}), not the full number and not zero.")
 
 
 
@@ -4066,6 +4120,7 @@ def _move_row(p: dict, hit_cost: float, net_gain: float, justified: bool) -> dic
         "out": p["out"], "out_code": p["out_code"], "out_team": p["out_team"], "out_price": p["out_price"],
         "out_xm": p.get("out_xm"),
         "in": p["in"], "in_code": p["in_code"], "in_team": p["in_team"], "in_price": p["in_price"],
+        "in_nr": p.get("in_nr"), "out_nr": p.get("out_nr"),
         "in_xm": p.get("in_xm"), "in_xm_src": p.get("in_xm_src"), "in_unconf": bool(p.get("in_unconf", False)),
         "position": p["position"],
         "xpts_gain": round(p["in_xpts"] - p["out_xpts"], 2),

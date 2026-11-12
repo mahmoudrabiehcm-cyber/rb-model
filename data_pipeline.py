@@ -642,6 +642,7 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
     pl["_xm_h2"] = pl["_xm_h"]
     pl["_xm_src"] = ""
     pl["_xm_unconf"] = False
+    pl["_nailed_rule"] = ""                      # R2 Patch 32 (M125): display-only 70% rule label
     pl["_xm_sched"] = pd.Series([None] * len(pl), index=pl.index, dtype=object)     # R2 Patch 17 (M85/M86): {gw: (xM, healthy xM)}
     _thr = float(((cfg or {}).get("xm_m52") or {}).get("unconfirmed_below", 0.80))
     on = bool(((cfg or {}).get("xm_m52") or {}).get("enabled", True))
@@ -654,7 +655,15 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
     starts = pd.to_numeric(pl.get("starts", pd.Series(np.nan, index=pl.index)), errors="coerce")
     sp90 = pd.to_numeric(pl.get("starts_per_90", pd.Series(np.nan, index=pl.index)), errors="coerce")
     rs = pl.get("recent_start", pd.Series(None, index=pl.index, dtype=object))
+    _r70 = (cfg or {}).get("xm_rule70") or {}
     for i in pl.index:
+        if _r70.get("enabled", False) and has_m:
+            _lm = pl.at[i, "m52_long"] if "m52_long" in pl.columns and isinstance(pl.at[i, "m52_long"], list) else pl.at[i, "m52_matches"]
+            if isinstance(_lm, list):
+                _lab = eng.rule70_label(_lm, eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {},
+                                        _r70.get("window_cap", 10), _r70.get("min_window", 5), _r70.get("share", 0.70),
+                                        _r70.get("start_minutes", 60), _r70.get("long_minutes", 80))
+                pl.at[i, "_nailed_rule"] = _lab["label"] or ""
         if pd.notna(ov.get(i)):
             pl.at[i, "_xm_src"] = "sheet override"
             continue
@@ -695,6 +704,12 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
                 pl.at[i, "_xm_unconf"] = True
             elif floor_only:
                 pl.at[i, "_xm_src"] = "current path (floor)"
+            # R2 Patch 32 (M124/M111 display): a sheet exclusion left fewer than 2 eligible matches -> current treatment, disclosed
+            _ex = eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {}
+            _mm = pl.at[i, "m52_matches"] if has_m and isinstance(pl.at[i, "m52_matches"], list) else []
+            if _ex and _mm and any(int(g) in _ex for g, _m in _mm) and sum(1 for g, _m in _mm if int(g) not in _ex) < 2:
+                _d = "fewer than 2 eligible matches after exclusion (M124/M111): current treatment"
+                pl.at[i, "_xm_src"] = (str(pl.at[i, "_xm_src"]).strip() + " · " + _d).lstrip(" ·") if pl.at[i, "_xm_src"] else _d
             continue
         x1h, x2h = res["x1"], res["x2"]
         pl.at[i, "_xm_h"], pl.at[i, "_xm_h2"] = x1h, x2h
@@ -1193,6 +1208,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "xm": eng._pyround(pl["_xm"], 3).values,
         "xm_src": pl["_xm_src"].fillna("").astype(str).values,
         "xm_unconf": pl["_xm_unconf"].fillna(False).astype(bool).values,
+        "nailed_rule": pl["_nailed_rule"].fillna("").astype(str).values,     # R2 Patch 32 (M125): display only
         "xm_override_ignored": pl["_ov_ignored"].values,        # R2 Patch 27 (M117): the suspended sheet value, else NaN
         "est_rescue_needed": pl.get("est_rescue_needed", pd.Series(False, index=pl.index)).fillna(False).astype(bool).values,
         "sample_tag": pl.get("sample_tag", pd.Series("", index=pl.index)).fillna("").astype(str).values,

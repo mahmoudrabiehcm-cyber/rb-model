@@ -315,6 +315,25 @@ def parse_xm_excl(text) -> dict:
     return out
 
 
+def rule70_label(matches, excl=None, window_cap=10, min_window=5, share=0.70, start_minutes=60.0, long_minutes=80.0):
+    """R2 Patch 32 (M125): the manager's 70% rule as a DISPLAY-ONLY label. `matches` = the player's matches, oldest first, as
+    (gw, minutes) pairs. Matches whose gw is a key of `excl` (any kind) are skipped (M124/M111 reading). W = the last
+    min(window_cap, available) matches; fewer than `min_window` -> label None. Start = `start_minutes`+ (proxy; the per-match
+    starts flag is not kept per match). "yes" when starts >= share x W AND at least `share` of those starts reach
+    `long_minutes` (the model chat's tested stand-in for "no early sub before the clean sheet", M126). Returns
+    {"label": "yes"/"no"/None, "w", "starts", "long"}. Never used for xM, Patch 36 or M54."""
+    excl = excl or {}
+    ms = [(int(g), float(m)) for g, m in (matches or []) if m is not None and not (isinstance(m, float) and m != m) and int(g) not in excl]
+    w = min(int(window_cap), len(ms))
+    if w < int(min_window):
+        return {"label": None, "w": w, "starts": 0, "long": 0}
+    win = [m for _g, m in ms[-w:]]
+    st = [m for m in win if m >= start_minutes]
+    lg = [m for m in st if m >= long_minutes]
+    ok = len(st) >= share * w - 1e-9 and len(st) > 0 and len(lg) >= share * len(st) - 1e-9
+    return {"label": "yes" if ok else "no", "w": w, "starts": len(st), "long": len(lg)}
+
+
 def _m52_vals(nst, E):
     """M52 / M60 on the eligible matches E (minutes, oldest first). Returns (x_gw1, x_gw2) or None (fewer than 2)."""
     n = len(E)
@@ -405,7 +424,14 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
                 src = "M52 (unflagged single miss, 50/50 blend)"
         elif any(k == "FLAG" for k in excl.values()):
             src = "M52 (flagged miss excluded)"
-        out = {"x1": v[0], "x2": v[1], "src": src}
+        else:
+            # R2 Patch 32 (M124 display): name an injury exclusion that actually sits in the window. Label only; numbers unchanged.
+            _in_win = {k for g, k in excl.items() if g in {m[0] for m in ms}}
+            if not ban and "INJ_AUTO" in _in_win:
+                src = "M52 (injury-onset match excluded, M124 · 6-match window, M111 allows 7)"
+            elif not ban and "INJ" in _in_win:
+                src = "M52 (injury match excluded · 6-match window, M111 allows 7)"
+        out = {"x1": v[0], "x2": v[1], "src": src, "n_eligible": len(E)}
     if confirm_gw is not None and planning_gw is not None and int(confirm_gw) == int(planning_gw):
         out["x1"] = M52_CAP
         out["src"] += " + starter confirmed GW%d" % int(confirm_gw)

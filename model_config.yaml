@@ -2750,6 +2750,12 @@ transfer:
   # Team Rating %) — those are whole-squad ongoing-quality assessments, not a
   # specific transfer's marginal net gain, and keep full bench weight.
   bench_weight_non_bb_gw: 0.08
+  # R2 Patch 32 (manager go, 12 Nov 2026; model M127 open question): how Patch 36's net-gain baseline treats an OUT candidate
+  # below the "nailed" xM cut (0.80). "zero" = Patch 36 as built (projection set to 0 for the checked GWs). "xm_ramp" = keep
+  # a share of his projection: 0 at xM 0.50, 1 at xM 0.80, linear between (continuous at both tier edges; bench-risk stays 0).
+  # The ramp is MY design, estimate tier, not yet ruled on by the model chat: default stays "zero" so decisions are unchanged
+  # until the manager switches it.
+  baseline_nailed_mode: zero
   planner_captain: false  # Patch 115 fix 2: OFF = Standing Rule #31 (planner values exclude the captain). ON = sensitivity test only: the planner's per-week value adds the XI's top scorer once (Rule #54 reading). Not validated.
   # How many gameweeks ahead to look when checking whether a Wildcard/Free
   # Hit is coming up soon enough that banking a transfer for it beats
@@ -3417,3 +3423,15 @@ flag_buy_rules:        # R2 Patch 23 (manager: flagged players below 75 % are ne
   hard_below_chance: 75      # never recommend BUYING a player with chance of playing under this (or i/s/u/n, or d with no figure)
   hunter_allow_75: true      # a 75 % flagged buy is allowed for Hunter only, with a free transfer, if it beats the unflagged alternative by more than the Rule #34 band
   hugger_block_flagged: true # Hugger does not buy any flagged player (waits)
+
+# R2 Patch 32 (M125): the manager's 70% rule, DISPLAY ONLY. Starts (60+ minute proxy) in at least `share` of the last W matches
+# (W = matches available, capped at window_cap, at least min_window), and 80+ minutes in at least `share` of those starts
+# (the model chat's tested stand-in for "not an early sub before the clean sheet"). Matches with a sheet exclusion are
+# skipped. Never sets xM, never drives Patch 36 or M54 (M125). The label "nailed" stays xM >= 0.80.
+xm_rule70:
+  enabled: true
+  window_cap: 10
+  min_window: 5
+  share: 0.70
+  start_minutes: 60
+  long_minutes: 80
