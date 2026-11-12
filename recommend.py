@@ -2165,7 +2165,9 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                          "baseline_total": baseline_total,
                                          "baseline_adjusted": baseline_info["adjusted"],
                                          "baseline_zeroed_names": baseline_info["zeroed_names"],
-                                         "baseline_scaled": baseline_info.get("scaled", {})}
+                                         "baseline_scaled": baseline_info.get("scaled", {}),
+                                         "baseline_worst_total": (None if baseline_info.get("worst_case_total") is None else baseline_info["worst_case_total"] + _tc_extra(sim_squad, remaining_gws)),
+                                         "baseline_worst_names": baseline_info.get("worst_names", [])}
 
         best_net = eligible_best_net(candidates, ft_bank, threshold, hit_cost_per)      # R2 Patch 30
         _protects = m119_tie_protects(forgone_cum, cfg)
@@ -2348,8 +2350,8 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             if shift_bits:
                 plan.append(f"GW{gw}: Side effect — already on your bench, no transfer needed: "
                             f"{'; '.join(shift_bits)}.")
-            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
-                plan.append(f"GW{gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            if chosen.get("baseline_worst_names") and not chosen.get("baseline_adjusted") and chosen.get("baseline_worst_total") is not None:
+                plan.append(f"GW{gw}: Baseline note: " + baseline_worst_case_text(chosen["baseline_worst_names"], chosen["net_gain"], round(chosen["total"] - chosen["baseline_worst_total"] - chosen.get("hit_cost", 0.0), 2)))
             elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{gw}: Baseline note: {zeroed_txt} isn't nailed over the remaining horizon, so "
@@ -2621,6 +2623,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                                      "baseline_adjusted": baseline_info["adjusted"],
                                      "baseline_zeroed_names": baseline_info["zeroed_names"],
                                      "baseline_scaled": baseline_info.get("scaled", {}),
+                                     "baseline_worst_total": baseline_info.get("worst_case_total"),
+                                     "baseline_worst_names": baseline_info.get("worst_names", []),
                                      "new_xi": new_breakdown["xi_total"], "new_bench": new_breakdown["bench_total"],
                                      "baseline_xi": baseline_info.get("baseline_xi", baseline_total),
                                      "baseline_bench": baseline_info.get("baseline_bench", 0.0)}
@@ -2684,8 +2688,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             plan.append(f"GW{current_gw}: Forced {chosen['actual_k']} transfer(s) — bypasses the materiality bar "
                         f"by design; net {chosen['net_gain']:+.2f} xPts after the {chosen['hit_cost']:.0f}-pt "
                         f"hit ({old_total:.1f} → {chosen['total']:.1f} xPts over {horizon_n} GW(s)).")
-            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
-                plan.append(f"GW{current_gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            if chosen.get("baseline_worst_names") and not chosen.get("baseline_adjusted") and chosen.get("baseline_worst_total") is not None:
+                plan.append(f"GW{current_gw}: Baseline note: " + baseline_worst_case_text(chosen["baseline_worst_names"], chosen["net_gain"], round(chosen["total"] - chosen["baseline_worst_total"] - chosen.get("hit_cost", 0.0), 2)))
             elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{current_gw}: Baseline note: {zeroed_txt} isn't a nailed starter over this "
@@ -2873,8 +2877,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
             # against the free bench replacement he'd have gotten anyway,
             # not against his own (possibly near-zero) live projection —
             # say so explicitly rather than leaving the number unexplained.
-            if chosen.get("baseline_adjusted") and baseline_ramp_partial(chosen.get("baseline_scaled")):
-                plan.append(f"GW{current_gw}: Baseline note: " + baseline_note_text(chosen.get("baseline_zeroed_names", []), chosen.get("baseline_scaled")))
+            if chosen.get("baseline_worst_names") and not chosen.get("baseline_adjusted") and chosen.get("baseline_worst_total") is not None:
+                plan.append(f"GW{current_gw}: Baseline note: " + baseline_worst_case_text(chosen["baseline_worst_names"], chosen["net_gain"], round(chosen["total"] - chosen["baseline_worst_total"] - chosen.get("hit_cost", 0.0), 2)))
             elif chosen.get("baseline_adjusted"):
                 zeroed_txt = ", ".join(chosen.get("baseline_zeroed_names", []))
                 plan.append(f"GW{current_gw}: Baseline note: {zeroed_txt} isn't a nailed starter over this "
@@ -3364,62 +3368,44 @@ def realistic_baseline_value(squad_df: pd.DataFrame, out_codes: set, gw_list: li
         row = squad_df[squad_df["code"] == code]
         if row.empty:
             continue
-        xm_v = row.iloc[0].get("xm")
-        tier = _xm_tier(xm_v, cfg)
-        if tier in ("rotation", "risk"):
-            non_nailed.append((code, row.iloc[0].get("web_name"), baseline_keep_factor(xm_v, cfg)))
+        if _xm_tier(row.iloc[0].get("xm"), cfg) in ("rotation", "risk"):
+            non_nailed.append((code, row.iloc[0].get("web_name")))
 
+    full_bd = opt.realized_horizon_breakdown(squad_df, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+    full = {"baseline_total": full_bd["total"], "baseline_xi": full_bd["xi_total"], "baseline_bench": full_bd["bench_total"]}
     if not non_nailed:
-        bd = opt.realized_horizon_breakdown(squad_df, gw_list, cfg, bench_weight_scale=bench_w,
-                                             bb_play_gw=bb_play_gw)
-        return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
-                "adjusted": False, "zeroed_names": [], "scaled": {}}
+        return {**full, "adjusted": False, "zeroed_names": [], "scaled": {}, "worst_case_total": None, "worst_names": []}
 
     zeroed_squad = squad_df.copy()
-    for code, _, keep in non_nailed:
+    for code, _ in non_nailed:
         for gw in gw_list:
             col = f"xpts_gw{gw}"
             if col in zeroed_squad.columns:
-                zeroed_squad.loc[zeroed_squad["code"] == code, col] = zeroed_squad.loc[zeroed_squad["code"] == code, col] * keep
-    bd = opt.realized_horizon_breakdown(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w,
-                                         bb_play_gw=bb_play_gw)
-    return {"baseline_total": bd["total"], "baseline_xi": bd["xi_total"], "baseline_bench": bd["bench_total"],
-            "adjusted": True, "zeroed_names": [n for _, n, _k in non_nailed],
-            "scaled": {n: float(k) for _, n, k in non_nailed}}
+                zeroed_squad.loc[zeroed_squad["code"] == code, col] = 0.0
+    zbd = opt.realized_horizon_breakdown(zeroed_squad, gw_list, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+    names = [n for _, n in non_nailed]
+    if baseline_zeroes_non_nailed(cfg):
+        # Patch 36 as built (switch transfer.baseline_zero_non_nailed true): the zeroed figure IS the baseline.
+        return {"baseline_total": zbd["total"], "baseline_xi": zbd["xi_total"], "baseline_bench": zbd["bench_total"],
+                "adjusted": True, "zeroed_names": names, "scaled": {n: 0.0 for n in names},
+                "worst_case_total": zbd["total"], "worst_names": names}
+    # R2 Patch 33 (model M128, M129): the outgoing player enters the baseline with his OWN projection in full at every xM tier
+    # (it already contains xM). The zeroed figure is kept only as a labelled worst case; it does not drive the decision.
+    return {**full, "adjusted": False, "zeroed_names": [], "scaled": {}, "worst_case_total": zbd["total"], "worst_names": names}
 
 
-def baseline_keep_factor(xm, cfg: dict | None = None) -> float:
-    """R2 Patch 32 (model M127 open question): the share of an OUT candidate's own projection that Patch 36's baseline keeps.
-    Mode "zero" (default, Patch 36 as built): 1.0 for a nailed player (xM >= 0.80), 0.0 below it. Mode "xm_ramp": 0 at or
-    below xM 0.50 (bench risk), 1 at or above the nailed cut, linear between, so a 0.79 player is no longer valued like a
-    0.30 one. A missing xM fails open (1.0). My design, estimate tier; not ruled on by the model chat."""
-    if xm is None or pd.isna(xm):
-        return 1.0
-    mode = ((cfg or {}).get("transfer", {}) or {}).get("baseline_nailed_mode", "zero")
-    nailed_cut = (cfg or {}).get("xm_heuristic", {}).get("confirmed_current_season_start_floor", 0.88) - 0.08
-    if float(xm) >= nailed_cut:
-        return 1.0
-    if mode != "xm_ramp":
-        return 0.0
-    return float(min(1.0, max(0.0, (float(xm) - 0.5) / (nailed_cut - 0.5))))
+def baseline_zeroes_non_nailed(cfg: dict | None = None) -> bool:
+    """R2 Patch 33 (M128): False by default = the outgoing player keeps his own projection in the baseline. True restores
+    Patch 36 (a non-nailed OUT candidate is zeroed). Config transfer.baseline_zero_non_nailed."""
+    return bool(((cfg or {}).get("transfer", {}) or {}).get("baseline_zero_non_nailed", False))
 
 
-def baseline_ramp_partial(scaled) -> bool:
-    """True when at least one OUT candidate keeps a share strictly between 0 and 1 (xM ramp mode)."""
-    return bool(scaled) and any(0.0 < float(v) < 1.0 for v in scaled.values())
-
-
-def baseline_note_text(names, scaled=None) -> str:
-    """R2 Patch 32: wording of the Patch 36 baseline note. All-zero (or no factors): the old 'benched for free' sentence;
-    partial shares (xm_ramp mode): says what share of his projection the baseline kept."""
-    names = list(names or [])
+def baseline_worst_case_text(names, net, worst_net) -> str:
+    """R2 Patch 33 (M128): labelled worst-case line. Not used in the decision."""
     txt = ", ".join(names)
-    if not baseline_ramp_partial(scaled):
-        return (f"{txt} isn't nailed over the remaining horizon, so net-gain compares the incoming player against "
-                f"{txt} benched for free.")
-    bits = [f"{n} {int(round(float(scaled.get(n, 0.0)) * 100))}%" for n in names]
-    return (f"{txt} isn't nailed (xM below 0.80), so net-gain compares the incoming player against a baseline that keeps "
-            f"only part of his own projection (xM ramp, estimate: {', '.join(bits)}), not the full number and not zero.")
+    return (f"{txt} isn't nailed (xM below 0.80). The net gain above counts his own projection in full (it already contains "
+            f"xM, model M128). Worst case, label only: if he were benched for free the net gain would be {worst_net:+.1f} "
+            f"instead of {net:+.1f}.")
 
 
 

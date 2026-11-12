@@ -2750,12 +2750,11 @@ transfer:
   # Team Rating %) — those are whole-squad ongoing-quality assessments, not a
   # specific transfer's marginal net gain, and keep full bench weight.
   bench_weight_non_bb_gw: 0.08
-  # R2 Patch 32 (manager go, 12 Nov 2026; model M127 open question): how Patch 36's net-gain baseline treats an OUT candidate
-  # below the "nailed" xM cut (0.80). "zero" = Patch 36 as built (projection set to 0 for the checked GWs). "xm_ramp" = keep
-  # a share of his projection: 0 at xM 0.50, 1 at xM 0.80, linear between (continuous at both tier edges; bench-risk stays 0).
-  # The ramp is MY design, estimate tier, not yet ruled on by the model chat: default stays "zero" so decisions are unchanged
-  # until the manager switches it.
-  baseline_nailed_mode: zero
+  # R2 Patch 33 (model ruling M128/M129, 12 Nov 2026): the net-gain baseline counts the OUTGOING player's OWN projection in full at
+  # every xM tier (his xPts already contain xM; zeroing one side biased every swap toward selling). false = M128 (default).
+  # true restores Patch 36 exactly (a rotation / bench-risk OUT candidate is zeroed). The zeroed figure is still computed and
+  # shown as a labelled worst case; it never drives the decision. The Patch 32 xm_ramp option was rejected by M128 and is gone.
+  baseline_zero_non_nailed: false
   planner_captain: false  # Patch 115 fix 2: OFF = Standing Rule #31 (planner values exclude the captain). ON = sensitivity test only: the planner's per-week value adds the XI's top scorer once (Rule #54 reading). Not validated.
   # How many gameweeks ahead to look when checking whether a Wildcard/Free
   # Hit is coming up soon enough that banking a transfer for it beats

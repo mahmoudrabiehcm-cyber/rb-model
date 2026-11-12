@@ -6,7 +6,7 @@ captaincy and chip timing. It is built to help any team; it is not tuned to one 
 
 - Model document: FPL Maverick v6.13 (project PDF). The app follows its rules; departures are named in the app text
   and in `logs/LOG_APP.md`.
-- Current release: **Release 2, Patch 32** (badge "r2 patch 32"). Release 1 ended at Patch 117l. The full history is
+- Current release: **Release 2, Patch 33** (badge "r2 patch 33"). Release 1 ended at Patch 117l. The full history is
   the `PATCH_VERSION` string at the top of `app.py`.
 - How to host it: see `DEPLOY.md`.
 
