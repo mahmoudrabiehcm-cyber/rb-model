@@ -12,6 +12,7 @@ import datetime as dt
 import html
 import os
 import re
+import urllib.parse
 import sys
 import time
 
@@ -43,7 +44,7 @@ _RT = {}
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R2 Patch 33 (2026-11-12, manager go, model rulings M128 and M129): the transfer net-gain baseline no longer zeroes a non-nailed player you sell. Before (Patch 36), a rotation or bench-risk OUT candidate (xM below 0.80) was valued at nothing, so a 0.79 player counted like a 0.30 one and the planner sold rotation players too easily (the Calafiori case). Now the outgoing player enters the baseline with his own projection in full at every xM level, because the incoming player's xPts already contain xM; the model chat's proxy backtest found the zeroing under-predicted a 0.65-0.80 player by 2.6 points on average, full xPts +0.35. The old zeroed figure is shown only as a labelled worst case in the plan text and never drives the decision. The 0.50 bench-risk cut has no baseline effect now (labels and the no-hit rule are unchanged). Config transfer.baseline_zero_non_nailed true restores Patch 36. The Patch 32 xm_ramp option is removed (rejected by M128). Expect fewer sales of rotation-tier players; not replayed on your real squad. NOT validated in a browser. Previous: R2 Patch 32 (2026-11-12, manager go, three items). (1) Patch 36 baseline switch (model M127 open question): new config transfer.baseline_nailed_mode. \"zero\" (DEFAULT, unchanged) sets a non-nailed OUT candidate's projection to 0 in the net-gain baseline, so a player at xM 0.79 is valued like one at 0.30; \"xm_ramp\" keeps a share of his projection: 0 at xM 0.50, 1 at xM 0.80, linear between (a 0.632 player keeps 44%). The ramp is my design, estimate tier, not yet ruled on by the model chat; nothing changes until you set it. (2) M124 display only: the xM source text now names an injury exclusion that sits in the window (INJ_AUTO: injury-onset match excluded, M124; INJ: injury match excluded) with a note that the app window is 6 matches while M111 allows 7; when the exclusions leave fewer than 2 eligible matches the source text says so (current treatment). No xM number changes. (3) The 70% rule (M125) as a separate DISPLAY-ONLY badge beside the xM badge: starts (60+ minute proxy) in at least 70% of the last 5 to 10 matches and 80+ minutes in at least 70% of those starts, matches with a sheet exclusion skipped (config xm_rule70). It never sets xM, never changes the nailed label, Patch 36 or the no-hit rule. NOT validated in a browser, NOT run against the live feed. Previous: R2 Patch 31 (2026-11-08, manager go): SCENARIO PLAN FIX. (1) ONE joint solve for all required buys of the buy week: every Locked player you do not own and the named target are must-include in the same solve for 1 to 5 transfers, and the hit is charged once for the whole week. Before, the buys were evaluated one after another, each step choosing its own funding moves and its own hit, so the same three buys (Barry, Gabriel, Odegaard, 2 free transfers) gave 4, 5 or 6 transfers (-8 to -16) depending on their order. (2) A player can no longer be bought and sold in the same gameweek: the joint solve compares against the starting squad (a player is in or out, never both), and a safety merge turns any buy-then-sell chain into one move. (3) The buy-week line says it is one joint solve and states the package hit. Not changed: the cards still repeat the package net and hit on every row of a package (by design since Patch 3); photo placeholders (a missing photo shows initials or a question mark) are not touched. NOT timed in the live app, NOT validated in a browser. Previous: R2 Patch 30 (2026-11-05, manager go): (1) ONE planning window of 5 gameweeks for every transfer decision - the headline GW moves, the weekly chain, the draft, the scenario planner, the evaluate-a-target check and the buy-week list (before, the headline used the Horizon slider while the chain used 5, so the same GW10 move changed with the slider: Isak at 3 weeks, Thomas to Van Hecke plus Joao Pedro to N.Jackson at 1-2). The Horizon slider is removed; the tables and ratings keep their 1-GW display window. (2) The tie band is anchored on the best ELIGIBLE candidate (Roll, free moves, hit packages that pass the M10 gate), not the best raw net: a failing 5-move hit package (+23.6) used to push every free move outside the band and leave nothing viable. (3) The M119 availability exemption always reads three fixed gameweeks (week to week+2), not the first three of the window. (4) Advanced shows the run time of the last run (main plan, chip chain, total). The old suggest_transfers single-decision path is kept, now used only by the Force stance; the headline is the chain by construction. NOT timed in the live app, NOT validated in a browser. Previous: R2 Patch 29 (2026-11-04, manager go): the scenario plan now covers at least 3 gameweeks from the planning gameweek even at the default Horizon 1 (it used to stop after the buy week, so no later transfers were shown), and the planning window is part of the scenario cache key (raising the Horizon slider after a scenario was calculated kept the old one-week plan). Window = the Horizon slider weeks or 3, whichever is longer, as far as the pool has projections; the slider cap of 3 under Hit if worth it is unchanged. NOT validated in a browser. Previous: R2 Patch 28 (2026-11-02, model rulings M113, M118-M121, manager-approved combined build): (1) LOCK BUG: the scenario cache key now includes the Locked list, Excluded list, style, hit stance, Bench Boost week and disrupted list, so locking an owned player (João Pedro) recomputes the plan; before, a lock added after the first run was ignored until squad, bank or free transfers changed. (2) M118: a single free-transfer decision uses the 2-point floor as its tie band, not 2% of the whole squad horizon total (about 4-5 points) - a +4 swap is no longer a tie with Roll; the floor is also the banked-transfer value (about 2, M32(8)), so it is not subtracted twice (my reading). (3) M119: at the 5-transfer cap any non-negative free gain beats Roll; a move whose outgoing players total under 1.0 match of availability over three gameweeks goes ahead on a positive gain; the xPts forgone by rolling a move are added up and once they pass 2.0 the tie no longer protects further waiting (the Rule #42 one-gameweek extension is NOT built). (4) Roll text names the best move and why it lost instead of always saying no move clears the bar. (5) M113/M120: a regular back from a ban whose first match was a substitute gets xM x0.855 at match 2 and x0.83 at match 3; a weak match 2 gives x0.72 at match 3 (lowest factor, no stacking); from match 4 xM = M52 on the three matches since the return; the pre-ban share looks up to 12 gameweeks back; match 4 uses the match-3 factor (my reading); substitute = 1-59 minutes (proxy). (6) M121: new optional sheet column xm_out_until_gw = first gameweek available: xM 0 before, then 0.58 / 0.64 / 0.64 / 0.61, then his own M52; a dated starter statement lifts the return match to the cap. NOT validated in a browser or against the live FPL feed. Previous: R2 Patch 27 (2026-11-02, model ruling M117, manager-approved build): a sheet xm_override no longer hides an official flag. The override applies only when the status is a with chance 100 or blank; otherwise it is set aside and the player goes through the normal flag path (the M95/M96 table for regulars, M102 for an undated injury, the chance factor otherwise). Exception: a dated statement newer than the flag, which needs BOTH xm_override_date and xm_override_basis in the sheet and a date later than the flag's news date (a same-day statement does not count, my conservative reading; the sheet columns do not exist yet, so today every flagged override is set aside). The set-aside value is shown in the xM source text and in a sidebar list, and the player stays marked as unconfirmed xM. config xm_override_flag_rule.enabled false restores the old behaviour. NOT validated in a browser. "
+PATCH_VERSION = ("R3 Patch 1 (2026-11-12, theme only, Midnight Collector): new dark palette, release and model badge on the entry page and sidebar; no logic change from R2 Patch 33. NOT validated in a browser by the manager yet. Previous: R2 Patch 33 (2026-11-12, manager go, model rulings M128 and M129): the transfer net-gain baseline no longer zeroes a non-nailed player you sell. Before (Patch 36), a rotation or bench-risk OUT candidate (xM below 0.80) was valued at nothing, so a 0.79 player counted like a 0.30 one and the planner sold rotation players too easily (the Calafiori case). Now the outgoing player enters the baseline with his own projection in full at every xM level, because the incoming player's xPts already contain xM; the model chat's proxy backtest found the zeroing under-predicted a 0.65-0.80 player by 2.6 points on average, full xPts +0.35. The old zeroed figure is shown only as a labelled worst case in the plan text and never drives the decision. The 0.50 bench-risk cut has no baseline effect now (labels and the no-hit rule are unchanged). Config transfer.baseline_zero_non_nailed true restores Patch 36. The Patch 32 xm_ramp option is removed (rejected by M128). Expect fewer sales of rotation-tier players; not replayed on your real squad. NOT validated in a browser. Previous: R2 Patch 32 (2026-11-12, manager go, three items). (1) Patch 36 baseline switch (model M127 open question): new config transfer.baseline_nailed_mode. \"zero\" (DEFAULT, unchanged) sets a non-nailed OUT candidate's projection to 0 in the net-gain baseline, so a player at xM 0.79 is valued like one at 0.30; \"xm_ramp\" keeps a share of his projection: 0 at xM 0.50, 1 at xM 0.80, linear between (a 0.632 player keeps 44%). The ramp is my design, estimate tier, not yet ruled on by the model chat; nothing changes until you set it. (2) M124 display only: the xM source text now names an injury exclusion that sits in the window (INJ_AUTO: injury-onset match excluded, M124; INJ: injury match excluded) with a note that the app window is 6 matches while M111 allows 7; when the exclusions leave fewer than 2 eligible matches the source text says so (current treatment). No xM number changes. (3) The 70% rule (M125) as a separate DISPLAY-ONLY badge beside the xM badge: starts (60+ minute proxy) in at least 70% of the last 5 to 10 matches and 80+ minutes in at least 70% of those starts, matches with a sheet exclusion skipped (config xm_rule70). It never sets xM, never changes the nailed label, Patch 36 or the no-hit rule. NOT validated in a browser, NOT run against the live feed. Previous: R2 Patch 31 (2026-11-08, manager go): SCENARIO PLAN FIX. (1) ONE joint solve for all required buys of the buy week: every Locked player you do not own and the named target are must-include in the same solve for 1 to 5 transfers, and the hit is charged once for the whole week. Before, the buys were evaluated one after another, each step choosing its own funding moves and its own hit, so the same three buys (Barry, Gabriel, Odegaard, 2 free transfers) gave 4, 5 or 6 transfers (-8 to -16) depending on their order. (2) A player can no longer be bought and sold in the same gameweek: the joint solve compares against the starting squad (a player is in or out, never both), and a safety merge turns any buy-then-sell chain into one move. (3) The buy-week line says it is one joint solve and states the package hit. Not changed: the cards still repeat the package net and hit on every row of a package (by design since Patch 3); photo placeholders (a missing photo shows initials or a question mark) are not touched. NOT timed in the live app, NOT validated in a browser. Previous: R2 Patch 30 (2026-11-05, manager go): (1) ONE planning window of 5 gameweeks for every transfer decision - the headline GW moves, the weekly chain, the draft, the scenario planner, the evaluate-a-target check and the buy-week list (before, the headline used the Horizon slider while the chain used 5, so the same GW10 move changed with the slider: Isak at 3 weeks, Thomas to Van Hecke plus Joao Pedro to N.Jackson at 1-2). The Horizon slider is removed; the tables and ratings keep their 1-GW display window. (2) The tie band is anchored on the best ELIGIBLE candidate (Roll, free moves, hit packages that pass the M10 gate), not the best raw net: a failing 5-move hit package (+23.6) used to push every free move outside the band and leave nothing viable. (3) The M119 availability exemption always reads three fixed gameweeks (week to week+2), not the first three of the window. (4) Advanced shows the run time of the last run (main plan, chip chain, total). The old suggest_transfers single-decision path is kept, now used only by the Force stance; the headline is the chain by construction. NOT timed in the live app, NOT validated in a browser. Previous: R2 Patch 29 (2026-11-04, manager go): the scenario plan now covers at least 3 gameweeks from the planning gameweek even at the default Horizon 1 (it used to stop after the buy week, so no later transfers were shown), and the planning window is part of the scenario cache key (raising the Horizon slider after a scenario was calculated kept the old one-week plan). Window = the Horizon slider weeks or 3, whichever is longer, as far as the pool has projections; the slider cap of 3 under Hit if worth it is unchanged. NOT validated in a browser. Previous: R2 Patch 28 (2026-11-02, model rulings M113, M118-M121, manager-approved combined build): (1) LOCK BUG: the scenario cache key now includes the Locked list, Excluded list, style, hit stance, Bench Boost week and disrupted list, so locking an owned player (João Pedro) recomputes the plan; before, a lock added after the first run was ignored until squad, bank or free transfers changed. (2) M118: a single free-transfer decision uses the 2-point floor as its tie band, not 2% of the whole squad horizon total (about 4-5 points) - a +4 swap is no longer a tie with Roll; the floor is also the banked-transfer value (about 2, M32(8)), so it is not subtracted twice (my reading). (3) M119: at the 5-transfer cap any non-negative free gain beats Roll; a move whose outgoing players total under 1.0 match of availability over three gameweeks goes ahead on a positive gain; the xPts forgone by rolling a move are added up and once they pass 2.0 the tie no longer protects further waiting (the Rule #42 one-gameweek extension is NOT built). (4) Roll text names the best move and why it lost instead of always saying no move clears the bar. (5) M113/M120: a regular back from a ban whose first match was a substitute gets xM x0.855 at match 2 and x0.83 at match 3; a weak match 2 gives x0.72 at match 3 (lowest factor, no stacking); from match 4 xM = M52 on the three matches since the return; the pre-ban share looks up to 12 gameweeks back; match 4 uses the match-3 factor (my reading); substitute = 1-59 minutes (proxy). (6) M121: new optional sheet column xm_out_until_gw = first gameweek available: xM 0 before, then 0.58 / 0.64 / 0.64 / 0.61, then his own M52; a dated starter statement lifts the return match to the cap. NOT validated in a browser or against the live FPL feed. Previous: R2 Patch 27 (2026-11-02, model ruling M117, manager-approved build): a sheet xm_override no longer hides an official flag. The override applies only when the status is a with chance 100 or blank; otherwise it is set aside and the player goes through the normal flag path (the M95/M96 table for regulars, M102 for an undated injury, the chance factor otherwise). Exception: a dated statement newer than the flag, which needs BOTH xm_override_date and xm_override_basis in the sheet and a date later than the flag's news date (a same-day statement does not count, my conservative reading; the sheet columns do not exist yet, so today every flagged override is set aside). The set-aside value is shown in the xM source text and in a sidebar list, and the player stays marked as unconfirmed xM. config xm_override_flag_rule.enabled false restores the old behaviour. NOT validated in a browser. "
                   "R2 Patch 26 (2026-10-29, manager request): Proposed team (draft) in the pitch's Squad toggle. It shows the squad after the plan's transfers, gameweek by gameweek (from the Chip Plan path), with chips as badges only (no Free Hit swap, no Triple Captain armband move, no Bench Boost bench), a Draft badge, and the same moves in the panel that the pitch applies. Current squad stays your real 15; for later gameweeks its panel says the planned moves are in Proposed team (it no longer lists moves the pitch does not show). The My lineup scenario box works in Proposed team too. The older After recommended transfers option is shown only when there is no chip-plan path. The Chip Plan view is unchanged (full chip effect). NOT validated in a browser. "
                   "R2 Patch 25 (2026-10-29, manager request): one way to name a target and one place for the scenario inputs. A Locked player you do not own is the target: it is a required buy, evaluated automatically with the weekly plan after it (Transfers, Your scenarios); the separate Target player picker is removed. The candidate Wildcard gameweek, the candidate Free Hit gameweek and the Evaluate scenario button are now in the sidebar under the Locked / Excluded players; the results (Wildcard, Free Hit, required buys, buy week selector) stay in the Transfers tab under Your scenarios. Evaluate is still a button (each evaluation is a fresh solve), not a recompute on every change. NOT validated in a browser. "
                   "R2 Patch 24 (2026-10-28, manager request): lineup scenario on the pitch. In the Current squad view the pitch shows the model's best XI as before; under the pitch, My lineup (scenario) lets you swap a starter for a bench player (legal formations only: one keeper, 3-5 defenders, 2-5 midfielders, 1-3 forwards). The GW points tile recalculates for your XI and shows the difference against the model XI; the armband moves to the best starter if your captain is swapped out; Reset to model XI clears it. Scenario only: the transfer plan, chip plan and Rating % still read the model XI; the bench order is not editable (bench weight is about 8%); the choice lives in the session (a refresh or a transfer that removes a starter drops it). NOT validated in a browser. "
@@ -631,10 +632,10 @@ st.set_page_config(page_title="RB Model", page_icon="⚽", layout="wide")
 # color as the rest of the app's coral -- a genuine, if minor, "everything
 # aligned" fix the manager asked for.
 _CREST_SVG = ('<svg viewBox="0 0 100 100" width="28" height="28" style="flex:none;">'
-              '<rect x="4" y="4" width="92" height="92" rx="24" fill="#152016" stroke="#233524" stroke-width="3"/>'
+              '<rect x="4" y="4" width="92" height="92" rx="24" fill="#1B2340" stroke="#E9C46A" stroke-width="3"/>'
               '<text x="42" y="70" font-family="\'Space Grotesk\',sans-serif" font-weight="700" '
-              'font-size="58" fill="#3FCB7C" text-anchor="middle">R</text>'
-              '<circle cx="76" cy="76" r="10" fill="#E14E54"/></svg>')
+              'font-size="58" fill="#E9C46A" text-anchor="middle">R</text>'
+              '<circle cx="76" cy="76" r="10" fill="#2BD48A"/></svg>')
 
 # ---------------------------------------------------------------------------
 # Style — a considered, precise identity (terse micro-copy, restraint, one
@@ -687,19 +688,18 @@ st.markdown("""
    same short list Release 2.1's own changelog entry already flagged as the
    thing a :root-only retint always misses. */
 :root{
-  --bg:#F6F9F1; --surface:#FFFFFF; --surface-2:#EDF3E6;
-  --ink:#17241A; --ink-muted:#4B5C43; --ink-faint:#86937D;
-  --rule:#DEE8D2; --accent:#2E9E5B; --accent-strong:#157A3E; --accent-tint:#E1F5E7;
-  --gold:#C98A26; --gold-tint:#FBEFDC;
-  --blue:#2E6E93; --blue-tint:#E1EDF3;
-  --coral:#E14E54; --coral-tint:#FBE6E6;
-  --warn:#E14E54; --bench:#F1F3ED;
-  --fdr-easy:#2E8B57; --fdr-mid:#C98A26; --fdr-hard:#E14E54;
-  --shadow:0 1px 2px rgba(23,36,26,.06), 0 8px 22px -12px rgba(23,36,26,.16);
-  /* Release 2 — position-tag-only neutral accent (FWD label), kept
-     separate from --coral now that coral is reserved for captaincy +
-     alerts and shouldn't double as a fourth position color. */
-  --violet:#7A6BC2;
+  /* Release 3 Patch 1 "Midnight Collector" (design lock: logs/DESIGN_R3.md): deep navy canvas, gold brand, green = positive. */
+  --bg:#1E2A4F; --surface:#2E3B6B; --surface-2:#394880;
+  --ink:#F4EEDD; --ink-muted:#CDD3EA; --ink-faint:#A9B2D6;
+  --rule:#4A5A94; --accent:#2BD48A; --accent-strong:#7EE0A8; --accent-tint:#1E4D45;
+  --brand:#E9C46A; --brand-tint:#3a3320;
+  --gold:#E9C46A; --gold-tint:#3a3320;
+  --blue:#6AD6FF; --blue-tint:#13314a;
+  --coral:#FF5C5C; --coral-tint:#3d1a22;
+  --warn:#FF5C5C; --bench:#26335F;
+  --fdr-easy:#2BD48A; --fdr-mid:#E9C46A; --fdr-hard:#FF5C5C;
+  --shadow:0 1px 2px rgba(0,0,0,.35), 0 10px 24px -12px rgba(0,0,0,.6);
+  --violet:#B7A8FF;
 }
 html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--ink); }
 .mono{ font-family:"IBM Plex Mono",monospace; }
@@ -727,6 +727,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .brand-row{ display:flex; align-items:center; gap:8px; }
 .brand-mark{ font-family:"Space Grotesk"; font-weight:700; font-size:2rem; line-height:1; margin-bottom:2px; }
 .brand-mark .b2{ color:var(--accent); }
+.rel-badge{ display:inline-block; font-family:"IBM Plex Mono"; font-size:10.5px; color:var(--gold); background:var(--brand-tint); border:1px solid var(--gold); border-radius:999px; padding:3px 10px; letter-spacing:.04em; }
 .brand-tag{ font-family:"IBM Plex Mono"; font-size:10.5px; color:var(--ink-faint); letter-spacing:.06em; text-transform:uppercase; }
 
 .verdict-card{
@@ -785,19 +786,19 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
    uses percentages/insets relative to .pitch's own box, so it stays
    correctly proportioned at the smaller width without any change there. */
 .pitch{ position:relative; z-index:0; overflow:hidden; max-width:760px; margin:0 auto;
-  background:repeating-linear-gradient(180deg, #E4F0DE 0px, #E4F0DE 44px, #D8E8D1 44px, #D8E8D1 88px);
+  background:repeating-linear-gradient(180deg, #2F7D4F 0px, #2F7D4F 44px, #388A58 44px, #388A58 88px);
   border:1px solid var(--rule); border-radius:10px; padding:20px 14px 6px; }
 .pitch::before{ content:""; position:absolute; inset:14px; pointer-events:none; z-index:-1;
-  border:1.5px solid rgba(255,255,255,.85); border-radius:4px;
+  border:1.5px solid rgba(244,238,221,.6); border-radius:4px;
   background:
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) center / 100% 1.5px no-repeat,
-    radial-gradient(circle at center, transparent 34px, transparent 35.5px, rgba(255,255,255,.85) 35.5px, rgba(255,255,255,.85) 37px, transparent 37px) center / 96px 96px no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top / 46% 1.5px no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top 0 left 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) top 0 right 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom / 46% 1.5px no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 left 27% / 1.5px 15% no-repeat,
-    linear-gradient(rgba(255,255,255,.85), rgba(255,255,255,.85)) bottom 0 right 27% / 1.5px 15% no-repeat;
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) center / 100% 1.5px no-repeat,
+    radial-gradient(circle at center, transparent 34px, transparent 35.5px, rgba(244,238,221,.6) 35.5px, rgba(244,238,221,.6) 37px, transparent 37px) center / 96px 96px no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) top / 46% 1.5px no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) top 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) top 0 right 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) bottom / 46% 1.5px no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) bottom 0 left 27% / 1.5px 15% no-repeat,
+    linear-gradient(rgba(244,238,221,.6), rgba(244,238,221,.6)) bottom 0 right 27% / 1.5px 15% no-repeat;
 }
 .prow{ display:flex; justify-content:center; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
 
@@ -823,12 +824,12 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .photo-ring img{ width:100%; height:100%; border-radius:50%; object-fit:cover; object-position:center 12%;
   display:block; border:2px solid var(--surface); }
 .photo-ring .avatar-fallback{ position:absolute; inset:2px; border-radius:50%;
-  /* #0F2417 (was #0B2C2E, a teal-black) -- Release 3 "Turf Green": the
+  /* #0F1424 (was #0B2C2E, a teal-black) -- Release 3 "Turf Green": the
      gradient's dark end is hardcoded (a CSS gradient stop can't read
      var(--ink) here without a second custom property per team color), so
      retinted by hand to a dark green-black matching the new --ink hue
      family instead of the old theme's teal-black. */
-  background:linear-gradient(160deg, var(--team,var(--accent)), #0F2417); color:#fff; font-family:"Space Grotesk";
+  background:linear-gradient(160deg, var(--team,var(--accent)), #0F1424); color:#fff; font-family:"Space Grotesk";
   font-weight:700; font-size:13px; align-items:center; justify-content:center; border:2px solid var(--surface); }
 .card .name{ font-weight:700; font-size:12.5px; margin-bottom:2px; }
 .card .meta{ font-family:"IBM Plex Mono"; font-size:8.5px; color:var(--ink-muted); margin-bottom:6px; }
@@ -917,7 +918,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .badge{ font-family:"IBM Plex Mono"; font-size:9px; font-weight:700; letter-spacing:.03em; text-transform:uppercase;
   padding:2px 7px; border-radius:20px; display:inline-block; white-space:nowrap; }
 .badge.play{ background:var(--accent-tint); color:var(--accent-strong); }
-.badge.active{ background:var(--gold-tint); color:#7A5A16; }
+.badge.active{ background:var(--gold-tint); color:var(--gold); }
 .badge.hold{ background:var(--surface-2); color:var(--ink-faint); }
 .badge.caution{ background:var(--coral-tint); color:var(--coral); }
 .badge.used{ background:var(--surface-2); color:var(--ink-faint); }
@@ -938,7 +939,7 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .flag-pill{ display:flex; align-items:flex-start; gap:6px; background:var(--surface-2); border:1px solid var(--rule);
   color:var(--ink-muted); font-family:"IBM Plex Mono"; font-size:11px; padding:6px 10px; border-radius:14px;
   cursor:help; white-space:normal; max-width:420px; line-height:1.5; text-align:left; }
-.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:#7A5A16; }
+.flag-pill.warn{ background:var(--gold-tint); border:1px solid var(--gold); color:var(--gold); }
 
 /* Latest News feed (Patch 67) — real injury/status news pulled straight from
    the official FPL API's own per-player `status`/`news`/`news_added`/
@@ -963,8 +964,8 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .news-item .status-badge{ font-family:"IBM Plex Mono"; font-size:9.5px; text-transform:uppercase; letter-spacing:.04em;
   padding:2px 7px; border-radius:8px; font-weight:700; }
 .news-item .status-badge.sev-injured{ background:var(--coral-tint); color:#7A1518; }
-.news-item .status-badge.sev-doubtful{ background:var(--gold-tint); color:#7A5A16; }
-.news-item .status-badge.sev-suspended{ background:#EEE9FA; color:#3E2E7A; }
+.news-item .status-badge.sev-doubtful{ background:var(--gold-tint); color:var(--gold); }
+.news-item .status-badge.sev-suspended{ background:#2a2450; color:#B7A8FF; }
 .news-item .status-badge.sev-unavailable{ background:var(--surface-2); color:var(--ink-faint); }
 .news-item .scope-tag{ font-family:"IBM Plex Mono"; font-size:9.5px; text-transform:uppercase; letter-spacing:.04em;
   padding:2px 7px; border-radius:8px; background:var(--accent-tint); color:var(--accent-strong); font-weight:700; }
@@ -1014,7 +1015,7 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   padding:1px 5px; border-radius:10px; margin-left:4px; white-space:nowrap; display:inline-block;
   vertical-align:middle; cursor:help; }
 .xm-badge.nailed{ background:var(--accent-tint); color:var(--accent-strong); }
-.xm-badge.rotation{ background:var(--gold-tint); color:#7A5A16; }
+.xm-badge.rotation{ background:var(--gold-tint); color:var(--gold); }
 .xm-badge.risk{ background:var(--coral-tint); color:var(--coral); }
 
 /* Patch 33 — post-transfer preview, promoted out of the "Why" expander to
@@ -1102,7 +1103,7 @@ details.signal-card[open] summary::after{ content:"▴ hide"; }
   align-items:center; justify-content:center; color:#fff; font-family:"Space Grotesk"; font-weight:700;
   font-size:12px; border:2px solid var(--surface); }
 .tx-player.out .ring .avatar-fallback{ background:linear-gradient(160deg, var(--ink-faint), #3A3A40); }
-.tx-player.in .ring .avatar-fallback{ background:linear-gradient(160deg, var(--accent), #0F2417); }
+.tx-player.in .ring .avatar-fallback{ background:linear-gradient(160deg, var(--accent), #0F1424); }
 .tx-player .pname{ font-family:"Space Grotesk"; font-weight:600; font-size:.78rem; color:var(--ink); white-space:nowrap;
   overflow:hidden; text-overflow:ellipsis; max-width:100%; }
 .tx-player .pmeta{ font-family:"IBM Plex Mono"; font-size:8px; color:var(--ink-faint); }
@@ -1240,7 +1241,26 @@ def _team_color(short_name: str) -> str:
     return palette.get(short_name, "#1F6D45")
 
 
+# R3 Patch 1: one generic cartoon avatar (single neutral skin tone, short uniform
+# haircut, kit in the app accent) replaces the official photos. No likeness of any
+# real player is drawn. Set PLAYER_IMAGES = "photos" to return to the official photos.
+PLAYER_IMAGES = "cartoon"
+_AVATAR_SVG = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'>"
+               "<rect width='100' height='100' fill='#232C4F'/>"
+               "<path d='M12 100 Q14 66 50 64 Q86 66 88 100Z' fill='#2BD48A'/>"
+               "<path d='M40 64 L50 76 L60 64Z' fill='#F4EEDD'/>"
+               "<rect x='43' y='52' width='14' height='14' rx='5' fill='#E0AE6B'/>"
+               "<ellipse cx='50' cy='38' rx='18' ry='21' fill='#F4C98B'/>"
+               "<path d='M32 36 Q32 14 50 14 Q68 14 68 36 Q62 24 50 24 Q38 24 32 36Z' fill='#4a4f55'/>"
+               "<circle cx='43' cy='41' r='2' fill='#2b2b2b'/><circle cx='57' cy='41' r='2' fill='#2b2b2b'/>"
+               "<path d='M44 50 Q50 54 56 50' stroke='#9a5b3a' stroke-width='2' fill='none' stroke-linecap='round'/>"
+               "</svg>")
+_AVATAR_URI = "data:image/svg+xml;utf8," + urllib.parse.quote(_AVATAR_SVG, safe="/:=' ")
+
+
 def _photo_url(code) -> str:
+    if PLAYER_IMAGES == "cartoon":
+        return _AVATAR_URI
     return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{int(code)}.png"
 
 
@@ -1334,8 +1354,8 @@ def build_season_rank_chart(rank_df: pd.DataFrame) -> alt.Chart:
     # can't see page CSS custom properties; this function's own docstring
     # already flagged these as "not new colors" pulled from :root, so they
     # must be updated by hand here whenever :root's theme changes).
-    ink, ink_muted, rule = "#17241A", "#4B5C43", "#DEE8D2"
-    accent_strong, accent_tint, surface = "#157A3E", "#E1F5E7", "#FFFFFF"
+    ink, ink_muted, rule = "#F4EEDD", "#B9C0DA", "#2E3862"
+    accent_strong, accent_tint, surface = "#2BD48A", "#1E4D45", "#1B2340"
 
     log_scale = alt.Scale(type="log", domain=[1, domain_max], reverse=True, nice=False)
 
@@ -2284,7 +2304,7 @@ if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
     st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div class="brand-tag">v5.0 engine · live · zero-cost</div>'
+                f'<div style="text-align:center;"><span class="rel-badge">Season Pack R3 · Edition 1 &nbsp;·&nbsp; Model v6.13</span></div>'
                 f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
@@ -2323,8 +2343,7 @@ entry_id = st.session_state.team_id
 with st.sidebar:
     st.markdown(f'<div class="brand-row">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div class="brand-tag" title="{html.escape(PATCH_VERSION)}">v5.0 engine · {PATCH_TAG.lower()} · '
-                f'live · zero-cost</div><br>',
+                f'<div class="rel-badge" title="{html.escape(PATCH_VERSION)}">Season Pack {html.escape(PATCH_TAG.replace(" Patch", " · Edition"))} &nbsp;·&nbsp; Model v6.13</div><br>',
                 unsafe_allow_html=True)
     st.markdown(f'<div class="side-note">TEAM ID</div>'
                 f'<div style="font-family:\'IBM Plex Mono\'; color:var(--accent-strong); '
@@ -4017,7 +4036,7 @@ def _tbl_h(n_rows):
 
 
 def _path_squad_at(gw):
-    """Patch 112: the squad the Chip Plan fields in `gw` (None when no chain path / outside its span)."""
+    """Patch 112: the squad the Power Cards fields in `gw` (None when no chain path / outside its span)."""
     try:
         codes = (_chain_path or {}).get("squads", {}).get(gw)
         if not codes:
@@ -4169,8 +4188,8 @@ except Exception as _e_cc:
     print(f"[R2P6] captain picker skipped: {type(_e_cc).__name__}: {_e_cc}", file=sys.stderr)
 
 tab_pitch, tab_news, tab_transfers, tab_captain, tab_chips, tab_style = st.tabs(
-    ["⚽ Pitch", "🗞️ Latest News", "🔄 Transfer Recommendations", "🎯 Captaincy Pick",
-     "🗺️ Chip Plan", "🧠 Manager Style Fit"])
+    ["⚽ Your Deck", "🗞️ News", "🔄 Trades", "👑 Crown",
+     "🎴 Power Cards", "🧠 Style Fit"])
 
 with tab_captain:
     # Release 2's captaincy spotlight card, extracted out of the Pitch
@@ -4184,7 +4203,7 @@ with tab_captain:
     _c_row, _c_alt, _c_cap, _c_xp = ((cap_plan["row"], cap_plan["alt"], cap_plan["caption"], cap_plan["xp"]) if cap_plan
                                       else (cap_pick_row, cap_alt_row, cap_caption, cap_xp if cap_pick_row is not None else None))
     if cap_plan:
-        _ni("🃏 Wildcard this GW — armband from WC squad", "🃏 Chip Plan: play the Wildcard this GW — the armband below is picked from the **Wildcard squad**. "
+        _ni("🃏 Wildcard this GW — armband from WC squad", "🃏 Power Cards: play the Wildcard this GW — the armband below is picked from the **Wildcard squad**. "
                 + (f"With your current squad it would be {cap_pick_row['web_name']} ({cap_xp:.1f} xPts)." if cap_pick_row is not None else ""))
     if _c_cap and _c_row is not None:
         _cap_alt_xp = _c_alt.get("xpts_this_gw") if _c_alt is not None else None
@@ -4269,7 +4288,7 @@ with tab_captain:
                                   "xPts": (f"{r['xpts']:.1f}" if r["kind"] != "triple_captain"
                                            else f"{r['xpts']:.1f} x3 = {r['total']:.1f}")} for r in _cap_rows])
             _df(_tbl, hide_index=True, width="stretch", height=_tbl_h(len(_tbl)))
-            _nc("Same plan as Chip Plan tab", "Same plan as the Chip Plan tab. The armband protocol runs for this GW only; later rows show each "
+            _nc("Same plan as Power Cards tab", "Same plan as the Power Cards tab. The armband protocol runs for this GW only; later rows show each "
                        "week's top scorer on the squad the plan fields (current squad = what you hold today).")
     except Exception:
         pass
@@ -4521,7 +4540,7 @@ with tab_news:
     # every currently-flagged player, newest news_added first — no diffing
     # against a prior run.
     # ---------------------------------------------------------------------------
-    st.markdown('<div class="section-h">🗞️ Latest News</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-h">🗞️ News</div>', unsafe_allow_html=True)
     _news_sev_map = {"i": ("sev-injured", "Injured"), "s": ("sev-suspended", "Suspended"),
                       "d": ("sev-doubtful", "Doubtful"), "u": ("sev-unavailable", "Unavailable"),
                       "n": ("sev-unavailable", "Not available")}
@@ -5576,7 +5595,7 @@ with tab_transfers:
                                ("freehit", fh_advisor, "Free Hit")):
             _av = (_adv or {}).get("verdict", "") if _adv else ""
             if _ck in _final_chip_gw and _av.startswith("play_gw") and int(_av.split("gw")[1]) != _final_chip_gw[_ck]:
-                _adv_diff.append(f"{_nm}: standalone scan GW{_av.split('gw')[1]}, Chip Plan GW{_final_chip_gw[_ck]}")
+                _adv_diff.append(f"{_nm}: standalone scan GW{_av.split('gw')[1]}, Power Cards GW{_final_chip_gw[_ck]}")
         _bb_play, _tc_play, _fh_play = ("bboost" in _final_chip_gw, "3xc" in _final_chip_gw, "freehit" in _final_chip_gw)
     _wc_active = bool(wc_flag)
     if _wc_active or _bb_play or _tc_play or _fh_play:
@@ -5584,9 +5603,9 @@ with tab_transfers:
                     unsafe_allow_html=True)
 
         if _chip_headline_text:
-            _nc("🔗 Same as Chip Plan + Pitch", "🔗 " + _chip_headline_text + " — same plan as the Chip Plan tab and the Pitch navigator.")
+            _nc("🔗 Same as Power Cards + Pitch", "🔗 " + _chip_headline_text + " — same plan as the Power Cards tab and the Pitch navigator.")
         if _adv_diff:
-            _nc("🔗 Weeks follow Chip Plan", "🔗 Chip weeks follow the Chip Plan (joint sequence). Standalone scans differ — " + " · ".join(_adv_diff))
+            _nc("🔗 Weeks follow Power Cards", "🔗 Chip weeks follow the Power Cards (joint sequence). Standalone scans differ — " + " · ".join(_adv_diff))
         if _wc_active:
             wc_rebuild_gw = detect_gw_list[0] if detect_gw_list else planning_gw
             _wc_col = f"xpts_gw{wc_rebuild_gw}"
@@ -5623,7 +5642,7 @@ with tab_transfers:
                 else:
                     if _rb_codes:
                         _cc = _wc_chain["cands"][_rb_t]
-                        _nc("Same squad as Chip Plan", f"Same squad the Chip Plan scored for a Wildcard at GW{_rb_t} (built for GW{_rb_t}–"
+                        _nc("Same squad as Power Cards", f"Same squad the Power Cards scored for a Wildcard at GW{_rb_t} (built for GW{_rb_t}–"
                                    f"GW{_rb_t + 7}, current data). Chain gain {_cc['gain_chain']:+.1f} xPts"
                                    + (f" + chips {_cc['gain_chips']:+.1f}" if (_cc.get("chips") and _cc.get("chips_inside")) else "")
                                    + f" = {_cc['gain']:+.1f}."
@@ -5800,7 +5819,7 @@ with tab_transfers:
                                   if (_bb_same and _cc.get("bb_wait")) else "")
                                + (recommend.m37_bb_act_text(recommend.m37_bb_act_for_chain(_cc, planning_gw, cfg=cfg)) + " "
                                   if _bb_same else "")
-                               + "Same weeks and squads as the Chip Plan.")
+                               + "Same weeks and squads as the Power Cards.")
                     _df(_bb_view.sort_values(["Role", "position", _bb_col], ascending=[False, True, False])[cols]
                                  .rename(columns=rn), hide_index=True, width="stretch",
                                  height=_tbl_h(len(_bb_view)))
@@ -5839,7 +5858,7 @@ with tab_transfers:
                                + (_edge_txt(_tcv, _cc.get("tc_best"), _cc.get("tc_gap"), "Triple Captain week",
                                             _cc.get("tc_conf") or "near-tie", _cc.get("tc_yield"),
                                             tie_set=_cc.get("tc_tie_set")) + " " if _tc_same else "")
-                               + _buy + "Same week and squad as the Chip Plan.")
+                               + _buy + "Same week and squad as the Power Cards.")
 
 # ---------------------------------------------------------------------------
 # Squad pitch + GW navigator (merged, manager report: "having 2 pitches like
@@ -6099,7 +6118,7 @@ def _render_scenario_results():
 
             def _mv_txt(w):
                 mv = (w or {}).get("moves") or []
-                return ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in mv) or "Roll"
+                return ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in mv) or "Hold the Hand"
             rows = []
             for w in path["weekly_plan"]:
                 g = int(w["gw"])
@@ -6230,9 +6249,9 @@ def _render_scenario_results():
 
 def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label=None, fh_base=None):
     """R2 Patch 5: the moves the pitch panel shows for the GW on screen -> (moves, free transfers banked after, note).
-    Scenario: its changes vs your current squad. Chip Plan path: that week's planned moves (this week = the recommended
+    Scenario: its changes vs your current squad. Power Cards path: that week's planned moves (this week = the recommended
     moves the path starts from). After recommended transfers: that week's moves of the transfer plan. Current squad:
-    this week = the recommended moves; later weeks = the Chip Plan path's planned moves for that week."""
+    this week = the recommended moves; later weeks = the Power Cards path's planned moves for that week."""
     try:
         if fh_base is not None and active_src is None:
             # R2 Patch 7 (M32): the Free Hit week shows the Free Hit squad; its "moves" are the changes vs the squad
@@ -6263,7 +6282,7 @@ def _moves_for_nav(nav_gw, nav_mode, nav_squad, nav_col, active_src, chain_label
             return recommend._pair_moves(squad_df_adv, nav_squad, nav_col), None, "scenario vs your squad"
         if chain_label is not None and nav_mode == chain_label:
             mv, f = _path_week(_chain_path)
-            return mv, f, "Chip Plan path"
+            return mv, f, "Power Cards path"
         if nav_mode == _PROPOSED_NAV:                                # R2 Patch 26: the draft shows the plan's moves it applies
             mv, f = _path_week(_chain_path)
             return mv, f, "proposed plan (draft)"
@@ -6296,7 +6315,7 @@ _PROPOSED_NAV = "Proposed team (draft)"
 
 @st.fragment
 def _render_pitch_navigator():
-    st.markdown(f'<div class="section-h">Squad · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-h">Your Deck · planning for GW{planning_gw}</div>', unsafe_allow_html=True)
     # Patch 83 (v6.9 §10 output-format addition: "Every run states the
     # attack-adjustment strength and the tier that fed it") -- one compact,
     # always-visible disclosure line per run. fixture_baselines/_fb_warn are
@@ -6630,8 +6649,8 @@ def _render_pitch_navigator():
     if (_wc_decision or {}).get("gw") == nav_gw:
         _chips_here.insert(0, "Wildcard")
     if _chips_here:
-        _nc(f"🎴 Chip Plan GW{nav_gw}: {' + '.join(_chips_here)}", "🎴 Chip Plan for GW" + str(nav_gw) + ": **" + " + ".join(_chips_here) + "**"
-                   + (" — badge only on this view; switch the Squad view to the Chip Plan path to see the chip applied."
+        _nc(f"🎴 Power Cards GW{nav_gw}: {' + '.join(_chips_here)}", "🎴 Power Cards for GW" + str(nav_gw) + ": **" + " + ".join(_chips_here) + "**"
+                   + (" — badge only on this view; switch the Squad view to the Power Cards path to see the chip applied."
                       if (_chain_label and nav_mode != _chain_label) else ""))
 
     if nav_mode == _PROPOSED_NAV:
@@ -6835,7 +6854,7 @@ def _render_pitch_navigator():
             _mvs = (_pw_by.get(_ug) or {}).get("moves") or []
             if not _mvs and _ug not in _chip_by_gw:
                 continue
-            _upc.append((_ug, ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in _mvs) or "Roll",
+            _upc.append((_ug, ", ".join(f"{m.get('out', '?')} → {m.get('in', '?')}" for m in _mvs) or "Hold the Hand",
                          _chip_by_gw.get(_ug)))
         _later_cur = bool(nav_mode == "Current squad" and int(nav_gw) != int(planning_gw) and _has_chain_squads)
         _panel = recommend.pitch_moves_panel_html(nav_gw, _nav_moves, ft=_nav_ft, chip=_chip_lab, chip_value=_chip_val,

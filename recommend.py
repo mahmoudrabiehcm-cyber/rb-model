@@ -1593,7 +1593,7 @@ def build_wc_extend_note(chip_driven: bool, reached_target: bool, check_gws_last
 
 
 def resolve_wildcard_check_gw_window(transfer_gw_list: list[int], detect_gw_list: list[int] | None) -> list[int]:
-    """Patch 102 (2026-10-01, manager report: Chip Plan tab showed "Wildcard
+    """Patch 102 (2026-10-01, manager report: Power Cards tab showed "Wildcard
     trigger ACTIVE (93.6%)" right next to "Wildcard may not be needed --
     plan reaches 96.6%" on a week Transfer Recommendations said "Roll" (no
     transfer made) -- looked contradictory. Traced in code: the 93.6%
@@ -1713,7 +1713,7 @@ def resolve_bb_play_gw(isolated_bb_play_gw: int | None, harmonized_bb_gw: int | 
     schedule (`chip_portfolio["assignment"]["bboost"]`) — the number Rule
     #49/#50's joint scheduler can, by design since Patch 96, place on a
     DIFFERENT week than the isolated advisor's own optimum, whenever doing
-    so raises the combined 4-chip total. Without this, the Chip Plan tab
+    so raises the combined 4-chip total. Without this, the Power Cards tab
     could show one Bench Boost week while the transfer planner silently
     valued bench strength for a different one.
 
@@ -1858,7 +1858,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             cap_use_bar: float | None = None,
                             value_tail: list | None = None,
                             tc_target: dict | None = None) -> dict:
-    """Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Chip Plan picked. When
+    """Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Power Cards picked. When
     given (and the week is inside the planned/valued weeks), the squad's top XI scorer in that week counts one extra time
     (the tripled captain's extra x1), and the target's horizon sum gets the same bonus so the planner can BUY him with a
     free transfer when that beats rolling. None (default) = unchanged behaviour. DEVIATION from Standing Rule #31 (same
@@ -3553,10 +3553,10 @@ def resolve_budget(bank: float, squad_market_price: float, selling_total, overri
 # R2 Patch 22 (manager, 27 Oct 2026): chip view name, pool-wide Locked players, scenario followed by the weekly planner.
 # --------------------------------------------------------------------------------------------------------------------
 def chip_path_label(strip_chips) -> str:
-    """Name of the pitch's chip view: the chips of the plan in gameweek order ("Chip Plan: BB GW9 · TC GW12"; the Wildcard is
-    listed like any chip), or "Chip Plan" when the plan has none. `strip_chips` = {gw: "BB" | "TC" | "FH" | "WC"}."""
+    """Name of the pitch's chip view: the chips of the plan in gameweek order ("Power Cards: BB GW9 · TC GW12"; the Wildcard is
+    listed like any chip), or "Power Cards" when the plan has none. `strip_chips` = {gw: "BB" | "TC" | "FH" | "WC"}."""
     items = sorted((int(g), str(c)) for g, c in (strip_chips or {}).items())
-    return ("Chip Plan: " + " · ".join(f"{c} GW{g}" for g, c in items)) if items else "Chip Plan"
+    return ("Power Cards: " + " · ".join(f"{c} GW{g}" for g, c in items)) if items else "Power Cards"
 
 
 def lock_options(squad_df, pool_df):
@@ -3916,7 +3916,7 @@ def apply_sell_prices(pool, sp):
 
 
 def reconcile_chip_schedule(chip_schedule, decision_gw, planning_gw, rebuild_by_gw):
-    """Patch 117d: the weekly transfer plan must follow the Chip Plan decision. Wildcard decided NOW -> the plain list is the
+    """Patch 117d: the weekly transfer plan must follow the Power Cards decision. Wildcard decided NOW -> the plain list is the
     no-Wildcard alternative (no wildcard line). Wildcard decided for a later week -> the plan rolls to that week and
     rebuilds there (`rebuild_by_gw[week]`); with no squad for that week, no wildcard line. No decision -> unchanged."""
     if chip_schedule is None or decision_gw is None:
@@ -3956,7 +3956,7 @@ def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg,
     return buf.getvalue()
 
 
-_CHIP_COL = {"ok": ("#1b6b3a", "#e3f3e8"), "warn": ("#8a5a00", "#fff1d6"), "bad": ("#9b1c1c", "#fde4e4"), "info": ("#33506b", "#e6eef5")}
+_CHIP_COL = {"ok": ("#2BD48A", "#12342B"), "warn": ("#E9C46A", "#3a3320"), "bad": ("#FF8A8A", "#3d1a22"), "info": ("#B9C0DA", "#394880")}  # R3 Patch 1: Midnight palette (fg, bg)
 
 
 def ui_chip(text, kind="info", sub=None, tip=None) -> str:
@@ -4047,7 +4047,7 @@ def chance_bar_html(pct) -> str:
     p = max(0.0, min(100.0, v))
     col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 50 else "#d64545")
     return (f'<span style="display:inline-flex;align-items:center;gap:5px;" title="Chance of playing next round">'
-            f'<span style="display:inline-block;width:46px;height:6px;background:#e8ecf0;border-radius:4px;">'
+            f'<span style="display:inline-block;width:46px;height:6px;background:#4A5A94;border-radius:4px;">'
             f'<span style="display:block;height:6px;width:{p:.0f}%;background:{col};border-radius:4px;"></span></span>'
             f'<span style="font-size:11px;color:{col};font-weight:600;">{p:.0f}%</span></span>')
 
@@ -4067,7 +4067,7 @@ def rating_bar_html(pct, label="") -> str:
     col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 75 else "#d64545")
     return (f'<div style="margin:2px 0 6px 0;max-width:320px;"><div style="font-size:11px;color:#556;">{html.escape(str(label))} '
             f'<b>{float(pct):.1f}%</b></div>'
-            f'<div style="background:#e8ecf0;border-radius:6px;height:8px;width:100%;">'
+            f'<div style="background:#4A5A94;border-radius:6px;height:8px;width:100%;">'
             f'<div style="background:{col};border-radius:6px;height:8px;width:{p:.0f}%;"></div></div></div>')
 
 
@@ -4079,19 +4079,19 @@ def budget_chip_text(budget, source, gap) -> str:
 
 
 def plan_conflict_chip(plan_wc_gw, decision_gw):
-    """Short flag when the weekly plan and the Chip Plan name different Wildcard weeks; None when they agree."""
+    """Short flag when the weekly plan and the Power Cards name different Wildcard weeks; None when they agree."""
     if plan_wc_gw is None or decision_gw is None or int(plan_wc_gw) == int(decision_gw):
         return None
-    return f"Plan WC GW{plan_wc_gw} vs Chip Plan GW{decision_gw}"
+    return f"Plan WC GW{plan_wc_gw} vs Power Cards GW{decision_gw}"
 
 
 def wildcard_week_conflict(plan_wc_gw, decision_gw):
     """Patch 117b: the weekly transfer plan is built before the Wildcard decision and uses the chip portfolio's
-    (scan-based) Wildcard week; the Chip Plan decision uses the chain (model ruling M8). When they differ, say so."""
+    (scan-based) Wildcard week; the Power Cards decision uses the chain (model ruling M8). When they differ, say so."""
     if plan_wc_gw is None or decision_gw is None or int(plan_wc_gw) == int(decision_gw):
         return None
     return (f"The weekly plan below was built with the Wildcard at GW{plan_wc_gw} (chip portfolio / scan), but the "
-            f"Chip Plan decision is GW{decision_gw} (chain comparison). Follow the Chip Plan: the plan's Wildcard line "
+            f"Power Cards decision is GW{decision_gw} (chain comparison). Follow the Power Cards: the plan's Wildcard line "
             f"is out of date, and its earlier weeks were valued against a horizon cut at GW{plan_wc_gw}.")
 
 
@@ -4764,7 +4764,7 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
                 badge = f'<span class="cs-chip" style="background:#3B6FD8">FH</span>'
         mv = ("".join(f'<div class="cs-mv"><span class="cs-out">{_h.escape(str(o))}</span>'
                       f'<span class="cs-in">{_h.escape(str(i))}</span></div>' for o, i in moves)
-              if moves else '<div class="cs-roll">Roll</div>')
+              if moves else '<div class="cs-roll">Hold the Hand</div>')
         dots = ("".join('<span class="cs-dot on"></span>' for _ in range(int(ft))) +
                 "".join('<span class="cs-dot"></span>' for _ in range(max(0, 5 - int(ft))))) if ft is not None else ""
         bar = ""
@@ -4783,7 +4783,7 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
            '.cs-in{color:#157A3E;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
            '.cs-roll{color:#8A958C;margin-bottom:3px}.cs-ft{margin:2px 0}'
            '.cs-dot{display:inline-block;width:6px;height:6px;border-radius:3px;background:#DEE8D2;margin-right:2px}'
-           '.cs-dot.on{background:#2E9E5B}.cs-bar{height:5px;background:#EDF3E6;border-radius:3px}'
+           '.cs-dot.on{background:#2E9E5B}.cs-bar{height:5px;background:#4A5A94;border-radius:3px}'
            '.cs-bar div{height:5px;background:#2E9E5B;border-radius:3px}.cs-pts{font-size:10px;color:#4A564D}</style>')
     return css + '<div class="cs-wrap">' + "".join(cols) + "</div>"
 
