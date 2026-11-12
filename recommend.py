@@ -3956,7 +3956,7 @@ def build_snapshot_zip(pool, owned_codes, locked_codes, bank, budget, meta, cfg,
     return buf.getvalue()
 
 
-_CHIP_COL = {"ok": ("#2BD48A", "#12342B"), "warn": ("#E9C46A", "#3a3320"), "bad": ("#FF8A8A", "#3d1a22"), "info": ("#B9C0DA", "#394880")}  # R3 Patch 1: Midnight palette (fg, bg)
+_CHIP_COL = {"ok": ("#5FD0A0", "#12342B"), "warn": ("#E0BE6A", "#3a3320"), "bad": ("#FF8A8A", "#3d1a22"), "info": ("#B9C0DA", "#2A3E34")}  # R3 Patch 1: Midnight palette (fg, bg)
 
 
 def ui_chip(text, kind="info", sub=None, tip=None) -> str:
@@ -4047,7 +4047,7 @@ def chance_bar_html(pct) -> str:
     p = max(0.0, min(100.0, v))
     col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 50 else "#d64545")
     return (f'<span style="display:inline-flex;align-items:center;gap:5px;" title="Chance of playing next round">'
-            f'<span style="display:inline-block;width:46px;height:6px;background:#4A5A94;border-radius:4px;">'
+            f'<span style="display:inline-block;width:46px;height:6px;background:#3A5247;border-radius:4px;">'
             f'<span style="display:block;height:6px;width:{p:.0f}%;background:{col};border-radius:4px;"></span></span>'
             f'<span style="font-size:11px;color:{col};font-weight:600;">{p:.0f}%</span></span>')
 
@@ -4067,7 +4067,7 @@ def rating_bar_html(pct, label="") -> str:
     col = "#2e9d57" if p >= 90 else ("#d9a400" if p >= 75 else "#d64545")
     return (f'<div style="margin:2px 0 6px 0;max-width:320px;"><div style="font-size:11px;color:#556;">{html.escape(str(label))} '
             f'<b>{float(pct):.1f}%</b></div>'
-            f'<div style="background:#4A5A94;border-radius:6px;height:8px;width:100%;">'
+            f'<div style="background:#3A5247;border-radius:6px;height:8px;width:100%;">'
             f'<div style="background:{col};border-radius:6px;height:8px;width:{p:.0f}%;"></div></div></div>')
 
 
@@ -4783,7 +4783,7 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
            '.cs-in{color:#157A3E;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
            '.cs-roll{color:#8A958C;margin-bottom:3px}.cs-ft{margin:2px 0}'
            '.cs-dot{display:inline-block;width:6px;height:6px;border-radius:3px;background:#DEE8D2;margin-right:2px}'
-           '.cs-dot.on{background:#2E9E5B}.cs-bar{height:5px;background:#4A5A94;border-radius:3px}'
+           '.cs-dot.on{background:#2E9E5B}.cs-bar{height:5px;background:#3A5247;border-radius:3px}'
            '.cs-bar div{height:5px;background:#2E9E5B;border-radius:3px}.cs-pts{font-size:10px;color:#4A564D}</style>')
     return css + '<div class="cs-wrap">' + "".join(cols) + "</div>"
 
