@@ -5868,3 +5868,139 @@ def suspended_override_lines(proj) -> list:
             r.get("web_name", "?"), r.get("team", "?"), float(r["xm_override_ignored"]),
             str(r.get("status", "?")), (" %d%%" % int(ch)) if pd.notna(ch) else "", float(r.get("xm", float("nan")))))
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# R3 Patch 4: Top Picks (read-only view of the model's own xPts) and the exclusion audit (diagnostics only)
+# ---------------------------------------------------------------------------------------------------------------------
+_TP_POS = (("GK", "Goalkeepers"), ("DEF", "Defenders"), ("MID", "Midfielders"), ("FWD", "Forwards"))
+
+
+def top_picks_table(proj, planning_gw, n_weeks=5, owned_codes=(), excluded_codes=(), per_pos=5) -> dict:
+    """R3 Patch 4: top `per_pos` players of each position by the SUM of the model's xPts over the next `n_weeks` gameweeks
+    starting at `planning_gw` (only weeks whose xpts_gw column exists; the note says so when fewer than n_weeks exist).
+    Nothing is hidden: owned, Excluded and flagged (status != 'a') players stay in the list with a marker. Ties break by name.
+    Pure read of the existing projection columns; it changes no model number and no decision."""
+    out = {"gws": [], "by_pos": {k: [] for k, _ in _TP_POS}, "note": "", "n_weeks": int(n_weeks)}
+    if proj is None or not hasattr(proj, "columns") or len(proj) == 0:
+        out["note"] = "No projections available."
+        return out
+    gws = [g for g in range(int(planning_gw), int(planning_gw) + int(n_weeks)) if f"xpts_gw{g}" in proj.columns]
+    if not gws:
+        out["note"] = "No xPts columns for the next gameweeks."
+        return out
+    out["gws"] = gws
+    if len(gws) < int(n_weeks):
+        out["note"] = f"Only {len(gws)} of {int(n_weeks)} gameweeks have projections; totals cover those {len(gws)}."
+    owned = set(int(c) for c in (owned_codes or []))
+    excl = set(int(c) for c in (excluded_codes or []))
+    df = proj.copy()
+    df["_tp_total"] = df[[f"xpts_gw{g}" for g in gws]].fillna(0.0).sum(axis=1)
+    for key, _lab in _TP_POS:
+        sub = df[df["position"] == key].copy()
+        sub["_tp_name"] = sub["web_name"].astype(str)
+        sub = sub.sort_values(["_tp_total", "_tp_name"], ascending=[False, True]).head(int(per_pos))
+        rows = []
+        for _, r in sub.iterrows():
+            code = int(r["code"])
+            own = r.get("selected_by_percent")
+            xm = r.get("xm")
+            rows.append({
+                "code": code, "name": str(r["web_name"]), "team": str(r.get("team", "")), "position": key,
+                "price": (None if pd.isna(r.get("price")) else float(r["price"])),
+                "xm": (None if xm is None or pd.isna(xm) else float(xm)),
+                "own_pct": (None if own is None or pd.isna(own) else float(own)),
+                "status": str(r.get("status", "a")),
+                "owned": code in owned, "excluded": code in excl,
+                "by_gw": {g: float(r[f"xpts_gw{g}"]) if pd.notna(r[f"xpts_gw{g}"]) else 0.0 for g in gws},
+                "total": float(r["_tp_total"]),
+            })
+        out["by_pos"][key] = rows
+    return out
+
+
+def top_picks_html(table) -> str:
+    """R3 Patch 4: four compact tables (GK, DEF, MID, FWD), one row per player: name, team, price, xM, ownership, one column
+    per gameweek, total. Markers: 'yours' (owned), 'excl' (Excluded), a status pill when the player is flagged."""
+    import html as _h
+    t = table or {}
+    gws = list(t.get("gws") or [])
+    parts = ['<style>.tp-wrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(460px,1fr));gap:14px}'
+             '.tp-box{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:10px 12px;box-shadow:var(--shadow)}'
+             '.tp-h{font-family:"Space Grotesk";font-weight:700;color:var(--gold);margin:0 0 6px}'
+             '.tp-t{width:100%;border-collapse:collapse;font-size:12.5px}'
+             '.tp-t th{font-family:"IBM Plex Mono";font-size:10px;color:var(--ink-faint);text-align:right;padding:3px 4px;font-weight:600}'
+             '.tp-t th:first-child,.tp-t td:first-child{text-align:left}'
+             '.tp-t td{padding:4px;text-align:right;border-top:1px solid var(--rule);color:var(--ink)}'
+             '.tp-t td.tot{font-weight:700;color:var(--accent-strong)}'
+             '.tp-m{font-size:10px;border-radius:8px;padding:1px 6px;margin-left:5px;font-weight:700}'
+             '.tp-m.own{background:var(--accent-tint);color:var(--accent-strong)}'
+             '.tp-m.ex{background:var(--coral-tint);color:var(--coral)}'
+             '.tp-m.fl{background:var(--gold-tint);color:var(--gold)}'
+             '.tp-sub{color:var(--ink-faint);font-size:10.5px}</style><div class="tp-wrap">']
+    for key, lab in _TP_POS:
+        rows = (t.get("by_pos") or {}).get(key) or []
+        head = "".join(f"<th>GW{g}</th>" for g in gws)
+        body = ""
+        for r in rows:
+            mk = ""
+            if r.get("owned"):
+                mk += '<span class="tp-m own">yours</span>'
+            if r.get("excluded"):
+                mk += '<span class="tp-m ex">excl</span>'
+            if str(r.get("status", "a")) != "a":
+                mk += f'<span class="tp-m fl">{_h.escape(str(r.get("status")))}</span>'
+            price = "" if r.get("price") is None else f"£{float(r['price']):.1f}m"
+            xm = "" if r.get("xm") is None else f"{float(r['xm']):.2f}"
+            own = "" if r.get("own_pct") is None else f"{float(r['own_pct']):.1f}%"
+            cells = "".join(f"<td>{float((r.get('by_gw') or {}).get(g, 0.0)):.1f}</td>" for g in gws)
+            body += (f'<tr><td>{_h.escape(str(r.get("name", "")))}<span class="tp-sub"> {_h.escape(str(r.get("team", "")))}</span>{mk}</td>'
+                     f'<td>{price}</td><td>{xm}</td><td>{own}</td>{cells}<td class="tot">{float(r.get("total", 0.0)):.1f}</td></tr>')
+        if not body:
+            body = '<tr><td colspan="99">No data.</td></tr>'
+        parts.append(f'<div class="tp-box"><div class="tp-h">{lab}</div><table class="tp-t"><tr><th>Player</th><th>Price</th><th>xM</th>'
+                     f'<th>Own</th>{head}<th>Total</th></tr>{body}</table></div>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def exclusion_audit(ui_excluded_codes, pool_df, rec, chain_path=None, scenario_path=None) -> dict:
+    """R3 Patch 4 (diagnostics only, changes no decision): compares the players the Excluded list holds against (a) what the
+    planner's pool frame carries (`exclude_codes_of(pool_df)`) and (b) every buy in the plans on screen (weekly plan, the
+    Power Cards path, the scenario plan). A buy of an Excluded player is a violation and is listed with its source and GW."""
+    ui = sorted(int(c) for c in (ui_excluded_codes or []))
+    try:
+        planner = exclude_codes_of(pool_df) if pool_df is not None else []
+    except Exception:
+        planner = []
+    missing = [c for c in ui if c not in set(planner)]
+    plans = []
+    r = rec if isinstance(rec, dict) else {}
+    for w in (r.get("weekly_plan") or []):
+        plans.append(("weekly plan", w.get("gw"), w.get("moves") or []))
+    if not (r.get("weekly_plan") or []):
+        plans.append(("weekly plan", None, r.get("moves") or []))
+    for w in ((chain_path or {}).get("plan") or []) if isinstance(chain_path, dict) else []:
+        plans.append(("Power Cards path", w.get("gw"), w.get("moves") or []))
+    for w in ((scenario_path or {}).get("plan") or []) if isinstance(scenario_path, dict) else []:
+        plans.append(("scenario plan", w.get("gw"), w.get("moves") or []))
+    viol = []
+    for src, gw, mvs in plans:
+        for m in mvs or []:
+            try:
+                ic = m.get("in_code")
+                if ic is not None and int(ic) in set(ui):
+                    viol.append({"source": src, "gw": gw, "out": m.get("out"), "in": m.get("in"), "in_code": int(ic)})
+            except Exception:
+                continue
+    ok = not viol and not missing
+    lines = [f"Your Excluded list: {len(ui)} player(s). Planner received {len(planner)} blocked code(s) (your list plus the flagged-buy rule)."]
+    if missing:
+        lines.append("LOST BEFORE THE PLANNER: " + ", ".join(str(c) for c in missing) + " is in the Excluded list but not in the pool frame.")
+    for v in viol:
+        gwtxt = f"GW{v['gw']}" if v.get("gw") is not None else "this week"
+        lines.append(f"EXCLUDED BUY IN PLAN: {v['source']}, {gwtxt}: {v.get('out')} -> {v.get('in')} (code {v['in_code']}).")
+    if ok:
+        lines.append("No Excluded player is bought in the weekly plan, the Power Cards path or the scenario plan.")
+    return {"ok": ok, "ui_codes": ui, "planner_codes": list(planner), "missing_in_planner": missing, "violations": viol,
+            "text": "\n".join(lines)}
