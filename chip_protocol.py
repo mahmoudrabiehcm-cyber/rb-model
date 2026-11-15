@@ -162,7 +162,7 @@ def dgw_bgw_flags(fixture_counts: dict, all_team_ids: list[int]) -> dict:
 
 
 def chip_advisor_gw_window(planning_gw: int, fixtures: pd.DataFrame, all_team_ids: list[int],
-                            cfg: dict, min_gws: int | None = None) -> dict:
+                            cfg: dict, min_gws: int | None = None, expiry_gw: int | None = None) -> dict:
     """Patch 32 (2026-09-14 manager report). The Bench Boost/Triple Captain/
     Free Hit "which GW" verdicts (evaluate_bench_boost/evaluate_triple_captain/
     evaluate_free_hit below) need their OWN independent scan window — reusing
@@ -209,6 +209,11 @@ def chip_advisor_gw_window(planning_gw: int, fixtures: pd.DataFrame, all_team_id
 
     extended = nearest_event_gw is not None
     extend_to = nearest_event_gw if extended else base_end
+    # R3 Patch 7: the scan always reaches the last week of the soonest-closing chip window (capped at max_extend_gws), so the
+    # expiry rule (M32(5)) can see its weeks in a normal run.
+    if expiry_gw is not None and int(expiry_gw) > planning_gw:
+        extend_to = max(extend_to, min(int(expiry_gw), max_end))
+        extended = extended or extend_to > base_end
     gw_list = list(range(planning_gw, extend_to + 1))
     return {"gw_list": gw_list, "default_end": base_end,
             "extended_to": extend_to if extended else None,

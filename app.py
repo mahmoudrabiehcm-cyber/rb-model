@@ -44,7 +44,8 @@ _RT = {}
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R3 Patch 6 (2026-11-15, manager go, model rulings M124 / M111 / M130-M132): the app now derives, by itself and for any "
+PATCH_VERSION = ("R3 Patch 7 (2026-11-15, manager report with rb_snapshot_gw11_4: no Free Hit week and no indication): the existing chip rules (M32(1), M32(5), M29(2), M32(3)) now apply the same way for any chip and any squad. (1) The chip scan always reaches the last week of the soonest-closing open chip window, so the expiry rule sees its weeks in a normal run (was GW15 at GW11). (2) The Free Hit gain scales BOTH sides by the squad's own decay (the one-sided factor read exactly 0.0 for every week after the first; M32(7)). (3) The Free Hit HOLD line names the best expiry-window week, its raw and after-forfeit figure and whether it clears the 2.0 floor. (4) The transfer planner is told the same Free Hit week the final plan has: the early estimate uses the card's own bar and expiry rule, and the planner is solved once more if the final week differs (it used to receive the raw scheduler week, a phantom GW14/GW15). Not validated: run time of the wider scan on a live account; the squad's own decay stands in for the rebuild squad's; one match per gameweek. "
+                 "R3 Patch 6 (2026-11-15, manager go, model rulings M124 / M111 / M130-M132): the app now derives, by itself and for any "
                  "player, (1) the injury-onset exclusion (INJ_AUTO) with the M111 flagged-before matches, and (2) the return after two "
                  "missed matches (M131: 0.42 / 0.56 first match back, then 0.59 / 0.65 / 0.60, then his own M52, unconfirmed under M54), "
                  "from the official per-gameweek flag history (olbauday playerstats.csv, one parallel fetch, cached 15 minutes). Sheet "
@@ -2321,7 +2322,7 @@ if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
     st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 6 · Model v6.13</span></div>'
+                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 7 · Model v6.13</span></div>'
                 f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
@@ -2611,11 +2612,25 @@ with st.spinner("Fetching live data and computing xPts..."):
     if _wc_available_now or _fh_available_now:
         detect_gw_list = _detect_candidate_gws
 
+    # R3 Patch 7: last week of the soonest-closing OPEN window among the chips still available (any chip, any half): the chip scan
+    # always reaches it, so the expiry rule (M32(5)) sees its weeks. The Free Hit's own expiry window is its last four weeks.
+    _open_stops = [int(r["window"][1]) for r in chip_rows
+                   if r["status"] == "available" and r["chip"].startswith(("Bench Boost", "Triple Captain", "Free Hit"))
+                   and r["window"][0] is not None and r["window"][1] is not None
+                   and int(r["window"][0]) <= int(planning_gw) <= int(r["window"][1])]
+    _expiry_gw = min(_open_stops) if _open_stops else None
+    _fh_open = [(int(r["window"][0]), int(r["window"][1])) for r in chip_rows
+                if r["status"] == "available" and r["chip"].startswith("Free Hit")
+                and r["window"][0] is not None and r["window"][1] is not None
+                and int(r["window"][0]) <= int(planning_gw) <= int(r["window"][1])]
+    _fh_expiry = ((max(_fh_open[0][0], _fh_open[0][1] - 3), _fh_open[0][1]) if _fh_open else None)
+
     chip_adv_window = None
     chip_adv_gw_list = None
     if any(c.startswith(("Bench Boost", "Triple Captain", "Free Hit")) for c in available_chip_names):
         chip_adv_window = chip_protocol.chip_advisor_gw_window(
-            planning_gw, snap.fixtures, all_team_ids, cfg, min_gws=_chip_span if _extended_mode else None)
+            planning_gw, snap.fixtures, all_team_ids, cfg, min_gws=_chip_span if _extended_mode else None,
+            expiry_gw=_expiry_gw)
         chip_adv_gw_list = chip_adv_window["gw_list"]
 
     # Patch 44 (2026-09-15, manager report: Damsgaard-vs-Tavernier tie-break
@@ -3474,7 +3489,22 @@ with st.spinner("Fetching live data and computing xPts..."):
         _wc_rebuild = (wc_window_scan.get("by_gw", {}) or {}).get(_wc_gw, {}).get("rebuild_squad")
         if _wc_rebuild is not None and not _wc_rebuild.empty:
             _chip_schedule = {"wildcard_gw": _wc_gw, "wildcard_rebuild_squad": _wc_rebuild}
-    _harmonized_fh_gw = (chip_portfolio or {}).get("assignment", {}).get("freehit")
+    # R3 Patch 7 (M32): the planner may assume a Free Hit week only if that week passes the SAME bar, temporary-gap test and expiry
+    # rule as the card. The raw portfolio gap (no factor, no forfeit, no bar) used to be passed here and produced a phantom week.
+    _harmonized_fh_gw = None
+    try:
+        if _fh_gap_table:
+            _xi_early = {}
+            for _g in _fh_gap_table:
+                if f"xpts_gw{_g}" in squad_df_adv.columns:
+                    _b = opt.best_starting_xi(squad_df_adv.assign(_v=squad_df_adv[f"xpts_gw{_g}"]), "_v")
+                    _xi_early[int(_g)] = float(_b["xi"]["_v"].sum()) if _b and _b.get("xi") is not None else 0.0
+            _harmonized_fh_gw = recommend.early_fh_week(
+                _fh_gap_table, _xi_early, planning_gw, _fh_expiry or (16, 19),
+                ft_loss=float(cfg.get("chip_timing", {}).get("fh_ft_loss_xpts", 2.0)))
+    except Exception as _e_fh0:
+        _harmonized_fh_gw = None
+        print(f"[R3P7] early Free Hit week skipped: {type(_e_fh0).__name__}: {_e_fh0}", file=sys.stderr)
     if _harmonized_fh_gw is not None:
         _chip_schedule = dict(_chip_schedule) if _chip_schedule else {}
         _chip_schedule["freehit_gw"] = _harmonized_fh_gw
@@ -3770,7 +3800,7 @@ try:
         _m30_items = recommend.m30_items(planning_gw, _m30_win or [planning_gw], overrides, _m30_special,
                                          float(eng.margin_of_error_threshold(0.0, cfg)),
                                          (fh_advisor or {}).get("by_gw") if "fh_advisor" in globals() else None,
-                                         floor=float(meaningful_bar_override))
+                                         floor=float(meaningful_bar_override), fh_expiry=_fh_expiry)
 except Exception as _e_m30:
     _m30_items = ()
     print(f"[R2P2] M30 settings skipped: {type(_e_m30).__name__}: {_e_m30}", file=sys.stderr)
@@ -4113,6 +4143,22 @@ try:
             _final_chip_gw[_k] = int(_v["gw"])
 except Exception:
     _final_chip_gw = {}
+# R3 Patch 7 (M32(3)): the planner must have been told the SAME Free Hit week the final plan has (or none). If the chain step ended on a
+# different week than the early estimate, solve the transfer plan once more with the final one (cached solve; same inputs otherwise).
+try:
+    _assumed_fh = globals().get("_harmonized_fh_gw")
+    _final_fh = _final_chip_gw.get("freehit")
+    if (_assumed_fh != _final_fh) and not squad_df.empty and not transfer_error:
+        _chip_schedule = recommend.align_planner_fh(globals().get("_chip_schedule"), _final_fh)
+        rec = _suggest_transfers_calc(
+            squad_df, pool_df, cfg, style_name, hit_stance, ft["free_transfers"], bank, planning_gw,
+            tuple(transfer_gw_list), forced_count, meaningful_bar_override, tuple(sorted(bench_df["code"])),
+            chip_advisory, _bb_play_gw,
+            tuple(_chip_capped_gw_list) if _chip_capped_gw_list is not None else None,
+            tuple(sorted(_disrupted_codes)) if _disrupted_codes else None, _chip_schedule)
+        _fh_realigned = (_assumed_fh, _final_fh)
+except Exception as _e_fh1:
+    print(f"[R3P7] planner re-alignment skipped: {type(_e_fh1).__name__}: {_e_fh1}", file=sys.stderr)
 # R2 Patch 4: chip badge per GW for the transfer-chain strip (same weeks as the Chip Plan)
 _strip_chips = {}
 try:
@@ -5000,7 +5046,9 @@ with tab_chips:
             # R2 Patch 1 (A2): scheduled by the joint sequence but below the materiality bar -> HOLD, never PLAY
             _hg, _hv = seq["held"]
             return _signal_card(
-                label, "HOLD", "hold", f"GW{_hg}", recommend.held_chip_sub(seq["held"], float(meaningful_bar_override), free_hit=("free" in str(label).lower())) + _card_tag(label),
+                label, "HOLD", "hold", f"GW{_hg}", recommend.held_chip_sub(seq["held"], float(meaningful_bar_override), free_hit=("free" in str(label).lower()),
+                                        expiry_best=((((_chain_path or {}).get("chips") or {}).get("m32") or {}).get("expiry_best")),
+                                        expiry=((((_chain_path or {}).get("chips") or {}).get("m32") or {}).get("expiry_window"))) + _card_tag(label),
                 f"The joint sequence's best week for this chip is GW{_hg} at {_hv:+.1f} xPts, below the "
                 f"{float(meaningful_bar_override):.1f} materiality bar, so the chip is held (Rule #34: play only above the "
                 f"margin). Re-run every gameweek — this is a hypothesis, not a commitment (Rule #32)."

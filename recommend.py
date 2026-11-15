@@ -4450,7 +4450,8 @@ def m32_fh_filter(fh_table: dict, xi_by_gw: dict, covered: set, planning_gw: int
     Disclosed simplification: the squad-overlap test (a) is not built -- the app holds only the Free Hit totals per week,
     not the squads; test (b) is the temporary-gap test used."""
     tab = {int(g): float(v) - float(ft_loss) for g, v in (fh_table or {}).items() if v is not None}
-    info = {"bar": {}, "temp": {}, "expiry": False, "best_fail": None, "ft_loss": float(ft_loss)}
+    info = {"bar": {}, "temp": {}, "expiry": False, "best_fail": None, "ft_loss": float(ft_loss), "expiry_best": None,
+            "expiry_window": (int(expiry[0]), int(expiry[1]))}
     if not tab:
         return {}, info
     gws = sorted(tab)
@@ -4471,6 +4472,11 @@ def m32_fh_filter(fh_table: dict, xi_by_gw: dict, covered: set, planning_gw: int
     fails = {g: v for g, v in tab.items()}
     hb = max(fails, key=lambda g: (fails[g], -g))
     info["best_fail"] = (int(hb), round(fails[hb], 2))
+    # R3 Patch 7: always name the best week inside the expiry window (after forfeit and raw), whether or not it clears the floor
+    _win = {g: v for g, v in tab.items() if int(expiry[0]) <= g <= int(expiry[1])}
+    if _win:
+        _eb = max(_win, key=lambda g: (_win[g], -g))
+        info["expiry_best"] = (int(_eb), round(_win[_eb], 2), round(_win[_eb] + float(ft_loss), 2))
     exp = {g: v for g, v in tab.items() if int(expiry[0]) <= g <= int(expiry[1]) and v >= float(expiry_min)}
     if exp:
         best = max(exp.values())
@@ -4503,11 +4509,12 @@ def _chain_chip_value_m30(squads_by_gw, gws, cfg, wc_gw, fh_gw, fh_ref_score, ty
     if tables.get("fh"):
         _xi_by = {g: v.get("xi_total") for g, v in tabs.items()}
         _ftl = float((cfg.get("chip_timing", {}) or {}).get("fh_ft_loss_xpts", 2.0))
+        _exp = tuple(m30.get("fh_expiry") or (16, 19))
         elig_fh, m32 = m32_fh_filter(_full_fh, _xi_by, set(m30.get("covered") or ()), m30.get("planning_gw"),
-                                     ft_loss=_ftl)
+                                     expiry=_exp, ft_loss=_ftl)
         # M35: whether a Free Hit week adds a transfer is unconfirmed -> also run accrual 1 (no forfeit) and label
         # any verdict that differs.
-        _alt, _ = m32_fh_filter(_full_fh, _xi_by, set(m30.get("covered") or ()), m30.get("planning_gw"), ft_loss=0.0)
+        _alt, _ = m32_fh_filter(_full_fh, _xi_by, set(m30.get("covered") or ()), m30.get("planning_gw"), expiry=_exp, ft_loss=0.0)
         m32["ft_sensitivity"] = {"differs": set(_alt) != set(elig_fh), "if_accrual_1": {int(g): round(v, 2) for g, v in _alt.items()}}
         tables["fh"] = elig_fh
         if not elig_fh:
@@ -5454,10 +5461,21 @@ def apply_chip_floor(portfolio: dict | None, floor: float) -> tuple[dict | None,
     return out, held
 
 
-def held_chip_sub(held: tuple, floor: float, free_hit: bool = False) -> str:
+def held_chip_sub(held: tuple, floor: float, free_hit: bool = False, expiry_best: tuple | None = None,
+                  expiry: tuple | None = None) -> str:
     """R2 Patch 1 (A2): card sub-line for a chip held because its best week is below the materiality floor.
     R2 Patch 7 (M32): the Free Hit is held against its own bar (max 8 xPts or 14% of the XI) and the temporary-gap test."""
     gw, val = held
+    if free_hit and expiry_best:
+        e_gw, e_net, e_raw = expiry_best
+        lo, hi = expiry if expiry else (16, 19)
+        clears = float(e_net) >= 2.0
+        tail = ("it clears the 2.0 floor: the expiry rule takes it" if clears else
+                "it is below the 2.0 floor after the forfeited free transfer: it lapses at the GW%d deadline unless a bigger gap "
+                "opens, and the card will say so (M32(5))" % int(hi))
+        return (f"best week GW{int(gw)} is {float(val):+.1f} xPts, below the Free Hit bar (8 xPts or 14% of the XI) or the gap is "
+                f"not temporary. Expiry window GW{int(lo)}-GW{int(hi)}: best week GW{int(e_gw)} {float(e_raw):+.1f} xPts raw, "
+                f"{float(e_net):+.1f} after the forfeit; {tail}. The Free Hit rule is unconfirmed on a real account (M35)")
     if free_hit:
         return (f"best week GW{int(gw)} is {float(val):+.1f} xPts: below the Free Hit bar (8 xPts or 14% of the XI) or "
                 f"the gap is not temporary: held for a bigger one-week gap or the GW16-19 expiry (M32). The figure is after the one "
@@ -5521,7 +5539,7 @@ def event_deadlines(events) -> dict:
 
 
 def m30_items(planning_gw: int, window_gws: list, overrides, fixtures_counts_special: set, band: float,
-              fh_by_gw: dict | None, floor: float | None = None) -> tuple:
+              fh_by_gw: dict | None, floor: float | None = None, fh_expiry: tuple | None = None) -> tuple:
     """R2 Patch 2: the hashable M30/M31 settings passed into the cached chain calc: covered weeks (GW+0..+5 or the last
     per-GW clean-sheet column with data in the sheet), special weeks (doubles/blanks), band, Free Hit one-week optimum
     per week (evaluate_free_hit 'rebuild'), planning GW."""
@@ -5542,7 +5560,8 @@ def m30_items(planning_gw: int, window_gws: list, overrides, fixtures_counts_spe
                       if isinstance(v, dict) and v.get("rebuild") is not None))
     return (("covered", cov), ("special", tuple(sorted(int(g) for g in fixtures_counts_special))),
             ("band", float(band)), ("fh_ref", fh), ("planning_gw", int(planning_gw)),
-            ("floor", (None if floor is None else float(floor))))
+            ("floor", (None if floor is None else float(floor))),
+            ("fh_expiry", (None if fh_expiry is None else (int(fh_expiry[0]), int(fh_expiry[1])))))
 
 
 def m30_from_items(items) -> dict | None:
@@ -5552,7 +5571,7 @@ def m30_from_items(items) -> dict | None:
     d = dict(items)
     return {"covered": set(d.get("covered") or ()), "special": set(d.get("special") or ()),
             "band": float(d.get("band", 2.0)), "fh_ref_by_gw": (dict(d["fh_ref"]) if d.get("fh_ref") else None),
-            "planning_gw": d.get("planning_gw"), "floor": d.get("floor")}
+            "planning_gw": d.get("planning_gw"), "floor": d.get("floor"), "fh_expiry": d.get("fh_expiry")}
 
 
 def m31_weight(xm) -> float:
@@ -5729,7 +5748,21 @@ def chip_week_tables(squads_by_gw: dict, gws: list, fh_ref_by_gw: dict | None = 
         top = order[0] if len(order) else None
         fh = None
         if fh_ref_by_gw and g in fh_ref_by_gw and fh_ref_by_gw[g] is not None:
-            fh = round(max(0.0, float(fh_ref_by_gw[g]) * m31_factor(int(g) - p0 + 1) - float(best["xi"]["_adj"].sum())), 4)
+            # R3 Patch 7 (M32(1), M32(7)): the distance factor must scale BOTH sides. The squad side (xadj) carries the factor only
+            # for players without an M52/M58/M85/M86/M95/M102 xM (R2 Patch 15), so the reference is scaled by the squad's OWN
+            # effective decay: adjusted / healthy xPts of the available XI players (1.0 when none carries a decay). First week
+            # (k = 1) unchanged.
+            _k = int(g) - p0 + 1
+            _xi = best["xi"]
+            _r = m31_factor(_k)
+            if _k > 1:
+                _hv = _col_or(_xi, "xptsh_gw", "xpts_gw", g)
+                _av = pd.to_numeric(_xi[f"avail_gw{g}"], errors="coerce").fillna(1.0) if f"avail_gw{g}" in _xi.columns \
+                    else pd.Series(1.0, index=_xi.index)
+                _m = (_av > 0) & (_hv > 0)
+                _r = float((_xi.loc[_m, "_adj"].sum()) / _hv[_m].sum()) if bool(_m.any()) and float(_hv[_m].sum()) > 0 else 1.0
+                _r = min(1.0, max(0.0, _r))
+            fh = round(max(0.0, float(fh_ref_by_gw[g]) * _r - float(_xi["_adj"].sum())), 4)
         out[g] = {"bb": bb, "bb_raw": bb_raw, "tc": round(e, 4), "fh": fh, "xi_total": round(float(best["xi"]["_adj"].sum()), 4),
                   "tc_player": ({"gw": g, "name": str(sq.loc[top].get("web_name", "")), "code": int(sq.loc[top, "code"]),
                                  "team": sq.loc[top].get("team", ""), "xpts": round(e, 2)} if top is not None else None)}
@@ -6008,3 +6041,25 @@ def exclusion_audit(ui_excluded_codes, pool_df, rec, chain_path=None, scenario_p
         lines.append("No Excluded player is bought in the weekly plan, the Power Cards path or the scenario plan.")
     return {"ok": ok, "ui_codes": ui, "planner_codes": list(planner), "missing_in_planner": missing, "violations": viol,
             "text": "\n".join(lines)}
+
+
+def early_fh_week(gap_by_gw: dict, xi_by_gw: dict, planning_gw: int, expiry: tuple = (16, 19), ft_loss: float = 2.0):
+    """R3 Patch 7 (M32): the Free Hit week the planner may assume BEFORE the chain step: the same bar, temporary-gap test and
+    expiry rule as the card, applied to the isolated advisor's raw gaps scaled by f(k) (M32(1)). None = no week assumed."""
+    p0 = int(planning_gw)
+    tab = {int(g): float(v) * m31_factor(int(g) - p0 + 1) for g, v in (gap_by_gw or {}).items() if v is not None}
+    ok, _info = m32_fh_filter(tab, xi_by_gw or {}, set(), p0, expiry=expiry, ft_loss=float(ft_loss))
+    if not ok:
+        return None
+    best = max(ok.values())
+    return int(min(g for g, v in ok.items() if v >= best - 1e-9))
+
+
+def align_planner_fh(chip_schedule: dict | None, final_fh_gw: int | None):
+    """R3 Patch 7: the planner's chip schedule with its Free Hit week replaced by the final one (removed when there is none).
+    Returns None when nothing is left in the schedule (the omitted-parameter contract of plan_transfer_schedule)."""
+    cs = dict(chip_schedule or {})
+    cs.pop("freehit_gw", None)
+    if final_fh_gw is not None:
+        cs["freehit_gw"] = int(final_fh_gw)
+    return cs or None
