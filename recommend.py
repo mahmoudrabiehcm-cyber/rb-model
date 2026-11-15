@@ -641,8 +641,12 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
     # value math used everywhere else), so pool size doesn't meaningfully
     # affect runtime the way the actual MILP solves elsewhere in this
     # function do.
+    # R3 Patch 5: the scan skips every blocked code (Excluded list + flagged-buy rule), the same set every planner solve
+    # already honours. Before, a near-tied Excluded player (manager report: Gabriel) could win this scan and be bought.
+    _blocked = set(exclude_codes_of(full_pool)) - {in_code}
     same_pos_pool = full_pool[(full_pool["position"] == out_pos)
-                               & (~full_pool["code"].isin(set(squad_df["code"]) - {out_code}))].copy()
+                               & (~full_pool["code"].isin(set(squad_df["code"]) - {out_code}))
+                               & (~full_pool["code"].isin(_blocked))].copy()
     if same_pos_pool.empty:
         return chosen, None
 
