@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -499,6 +500,40 @@ def fetch_team_match_xg(season_slug: str, gw_list: list[int]) -> tuple[pd.DataFr
     warning = (f"olbauday matches.csv unavailable for GW(s) {missing_gws} -- fixture-adjustment "
                f"baselines are built from the other finished GWs only" if missing_gws else None)
     return result[cols], warning
+
+
+def fetch_flag_history(season_slug: str, gw_list: list[int]) -> tuple[dict, Optional[str]]:
+    """R3 Patch 6 (M124 / M131): the official availability flag after each finished gameweek, from olbauday's per-GW
+    playerstats.csv (the same repo the match xG comes from). Returns ({player id: {gw: (status, chance_next_round)}}, warning).
+    The status in the GW file is the flag standing after that gameweek's matches, i.e. before the next gameweek's match.
+    Never raises: a file that cannot be fetched or read is skipped and named in the warning; a flag that is not read is never
+    guessed by the caller (the rules that need it simply do not fire for that gameweek)."""
+    hist: dict = {}
+    missing: list = []
+    _urls = {gw: f"{OLBAUDAY_RAW}/{season_slug}/By%20Gameweek/GW{gw}/playerstats.csv" for gw in gw_list}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, min(8, len(_urls) or 1))) as _ex:
+            _resp = dict(zip(_urls, _ex.map(lambda g: _get(_urls[g], timeout=15), _urls)))
+    except Exception:
+        _resp = {gw: _get(u, timeout=15) for gw, u in _urls.items()}
+    for gw in gw_list:
+        r = _resp.get(gw)
+        if r is None:
+            missing.append(gw)
+            continue
+        try:
+            df = pd.read_csv(io.StringIO(r.text))
+            if not {"id", "status"} <= set(df.columns) or df.empty:
+                raise ValueError("schema")
+            cop = pd.to_numeric(df.get("chance_of_playing_next_round", pd.Series(np.nan, index=df.index)), errors="coerce")
+            for pid, st, c in zip(df["id"], df["status"], cop):
+                hist.setdefault(int(pid), {})[int(gw)] = (str(st).strip().lower(), (None if pd.isna(c) else float(c)))
+        except Exception:
+            missing.append(gw)
+    warn = (f"flag history unavailable for GW(s) {missing}: the injury-onset (M124) and return-after-two-misses (M131) rules "
+            f"do not fire where a needed flag was not read; those players use the current path" if missing else None)
+    return hist, warn
 
 
 # ---------------------------------------------------------------------------

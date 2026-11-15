@@ -404,8 +404,21 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
                        "pre_starts": sum(1 for m in pre_ms if m[1] >= 60)}
     if out is None:
         E_ms = [m for m in ms if m[0] not in excl]
+        # R3 Patch 6 (M111): when exclusions leave fewer than 3 eligible matches, the next older match (the 7th) may be
+        # used, if it is known and not excluded. Its starts flag is not kept per match: 60+ minutes is the proxy.
+        _ext_start = 0
+        if excl and len(E_ms) < 3 and all_matches:
+            _older = sorted({int(g): (int(g), float(m)) for g, m in _clean_matches(all_matches)}.values())
+            _older = [m for m in _older if m[0] < ms[0][0] and m[0] not in excl]
+            if _older:
+                E_ms = [_older[-1]] + E_ms
+                _ext_start = 1 if _older[-1][1] >= 60 else 0
         E = [m[1] for m in E_ms]
-        v = _m52_vals(nst, E)
+        # R3 Patch 6: the starts term counts eligible matches only; an excluded 60+ minute match was a start (proxy) and is
+        # taken out of the numerator so numerator and denominator describe the same matches.
+        nst_eff = float(nst) - sum(1 for m in ms if m[0] in excl and m[1] >= 60) + _ext_start
+        nst_eff = max(0.0, nst_eff)
+        v = _m52_vals(nst_eff, E)
         if v is None:
             return None
         src = "M52"
@@ -422,15 +435,18 @@ def m52_compute(matches, nst, excl=None, dismissal_gw=None, confirm_gw=None, pla
             if v2 is not None:
                 v = (0.5 * v[0] + 0.5 * v2[0], 0.5 * v[1] + 0.5 * v2[1])
                 src = "M52 (unflagged single miss, 50/50 blend)"
-        elif any(k == "FLAG" for k in excl.values()):
-            src = "M52 (flagged miss excluded)"
         else:
-            # R2 Patch 32 (M124 display): name an injury exclusion that actually sits in the window. Label only; numbers unchanged.
+            # R2 Patch 32 (M124 display): name an injury exclusion that actually sits in the window. Label only.
+            # R3 Patch 6: the injury-onset label is no longer hidden by FLAG kinds in the same entry.
             _in_win = {k for g, k in excl.items() if g in {m[0] for m in ms}}
             if not ban and "INJ_AUTO" in _in_win:
-                src = "M52 (injury-onset match excluded, M124 · 6-match window, M111 allows 7)"
+                src = "M52 (injury-onset match excluded, M124 \u00b7 6-match window, M111 allows 7)"
+                if "FLAG" in _in_win:
+                    src = src[:-1] + " \u00b7 flagged-before matches excluded, M111)"
+            elif any(k == "FLAG" for k in excl.values()):
+                src = "M52 (flagged miss excluded)"
             elif not ban and "INJ" in _in_win:
-                src = "M52 (injury match excluded · 6-match window, M111 allows 7)"
+                src = "M52 (injury match excluded \u00b7 6-match window, M111 allows 7)"
         out = {"x1": v[0], "x2": v[1], "src": src, "n_eligible": len(E)}
     if confirm_gw is not None and planning_gw is not None and int(confirm_gw) == int(planning_gw):
         out["x1"] = M52_CAP
@@ -478,6 +494,94 @@ def m121_schedule(planning_gw, out_until_gw, base, confirm_gw=None):
                 v = M52_CAP
             sched[gw] = (v, v)
     return {"sched": sched, "tail": (float(base[1]), float(base[1])), "src": "M121 dated absence until GW%d" % U}
+
+
+# ---------------------------------------------------------------------------
+# R3 Patch 6 (model rulings M124 / M111 / M130-M132): automatic injury-onset exclusion and return after two missed matches.
+# `flags` = {gw: status letter AFTER that gameweek} read from the official per-gameweek flag history; the flag standing BEFORE
+# a match in gameweek g is flags[g - 1]. A flag that cannot be read is never assumed (the rule then does not fire).
+# ---------------------------------------------------------------------------
+M131_FIRST = (0.42, 0.56)               # first match back: both misses flagged-before / cause unconfirmed (estimate tier, n = 47)
+M131_NEXT = (0.59, 0.65, 0.60)          # matches 2-4 back (vaastav 2023-24 to 2025-26, n = 138)
+_FLAGGED = ("d", "i", "n", "s", "u")
+
+
+def _flag_before(flags, gw):
+    """Status standing before the match of gameweek `gw` (the status after gw - 1), lower case, or None when unknown."""
+    if not flags:
+        return None
+    v = flags.get(int(gw) - 1)
+    if isinstance(v, (tuple, list)):
+        v = v[0]
+    return str(v).lower() if v is not None else None
+
+
+def m124_auto_excl(matches, flags, status_now):
+    """M124 trigger + M111 companions for one player. `matches` = last up to 6 played team matches, oldest first, (gw, minutes).
+    Fires when: regular (60+ in at least 3 of the 6), status now "a" (not while flagged, M110), he played his latest match,
+    and a match in the last 3 with 1-59 minutes was followed by a new d / i flag (status before it "a"). Returns
+    {onset_gw: "INJ_AUTO"} plus {gw: "FLAG"} for the other matches of the last 3 that had a d / i flag before them when at
+    least 2 of the last 3 were flagged-before (M111). Empty when the rule does not apply or flags are missing."""
+    ms = sorted(_clean_matches(matches))[-6:]
+    if len(ms) < 3 or not flags or str(status_now).lower() != "a" or ms[-1][1] <= 0 or not m95_is_regular(ms):
+        return {}
+    last3 = ms[-3:]
+    onset = []
+    for g, m in last3:
+        if 1.0 <= m <= 59.0:
+            after = flags.get(int(g))
+            after = (after[0] if isinstance(after, (tuple, list)) else after)
+            if _flag_before(flags, g) == "a" and str(after).lower() in ("d", "i"):
+                onset.append(g)
+    if not onset:
+        return {}
+    out = {g: "INJ_AUTO" for g in onset}
+    fb = [g for g, _m in last3 if g not in out and _flag_before(flags, g) in ("d", "i")]
+    if len(fb) + sum(1 for g, _m in last3 if g in out and _flag_before(flags, g) in ("d", "i")) >= 2:
+        out.update({g: "FLAG" for g in fb})
+    return out
+
+
+def m131_state(matches, flags, status_now, max_back=3):
+    """M131: a regular whose most recent run of >= 2 consecutive missed matches (0 minutes) is followed by at most `max_back`
+    played matches, now unflagged ("a"). `matches` = his matches, oldest first (use the longer history when available).
+    Returns {"k": position of the NEXT match back (1 = first), "flagged": both misses had a d/i flag before them (False when
+    the flag history is missing or either miss was unflagged), "misses": [gw, gw]} or None."""
+    ms = sorted(_clean_matches(matches))
+    if str(status_now).lower() != "a" or len(ms) < 3:
+        return None
+    j = 0
+    while j < len(ms) and ms[-1 - j][1] > 0:
+        j += 1
+    if j > max_back or len(ms) - j < 2:
+        return None
+    run = ms[:len(ms) - j]
+    if not (run[-1][1] <= 0 and run[-2][1] <= 0):
+        return None
+    k = 0
+    while k < len(run) and run[-1 - k][1] <= 0:
+        k += 1
+    pre = run[:len(run) - k][-6:]
+    if len(pre) < 3 or sum(1 for _g, m in pre if m >= 60) < 3:
+        return None
+    last2 = run[-2:]
+    flagged = bool(flags) and all(_flag_before(flags, g) in _FLAGGED for g, _m in last2)
+    return {"k": j + 1, "flagged": flagged, "misses": [g for g, _m in last2]}
+
+
+def m131_schedule(planning_gw, state, base):
+    """Per-gameweek (xM, healthy xM) for a return after two missed matches: match 1 back = 0.42 (both misses flagged-before) or
+    0.56 (cause unconfirmed), matches 2-4 = 0.59 / 0.65 / 0.60, then `base[1]` (the player's own plain M52 later reading).
+    One match per gameweek (blanks/doubles ignored, as M121). Returns {"sched","tail","src"}; None when k > 4."""
+    P, k = int(planning_gw), int(state["k"])
+    if k > 4:
+        return None
+    first = M131_FIRST[0] if state.get("flagged") else M131_FIRST[1]
+    curve = (first,) + tuple(M131_NEXT)
+    sched = {P + i: (curve[k - 1 + i], curve[k - 1 + i]) for i in range(0, 5 - k)}
+    why = "both misses flagged-before" if state.get("flagged") else "cause unconfirmed"
+    return {"sched": sched, "tail": (float(base[1]), float(base[1])),
+            "src": "M131 return after two missed matches (match %d back, %s)" % (k, why)}
 
 
 def m85_schedule(matches, nst, banned, dismissal_gw=None, planning_gw=None, excl=None, base=None):

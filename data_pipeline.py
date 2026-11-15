@@ -643,6 +643,8 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
     pl["_xm_src"] = ""
     pl["_xm_unconf"] = False
     pl["_nailed_rule"] = ""                      # R2 Patch 32 (M125): display-only 70% rule label
+    pl["_m124_auto"] = ""                        # R3 Patch 6 (M124/M111): "gw:KIND;..." derived from the flag history
+    pl["_m131"] = ""                             # R3 Patch 6 (M131): "k:flagged|unconfirmed" when the return path applied
     pl["_xm_sched"] = pd.Series([None] * len(pl), index=pl.index, dtype=object)     # R2 Patch 17 (M85/M86): {gw: (xM, healthy xM)}
     _thr = float(((cfg or {}).get("xm_m52") or {}).get("unconfirmed_below", 0.80))
     on = bool(((cfg or {}).get("xm_m52") or {}).get("enabled", True))
@@ -672,13 +674,40 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
         # gets a per-gameweek schedule instead of one flat later value (and instead of a flat zero for the official "s" flag).
         if on and planning_gw is not None and _m85_apply(pl, i, cfg, int(planning_gw), deadlines, unavailable, cop, has_m):
             continue
+        _sheet_ex = eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {}
+        _flags = pl.at[i, "m52_flags"] if "m52_flags" in pl.columns and isinstance(pl.at[i, "m52_flags"], dict) else None
+        _lm_all = (pl.at[i, "m52_long"] if "m52_long" in pl.columns and isinstance(pl.at[i, "m52_long"], list)
+                   else (pl.at[i, "m52_matches"] if has_m else None))
+        _auto, _m131 = {}, None
+        _no_ban = not any(k == "SUSP" for k in _sheet_ex.values())
+        _no_out = not ("xm_out_until_gw" in pl.columns and pd.notna(pd.to_numeric(pl.at[i, "xm_out_until_gw"], errors="coerce")))
+        if on and has_m and isinstance(pl.at[i, "m52_matches"], list) and _flags and _no_ban and _no_out:
+            _m131 = eng.m131_state(_lm_all, _flags, status.get(i))
+            if _m131 is None:
+                _auto = eng.m124_auto_excl(pl.at[i, "m52_matches"], _flags, status.get(i))
+        if _auto:
+            pl.at[i, "_m124_auto"] = ";".join("%d:%s" % (g, k) for g, k in sorted(_auto.items()))
         if on and has_m and isinstance(pl.at[i, "m52_matches"], list):
+            _ex_used = {} if _m131 is not None else {**_auto, **_sheet_ex}        # M131 supersedes M52-with-exclusions; sheet wins a clash
             res = eng.m52_compute(pl.at[i, "m52_matches"], pl.at[i, "m52_nst"],
-                                  eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {},
+                                  _ex_used,
                                   (None if "xm_dismissal_gw" not in pl.columns or pd.isna(pl.at[i, "xm_dismissal_gw"]) else int(pl.at[i, "xm_dismissal_gw"])),
                                   (None if "starter_confirm_gw" not in pl.columns or pd.isna(pl.at[i, "starter_confirm_gw"]) else int(pl.at[i, "starter_confirm_gw"])),
                                   planning_gw,
                                   all_matches=(pl.at[i, "m52_long"] if "m52_long" in pl.columns and isinstance(pl.at[i, "m52_long"], list) else None))
+        # R3 Patch 6 (M131): a regular who missed his last two matches, now unflagged -> 0.42 / 0.56 first match back, then
+        # 0.59 / 0.65 / 0.60, then his own plain M52. Unconfirmed (M54). Applies to any player, any club.
+        if res is not None and _m131 is not None and planning_gw is not None:
+            _s131 = eng.m131_schedule(int(planning_gw), _m131, (res["x1"], res["x2"]))
+            if _s131 is not None:
+                _sch = _s131["sched"]
+                pl.at[i, "_xm"], pl.at[i, "_xm_h"] = _sch[int(planning_gw)]
+                pl.at[i, "_xm2"], pl.at[i, "_xm_h2"] = _s131["tail"]
+                pl.at[i, "_xm_sched"] = dict(_sch)
+                pl.at[i, "_xm_src"] = _s131["src"]
+                pl.at[i, "_xm_unconf"] = True
+                pl.at[i, "_m131"] = "%d:%s" % (int(_m131["k"]), "flagged" if _m131["flagged"] else "unconfirmed")
+                continue
         # R2 Patch 28 (M121): a dated multi-week absence (sheet xm_out_until_gw = first gameweek available) -> 0 until then,
         # then the 0.58 / 0.64 / 0.64 / 0.61 return curve; later gameweeks = his own M52 reading.
         if (res is not None and planning_gw is not None and "xm_out_until_gw" in pl.columns
@@ -705,7 +734,7 @@ def apply_m52(pl: pd.DataFrame, cfg: dict, planning_gw, deadlines: dict | None =
             elif floor_only:
                 pl.at[i, "_xm_src"] = "current path (floor)"
             # R2 Patch 32 (M124/M111 display): a sheet exclusion left fewer than 2 eligible matches -> current treatment, disclosed
-            _ex = eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {}
+            _ex = {**_auto, **(eng.parse_xm_excl(pl.at[i, "xm_excl_gws"]) if "xm_excl_gws" in pl.columns else {})}
             _mm = pl.at[i, "m52_matches"] if has_m and isinstance(pl.at[i, "m52_matches"], list) else []
             if _ex and _mm and any(int(g) in _ex for g, _m in _mm) and sum(1 for g, _m in _mm if int(g) not in _ex) < 2:
                 _d = "fewer than 2 eligible matches after exclusion (M124/M111): current treatment"
@@ -864,7 +893,8 @@ def _fdr_tier_from_strength_vec(opp_att: pd.Series) -> pd.Series:
 
 
 def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
-                 gw_list: list[int], fixture_baselines: dict | None = None) -> pd.DataFrame:
+                 gw_list: list[int], fixture_baselines: dict | None = None,
+                 flag_history: dict | None = None) -> pd.DataFrame:
     """Same Core Formula pipeline as the CLI tool, plus Step 3c's set-piece
     multiplier applied to npxG_blend right after Step 3's decay blend.
 
@@ -938,6 +968,9 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     _plh["chance_of_playing_next_round"] = np.nan
     pl["_xm_h"] = eng.estimate_xm_vec(_plh, cfg)
     del _plh
+    # R3 Patch 6: the official flag history per player (fpl_data.fetch_flag_history); absent -> M124 auto / M131 do not fire
+    if flag_history and "id" in pl.columns:
+        pl["m52_flags"] = pd.Series([flag_history.get(int(x)) if pd.notna(x) else None for x in pl["id"]], index=pl.index, dtype=object)
     pl = apply_m52(pl, cfg, (int(gw_list[0]) if gw_list else None), _deadlines_of(snap))      # R2 Patch 15 (M52-M70)
     for _i in pl.index[pl["_ov_susp"].astype(bool)]:        # R2 Patch 27 (M117): say so, and keep the unconfirmed label (M99)
         pl.at[_i, "_xm_src"] = ("%s \u00b7 override %.2f suspended by flag (M117)" % (str(pl.at[_i, "_xm_src"] or "").strip(), float(pl.at[_i, "_ov_ignored"]))).lstrip(" \u00b7")
@@ -1209,6 +1242,8 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
         "xm_src": pl["_xm_src"].fillna("").astype(str).values,
         "xm_unconf": pl["_xm_unconf"].fillna(False).astype(bool).values,
         "nailed_rule": pl["_nailed_rule"].fillna("").astype(str).values,     # R2 Patch 32 (M125): display only
+        "m124_auto": pl["_m124_auto"].fillna("").astype(str).values,         # R3 Patch 6: automatic injury-onset exclusion, display
+        "m131": pl["_m131"].fillna("").astype(str).values,                   # R3 Patch 6: return-after-two-misses position, display
         "xm_override_ignored": pl["_ov_ignored"].values,        # R2 Patch 27 (M117): the suspended sheet value, else NaN
         "est_rescue_needed": pl.get("est_rescue_needed", pd.Series(False, index=pl.index)).fillna(False).astype(bool).values,
         "sample_tag": pl.get("sample_tag", pd.Series("", index=pl.index)).fillna("").astype(str).values,
@@ -1408,3 +1443,20 @@ def solve_best_gw_squad(cfg: dict, proj: pd.DataFrame, total_value: float, gw: i
             best = {"squad": sq, "xi_codes": None, "shape": None, "xi_total": None,
                     "bench_cost": None, "total_cost": round(float(sq["price"].sum()), 1)}
     return best
+
+
+def m52_auto_report(pl: pd.DataFrame, flag_warning: str | None = None) -> str:
+    """R3 Patch 6 (M132): one plain line for the Advanced panel listing who the app excluded automatically (M124 INJ_AUTO /
+    M111) and who is on the M131 return path this run, plus the flag-history warning when files were missing. Display only."""
+    if pl is not None and not pl.empty and "_m124_auto" not in pl.columns and "m124_auto" in pl.columns:
+        pl = pl.rename(columns={"m124_auto": "_m124_auto", "m131": "_m131"})
+    if pl is None or pl.empty or "_m124_auto" not in pl.columns:
+        return flag_warning or ""
+    nm = pl["web_name"] if "web_name" in pl.columns else pl["id"].astype(str)
+    a = [f"{nm[i]} ({pl.at[i, '_m124_auto']})" for i in pl.index if pl.at[i, "_m124_auto"]]
+    r = [f"{nm[i]} (match {str(pl.at[i, '_m131']).split(':')[0]} back, {str(pl.at[i, '_m131']).split(':')[1]})" for i in pl.index if pl.at[i, "_m131"]]
+    parts = ["Injury-onset exclusion (M124/M111, automatic): " + (", ".join(a) if a else "none")
+             + ". Return after two missed matches (M131): " + (", ".join(r) if r else "none") + "."]
+    if flag_warning:
+        parts.append(flag_warning)
+    return " ".join(parts)
