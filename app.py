@@ -44,7 +44,7 @@ _RT = {}
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R3 Patch 8 (2026-11-15, manager go): (1) NEW tab League (private classic leagues with at most 40 managers, chosen from the manager's own entry; nothing is fetched until Load my leagues is pressed; standings cached 15 minutes while a fixture is live and 6 hours otherwise, rivals' picks and chips cached per finished gameweek): standings with gap to you and chips left, your place and the projected gap (estimate, no transfers assumed), your squad against the league (covered / shared / differential, exposed), who to watch among the rivals ahead, the model's own transfers with their league effect, and a chip note. Information only: no other tab changes. (2) Style Fit season-rank chart redrawn (Forest palette, axis zoomed to the data, best and latest labelled, one dashed line at the next milestone tier). Not validated: load time and API throttling from the live host (measured seconds are printed in the tab), rivals' current-gameweek picks before the deadline (the last finished gameweek is used), the cover / differential shares (estimates). "
+PATCH_VERSION = ("R3 Patch 9 (2026-11-16, manager go): League tab redrawn visuals first: three number cards, standings as bars with chips lit or struck, ownership strips for your squad (safe / in between / your edge), rival chips, short action cards, and a closed Data details box; a font stack that covers Arabic names and symbols. Layout and wording only, the numbers and recommendations are the Patch 8 ones. Earlier, R3 Patch 8 (2026-11-15, manager go): (1) NEW tab League (private classic leagues with at most 40 managers, chosen from the manager's own entry; nothing is fetched until Load my leagues is pressed; standings cached 15 minutes while a fixture is live and 6 hours otherwise, rivals' picks and chips cached per finished gameweek): standings with gap to you and chips left, your place and the projected gap (estimate, no transfers assumed), your squad against the league (covered / shared / differential, exposed), who to watch among the rivals ahead, the model's own transfers with their league effect, and a chip note. Information only: no other tab changes. (2) Style Fit season-rank chart redrawn (Forest palette, axis zoomed to the data, best and latest labelled, one dashed line at the next milestone tier). Not validated: load time and API throttling from the live host (measured seconds are printed in the tab), rivals' current-gameweek picks before the deadline (the last finished gameweek is used), the cover / differential shares (estimates). "
                  "R3 Patch 7 (2026-11-15, manager report with rb_snapshot_gw11_4: no Free Hit week and no indication): the existing chip rules (M32(1), M32(5), M29(2), M32(3)) now apply the same way for any chip and any squad. (1) The chip scan always reaches the last week of the soonest-closing open chip window, so the expiry rule sees its weeks in a normal run (was GW15 at GW11). (2) The Free Hit gain scales BOTH sides by the squad's own decay (the one-sided factor read exactly 0.0 for every week after the first; M32(7)). (3) The Free Hit HOLD line names the best expiry-window week, its raw and after-forfeit figure and whether it clears the 2.0 floor. (4) The transfer planner is told the same Free Hit week the final plan has: the early estimate uses the card's own bar and expiry rule, and the planner is solved once more if the final week differs (it used to receive the raw scheduler week, a phantom GW14/GW15). Not validated: run time of the wider scan on a live account; the squad's own decay stands in for the rebuild squad's; one match per gameweek. "
                  "R3 Patch 6 (2026-11-15, manager go, model rulings M124 / M111 / M130-M132): the app now derives, by itself and for any "
                  "player, (1) the injury-onset exclusion (INJ_AUTO) with the M111 flagged-before matches, and (2) the return after two "
@@ -655,7 +655,7 @@ _CREST_SVG = ('<svg viewBox="0 0 100 100" width="28" height="28" style="flex:non
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans:wght@400;600&family=Noto+Sans+Arabic:wght@400;600&display=swap');
 
 /* ---------------------------------------------------------------------
    Release 2 (2026-09-21) then Release 2.1 (same day, manager: after the
@@ -713,7 +713,7 @@ st.markdown("""
   --violet:#B7A8FF;
 }
 html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--ink); }
-.mono{ font-family:"IBM Plex Mono",monospace; }
+.mono{ font-family:"IBM Plex Mono","Noto Sans","Noto Sans Arabic",monospace; }
 .stApp{ background:var(--bg); }
 
 /* Release 2.1 follow-up (2026-09-21, manager screenshot: a visible border
@@ -898,7 +898,30 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .bench-strip.bb .card{ opacity:1; }
 .bench-strip.bb .side-note{ color:var(--accent-strong); font-weight:700; }
 @media (max-width: 820px){ .pitch-wrap{ flex-direction:column; } .mv-panel{ order:-1; flex-basis:auto; } }
-.side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono"; line-height:1.5; }
+.side-note{ font-size:11.5px; color:var(--ink-faint); font-family:"IBM Plex Mono","Noto Sans","Noto Sans Arabic",monospace; line-height:1.5; }
+/* R3 Patch 9: League tab blocks (visuals first). Body text uses the sans stack, which also covers Arabic names. */
+.lg-cards,.lg-two,.lg-acts{ display:flex; gap:14px; flex-wrap:wrap; margin:6px 0 4px; }
+.lg-card,.lg-box{ flex:1 1 220px; background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:14px 18px; font-family:"IBM Plex Sans","Noto Sans","Noto Sans Arabic",sans-serif; }
+.lg-big{ font-family:"Space Grotesk"; font-size:2.3rem; font-weight:700; line-height:1.1; } .lg-of{ font-size:1.1rem; color:var(--ink-muted); }
+.lg-lbl{ font-size:13px; color:var(--ink-muted); margin-top:4px; } .lg-sub{ font-size:12px; color:var(--ink-faint); margin:8px 0 4px; letter-spacing:.03em; }
+.lg-gold{ color:var(--gold); } .lg-acc{ color:var(--accent); } .lg-red{ color:var(--coral); } .lg-mut{ color:var(--ink-faint); font-size:13px; }
+.lg-row{ display:grid; grid-template-columns:30px minmax(120px,190px) 1fr 52px 150px; align-items:center; gap:10px; padding:5px 8px; border-radius:6px; font-size:14px; font-family:"IBM Plex Sans","Noto Sans","Noto Sans Arabic",sans-serif; }
+.lg-row.lg-me{ background:var(--surface-2); outline:1px solid var(--gold); } .lg-gap{ text-align:center; color:var(--ink-faint); line-height:1; }
+.lg-nm{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .lg-rk{ color:var(--ink-muted); }
+.lg-bar{ height:14px; background:#2a3d34; border-radius:7px; } .lg-bar i{ display:block; height:100%; border-radius:7px; background:#4f8f78; }
+.lg-me .lg-bar i{ background:var(--gold); } .lg-lead .lg-bar i{ background:var(--accent); }
+.lg-pill{ display:inline-block; font-size:11px; padding:2px 7px; border-radius:9px; margin-right:3px; } .lg-pill.on{ background:#2f6b57; color:#e8fff4; }
+.lg-pill.off{ background:#2a3d34; color:#6f8379; text-decoration:line-through; }
+.lg-pl{ display:grid; grid-template-columns:96px 1fr 44px; gap:8px; align-items:center; font-size:13px; margin:5px 0; }
+.lg-dots{ display:flex; gap:2px; flex-wrap:wrap; } .lg-dot{ width:6px; height:12px; border-radius:2px; background:#2a3d34; display:inline-block; }
+.lg-dot.on{ background:#7aa6ff; } .lg-dot.on.gold{ background:var(--gold); } .lg-n{ text-align:right; color:var(--ink-muted); }
+.lg-w{ display:grid; grid-template-columns:190px 1fr; padding:6px 0; border-bottom:1px solid #2a3d34; font-size:13px; font-family:"IBM Plex Sans","Noto Sans","Noto Sans Arabic",sans-serif; }
+.lg-chip{ display:inline-block; background:#2a3d34; border:1px solid var(--rule); border-radius:12px; padding:2px 9px; font-size:12px; margin:2px 4px 2px 0; }
+.lg-act{ border-left:4px solid var(--gold); } .lg-act.s{ border-left-color:var(--accent); }
+.lg-badge{ font-size:11px; padding:2px 8px; border-radius:9px; background:var(--gold); color:#222; font-weight:600; } .lg-badge.s{ background:var(--accent); }
+.lg-t{ margin:8px 0 2px; font-size:16px; } .lg-note{ font-size:12px; color:var(--ink-faint); margin-top:6px; }
+@media (max-width:700px){ .lg-row{ grid-template-columns:24px 1fr 44px; } .lg-row .lg-bar,.lg-row .lg-rt{ grid-column:2 / 4; } .lg-w{ grid-template-columns:1fr; } }
+
 /* Patch 80 -- small bordered/tinted box for sidebar caption text (see the
    Style-profile description call site) so it reads as a distinct piece of
    info like every other card/pill/chip in the app, not orphaned floating
@@ -2334,7 +2357,7 @@ if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
     st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 8 · Model v6.13</span></div>'
+                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 9 · Model v6.13</span></div>'
                 f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
@@ -7446,10 +7469,10 @@ with tab_league:
             _league_standings_idle.clear()
             _league_rivals.clear()
             st.session_state["league_loaded"] = True
-        if _lg["excluded"]:
-            st.markdown('<div class="side-note">Not offered: ' + html.escape("; ".join(
-                f"{x['name']} ({x['reason']})" for x in _lg["excluded"])) + '</div>', unsafe_allow_html=True)
         if not st.session_state.get("league_loaded"):
+            if _lg["excluded"]:
+                st.markdown('<div class="side-note">Not offered: ' + html.escape("; ".join(
+                    f"{x['name']} ({x['reason']})" for x in _lg["excluded"])) + '</div>', unsafe_allow_html=True)
             st.markdown('<div class="side-note">Press "Load my leagues" to read the standings and your rivals\' squads. '
                         'Nothing is fetched before that.</div>', unsafe_allow_html=True)
         else:
@@ -7479,66 +7502,20 @@ with tab_league:
                     _n_mem = _lgi["members"] or len(_res)
                     _cov, _dif = float(_lv.get("cover_share", 0.5)), float(_lv.get("differential_share", 0.2))
                     _fetched = _LEAGUE_STATS["calls"] - _calls0
-                    st.markdown('<div class="side-note">Standings as of ' + html.escape(str(_std.get("updated") or "?")) +
-                                f' \u00b7 rivals\' squads: GW{int(snap.current_gw)} \u00b7 {_fetched} calls this run '
-                                f'(cached ones are not counted) \u00b7 loaded in {time.perf_counter() - _t_lg:.1f} s</div>',
-                                unsafe_allow_html=True)
-                    _place = recommend.league_place_line(_rows, int(entry_id), _n_mem)
-                    st.markdown('<div class="section-h">Your place</div>', unsafe_allow_html=True)
-                    if _place:
-                        _me = next((r for r in _rows if r["You"]), None)
-                        _lead = next((r for r in _rows if not r["You"]), None)
-                        _proj_line = ""
-                        if _me and _lead and _me.get("Next xPts") is not None and _lead.get("Next xPts") is not None:
-                            _gap_now = _lead["Total"] - _me["Total"]
-                            _gap_then = _gap_now + (_lead["Next xPts"] - _me["Next xPts"])
-                            if _me["Rank"] == 1:
-                                _nx = sorted((r for r in _rows if not r["You"]), key=lambda r: r["Rank"])[0]
-                                _gap_now = _me["Total"] - _nx["Total"]
-                                _gap_then = _gap_now + (_me["Next xPts"] - (_nx["Next xPts"] or 0.0))
-                                _proj_line = (f"Lead over {html.escape(_nx['Manager'])} after the next {len(_gws5)} GWs: "
-                                              f"{_gap_now:+d} \u2192 {_gap_then:+.0f} (estimate)")
-                            else:
-                                _proj_line = (f"Gap to {html.escape(_lead['Manager'])} after the next {len(_gws5)} GWs, squads as "
-                                              f"they stand: {_gap_now} \u2192 {_gap_then:.0f} (estimate, no transfers assumed)")
-                        st.markdown("<div class='side-note'><b>" + html.escape(_place) + "</b>" +
-                                    (("<br>" + _proj_line) if _proj_line else "") + "</div>", unsafe_allow_html=True)
+                    _fetched = _LEAGUE_STATS["calls"] - _calls0
+                    _ahead = [r for r in _rows if (r["Vs you"] or 0) > 0]
+                    _ahead = sorted(_ahead, key=lambda r: r["Total"])[:int(_lv.get("ahead_n", 5))]
+                    # 1) the answer in three cards
+                    st.markdown(recommend.lg_verdict_html(recommend.league_verdict(_rows, int(entry_id), _n_mem, len(_gws5)),
+                                                          _lgi["name"]), unsafe_allow_html=True)
+                    # 2) standings as bars
                     st.markdown('<div class="section-h">Standings</div>', unsafe_allow_html=True)
-                    _sdf = pd.DataFrame([{k: v for k, v in r.items() if k not in ("You", "entry")} for r in _rows])
-                    _sdf.insert(1, "", ["\u25b6" if r["You"] else "" for r in _rows])
-                    _df(_sdf, hide_index=True, width="stretch")
-                    if _riv.get("failed"):
-                        st.markdown('<div class="side-note">Squads not readable for %d manager(s); they are left out of the '
-                                    'counts.</div>' % len(_riv["failed"]), unsafe_allow_html=True)
-                    # your squad against the league
+                    st.markdown(recommend.lg_standings_html(_rows, int(entry_id), top_n=10), unsafe_allow_html=True)
+                    # 3) your squad against the league
                     _cnt, _nr = recommend.rival_ownership(_picks, int(entry_id))
                     _my_ids = set(int(i) for i in squad_df["id"]) if "id" in squad_df.columns else set()
                     _name_by = dict(zip(proj["id"], proj["web_name"])) if {"id", "web_name"} <= set(proj.columns) else {}
-                    st.markdown('<div class="section-h">Your squad against this league</div>', unsafe_allow_html=True)
-                    _sq_rows = []
-                    for _i in sorted(_my_ids, key=lambda x: -_cnt.get(x, 0)):
-                        _sq_rows.append({"Player": _name_by.get(_i, str(_i)), "Owned by": f"{_cnt.get(_i, 0)} of {_nr}",
-                                         "Tag": recommend.ownership_tag(_cnt.get(_i, 0), _nr, _cov, _dif)})
-                    if _sq_rows:
-                        _df(pd.DataFrame(_sq_rows), hide_index=True, width="stretch")
-                    _exposed = [(_name_by.get(i, str(i)), c) for i, c in sorted(_cnt.items(), key=lambda t: -t[1])
-                                if i not in _my_ids and _nr and c / _nr >= _cov][:5]
-                    if _exposed:
-                        st.markdown('<div class="side-note">Exposed (rivals own them, you do not): ' + html.escape(
-                            ", ".join(f"{n} {c} of {_nr}" for n, c in _exposed)) + '</div>', unsafe_allow_html=True)
-                    # who to watch
-                    _ahead = [r for r in _rows if (r["Vs you"] or 0) > 0]
-                    _ahead = sorted(_ahead, key=lambda r: r["Total"])[:int(_lv.get("ahead_n", 5))]
-                    _w = recommend.who_to_watch(_picks, [r["entry"] for r in _ahead], _my_ids, proj, _gws5, int(_lv.get("watch_n", 3)))
-                    if _w:
-                        st.markdown('<div class="section-h">Who to watch (rivals ahead of you)</div>', unsafe_allow_html=True)
-                        for _r in _ahead:
-                            if _r["entry"] in _w and _w[_r["entry"]]:
-                                st.markdown("<div class='side-note'><b>" + html.escape(_r["Manager"]) + "</b>: " + html.escape(
-                                    ", ".join(f"{n} ({v:.1f} xPts)" for n, v in _w[_r["entry"]])) + " \u00b7 you own none of these</div>",
-                                            unsafe_allow_html=True)
-                    # league view of the model's own moves and chips
-                    st.markdown('<div class="section-h">League view \u00b7 estimate</div>', unsafe_allow_html=True)
+                    # the model's own moves seen through the league (needed for the edge box and the action cards)
                     _moves = []
                     try:
                         if rec.get("is_weekly_schedule"):
@@ -7554,19 +7531,36 @@ with tab_league:
                     _ahead_picks = {r["entry"]: _picks.get(r["entry"]) for r in _ahead}
                     _ahead_cnt, _na = recommend.rival_ownership({**_ahead_picks, int(entry_id): None}, int(entry_id))
                     _lens = recommend.league_lens(_moves, _cnt, _nr, _ahead_cnt, _na, _cov, _dif)
-                    if _lens:
-                        st.markdown('<div class="side-note">The model\'s own transfers, in the model\'s order, with their effect in this '
-                                    'league:</div>', unsafe_allow_html=True)
-                        for _m in _lens:
-                            st.markdown("<div class='side-note'><b>" + html.escape(f"{_m.get('out', '?')} \u2192 {_m.get('in', '?')}") +
-                                        "</b> \u00b7 " + html.escape(_m["lens"]) + "</div>", unsafe_allow_html=True)
-                    else:
-                        st.markdown('<div class="side-note">The model recommends no transfer this week, so there is nothing to compare.</div>',
-                                    unsafe_allow_html=True)
+                    _adds = [(m.get("in", "?"), m["lens_count"]) for m in _lens if m.get("lens_tag") == "differential"]
+                    st.markdown('<div class="section-h">Your squad against this league</div>', unsafe_allow_html=True)
+                    st.markdown(recommend.lg_squad_html([(_name_by.get(i, str(i)), _cnt.get(i, 0)) for i in _my_ids], _nr, _cov, _dif,
+                                                        adds=_adds), unsafe_allow_html=True)
+                    # 4) who to watch
+                    _w = recommend.who_to_watch(_picks, [r["entry"] for r in _ahead], _my_ids, proj, _gws5, int(_lv.get("watch_n", 3)))
+                    _watch_html = recommend.lg_watch_html(_ahead, _w)
+                    if _watch_html:
+                        st.markdown('<div class="section-h">Who to watch \u00b7 rivals ahead of you</div>', unsafe_allow_html=True)
+                        st.markdown(_watch_html, unsafe_allow_html=True)
+                    # 5) what to do
                     _my_left = recommend.chips_left(chips_played, planning_gw)
                     _ahead_chips = {r["entry"]: _chips_by.get(r["entry"]) for r in _ahead if r["entry"] in _chips_by}
-                    st.markdown('<div class="side-note">' + html.escape(recommend.league_chip_note(
-                        _my_left, _ahead_chips, (_final_chip_gw or {}).get("freehit"), globals().get("_fh_expiry"))) + '</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="section-h">What to do</div>', unsafe_allow_html=True)
+                    st.markdown(recommend.lg_actions_html(_lens, recommend.league_chip_card(
+                        _my_left, _ahead_chips, (_final_chip_gw or {}).get("freehit"), globals().get("_fh_expiry"))), unsafe_allow_html=True)
+                    # 6) technical lines, closed by default
+                    with st.expander("Data details", expanded=False):
+                        st.markdown('<div class="side-note">Standings as of ' + html.escape(str(_std.get("updated") or "?")) +
+                                    f' \u00b7 rivals\' squads: GW{int(snap.current_gw)} \u00b7 {_fetched} calls this run '
+                                    f'(cached ones are not counted) \u00b7 loaded in {time.perf_counter() - _t_lg:.1f} s</div>',
+                                    unsafe_allow_html=True)
+                        if _lg["excluded"]:
+                            st.markdown('<div class="side-note">Not offered: ' + html.escape("; ".join(
+                                f"{x['name']} ({x['reason']})" for x in _lg["excluded"])) + '</div>', unsafe_allow_html=True)
+                        if _riv.get("failed"):
+                            st.markdown('<div class="side-note">Squads not readable for %d manager(s); they are left out of the '
+                                        'counts.</div>' % len(_riv["failed"]), unsafe_allow_html=True)
+                        st.markdown('<div class="side-note">Gap after %d GWs is an estimate: squads as they stand, no transfers or chips '
+                                    'assumed.</div>' % len(_gws5), unsafe_allow_html=True)
                 _RT["league"] = time.perf_counter() - _t_lg
             except Exception as _e_lg:
                 st.markdown('<div class="side-note">The league view could not be built this run.</div>', unsafe_allow_html=True)

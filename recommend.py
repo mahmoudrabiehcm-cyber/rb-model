@@ -6219,7 +6219,8 @@ def league_lens(moves: list, counts: dict, n_rivals: int, ahead_counts: dict, n_
         tag = ownership_tag(c, n_rivals, cover, diff)
         lens = (f"{c} of {n_rivals} rivals own {m.get('in', '?')}: {tag}; {max(0, n_ahead - a)} of the {n_ahead} rivals ahead "
                 f"do not own him") if n_rivals else "no rival squads read"
-        out.append({**m, "lens": lens})
+        out.append({**m, "lens": lens, "lens_count": c, "lens_n": int(n_rivals), "lens_tag": tag,
+                    "lens_ahead_not": max(0, int(n_ahead) - a), "lens_ahead_n": int(n_ahead)})
     return out
 
 
@@ -6241,3 +6242,185 @@ def league_chip_note(my_left: list, ahead_chips: dict, fh_gw=None, fh_expiry=Non
             mine += (f" Your Free Hit window is GW{int(fh_expiry[0])}-GW{int(fh_expiry[1])}; the Free Hit card decides the "
                      f"week (M32).")
     return " ".join([mine] + parts)
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# R3 Patch 9: League tab, visuals first. These build small HTML blocks (every name escaped); the numbers are the Patch 8 ones.
+# ---------------------------------------------------------------------------------------------------------------------------
+def _esc(x) -> str:
+    import html as _h
+    return _h.escape(str(x), quote=True)
+
+
+def league_verdict(rows: list, my_entry: int, n_members: int, n_gws: int) -> dict:
+    """Headline numbers: place, gap to the leader (or lead over the next manager), and the gap after n_gws at current squads."""
+    me = next((r for r in rows if r["entry"] == int(my_entry)), None)
+    others = sorted((r for r in rows if r["entry"] != int(my_entry)), key=lambda r: r["Rank"])
+    if me is None or not others:
+        return {}
+    if me["Rank"] == 1:
+        ref = others[0]
+        gap_now = me["Total"] - ref["Total"]
+        then = None if me.get("Next xPts") is None or ref.get("Next xPts") is None else gap_now + (me["Next xPts"] - ref["Next xPts"])
+        return {"rank": me["Rank"], "n": int(n_members), "lead": ref["Manager"], "gap_now": gap_now, "gap_then": then,
+                "you_lead": True, "gws": int(n_gws)}
+    ref = others[0]
+    gap_now = ref["Total"] - me["Total"]
+    then = None if me.get("Next xPts") is None or ref.get("Next xPts") is None else gap_now + (ref["Next xPts"] - me["Next xPts"])
+    return {"rank": me["Rank"], "n": int(n_members), "lead": ref["Manager"], "gap_now": gap_now, "gap_then": then,
+            "you_lead": False, "gws": int(n_gws)}
+
+
+def lg_verdict_html(v: dict, league_name: str = "") -> str:
+    if not v:
+        return ""
+    if v["you_lead"]:
+        c2 = f'<div class="lg-big lg-acc">+{v["gap_now"]}</div><div class="lg-lbl">points ahead of {_esc(v["lead"])}</div>'
+        c3 = ("" if v["gap_then"] is None else
+              f'<div class="lg-big lg-acc">{v["gap_then"]:+.0f}</div><div class="lg-lbl">expected lead after {v["gws"]} GWs</div>')
+    else:
+        c2 = f'<div class="lg-big lg-red">\u2212{v["gap_now"]}</div><div class="lg-lbl">points behind {_esc(v["lead"])}</div>'
+        if v["gap_then"] is None:
+            c3 = ""
+        else:
+            g = round(v["gap_then"])
+            if g > 0:
+                c3 = f'<div class="lg-big lg-acc">\u2212{g}</div><div class="lg-lbl">expected gap after {v["gws"]} GWs</div>'
+            elif g == 0:
+                c3 = f'<div class="lg-big lg-acc">0</div><div class="lg-lbl">expected level with {_esc(v["lead"])} after {v["gws"]} GWs</div>'
+            else:
+                c3 = f'<div class="lg-big lg-acc">+{-g}</div><div class="lg-lbl">expected lead over {_esc(v["lead"])} after {v["gws"]} GWs</div>'
+    c1 = f'<div class="lg-big lg-gold">{_ord(v["rank"])} <span class="lg-of">of {v["n"]}</span></div><div class="lg-lbl">{_esc(league_name)}</div>'
+    cards = "".join(f'<div class="lg-card">{c}</div>' for c in (c1, c2, c3) if c)
+    return f'<div class="lg-cards">{cards}</div>'
+
+
+_CHIP_ORDER = ("WC", "FH", "BB", "TC")
+
+
+def _chip_pills(chips_str: str) -> str:
+    if chips_str == "?":
+        return '<span class="lg-pill off">?</span>'
+    have = set(str(chips_str).split())
+    return "".join(f'<span class="lg-pill {"on" if c in have else "off"}">{c}</span>' for c in _CHIP_ORDER)
+
+
+def lg_standings_html(rows: list, my_entry: int, top_n: int = 10) -> str:
+    srt = sorted(rows, key=lambda r: r["Rank"])
+    show = srt[:int(top_n)]
+    me = next((r for r in srt if r["entry"] == int(my_entry)), None)
+    gap = False
+    if me is not None and me not in show:
+        show = show + [me]
+        gap = True
+    if not show:
+        return ""
+    hi = max(r["Total"] for r in show)
+    lo_t = min(r["Total"] for r in show)
+    lo = max(0, int(lo_t - max(10, 0.5 * (hi - lo_t))))
+    span = max(1, hi - lo)
+    out = []
+    for i, r in enumerate(show):
+        if gap and r is me and i == len(show) - 1:
+            out.append('<div class="lg-gap">\u22ee</div>')
+        w = max(2.0, min(100.0, (r["Total"] - lo) / span * 100.0))
+        cls = "lg-row" + (" lg-me" if r["You"] else (" lg-lead" if r["Rank"] == 1 else ""))
+        d = r.get("Vs you")
+        if r["You"] or d is None:
+            tag = '<span class="lg-gold">you</span>' if r["You"] else ""
+        elif d > 0:
+            tag = f'<span class="lg-red">\u25b2 {d} ahead</span>'
+        elif d < 0:
+            tag = f'<span class="lg-acc">\u25bc {-d} behind</span>'
+        else:
+            tag = '<span class="lg-mut">level</span>'
+        crown = "\U0001F451 " if r["Rank"] == 1 else ""
+        out.append(f'<div class="{cls}"><span class="lg-rk">{r["Rank"]}</span><span class="lg-nm">{crown}{_esc(r["Manager"])}'
+                   f'{" (you)" if r["You"] else ""}</span><div class="lg-bar"><i style="width:{w:.0f}%"></i></div>'
+                   f'<span class="lg-pts">{r["Total"]}</span><span class="lg-rt">{tag}<br>{_chip_pills(r["Chips left"])}</span></div>')
+    out.append(f'<div class="lg-note">Chips lit = still held \u00b7 bars start at {lo} pts, not 0, so the gaps are visible</div>')
+    return "".join(out)
+
+
+def _dots(count: int, n: int, edge: bool = False) -> str:
+    n = max(1, int(n))
+    return '<div class="lg-dots">' + "".join(
+        f'<b class="lg-dot{" on" if j < int(count) else ""}{" gold" if edge else ""}"></b>' for j in range(n)) + "</div>"
+
+
+def lg_squad_html(items: list, n_rivals: int, cover: float, diff: float, adds=None) -> str:
+    """items = [(name, rivals owning him)]; adds = [(name, count)] for players the model's moves would bring in."""
+    if not n_rivals:
+        return ""
+    safe = [(n, c) for n, c in items if ownership_tag(c, n_rivals, cover, diff) == "covered"]
+    mid = [(n, c) for n, c in items if ownership_tag(c, n_rivals, cover, diff) == "shared"]
+    edge = [(n, c) for n, c in items if ownership_tag(c, n_rivals, cover, diff) == "differential"]
+
+    def lst(group, e=False):
+        return "".join(f'<div class="lg-pl"><span>{_esc(n)}</span>{_dots(c, n_rivals, e)}<span class="lg-n">{c}/{n_rivals}</span></div>'
+                       for n, c in sorted(group, key=lambda t: -t[1])[:8])
+    edge_body = lst(edge, True) if edge else '<div class="lg-mut">None in your squad.</div>'
+    if adds:
+        edge_body += '<div class="lg-sub">Model move would add</div>' + lst(adds, True)
+    return ('<div class="lg-two">'
+            f'<div class="lg-box"><div class="lg-sub">SAFE \u00b7 most of the league owns them</div>{lst(safe) or "<div class=lg-mut>None</div>"}</div>'
+            f'<div class="lg-box"><div class="lg-sub">IN BETWEEN</div>{lst(mid) or "<div class=lg-mut>None</div>"}</div>'
+            f'<div class="lg-box"><div class="lg-sub">YOUR EDGE \u00b7 few own them</div>{edge_body}</div></div>')
+
+
+def lg_watch_html(ahead_rows: list, watch: dict) -> str:
+    out = []
+    for r in ahead_rows:
+        pl = (watch or {}).get(r["entry"])
+        if not pl:
+            continue
+        chips = "".join(f'<span class="lg-chip">{_esc(n)} {v:.1f}</span>' for n, v in pl)
+        out.append(f'<div class="lg-w"><span>{_esc(r["Manager"])} <span class="lg-mut">\u25b2{r["Vs you"]}</span></span><span>{chips}</span></div>')
+    if not out:
+        return ""
+    return "".join(out) + '<div class="lg-note">Players you do not own. Number = model xPts, next GWs.</div>'
+
+
+def league_chip_card(my_left: list, ahead_chips: dict, fh_gw=None, fh_expiry=None) -> tuple:
+    names = {"WC": "Wildcard", "FH": "Free Hit", "BB": "Bench Boost", "TC": "Triple Captain"}
+    n = len(ahead_chips or {})
+    if not my_left:
+        return ("No chips left this half", "")
+    if "FH" in my_left:
+        if fh_gw is not None:
+            title = f"Free Hit planned GW{int(fh_gw)}"
+            sub = ""
+        else:
+            title = "Keep the Free Hit"
+            sub = f"Window GW{int(fh_expiry[0])}-{int(fh_expiry[1])}" if fh_expiry else ""
+        if n:
+            k = sum(1 for v in ahead_chips.values() if "FH" in (v or []))
+            sub = (sub + " \u00b7 " if sub else "") + f"{k} of {n} rivals ahead hold it"
+        return (title, sub)
+    c = my_left[0]
+    sub = ""
+    if n:
+        k = sum(1 for v in ahead_chips.values() if c in (v or []))
+        sub = f"{k} of {n} rivals ahead hold it"
+    return (f"You hold: {', '.join(names[x] for x in my_left)}", sub)
+
+
+def lg_actions_html(lens: list, chip_card: tuple) -> str:
+    cards = []
+    for m in (lens or []):
+        tag = m.get("lens_tag", "")
+        badge = {"differential": ("DIFFERENTIAL", ""), "covered": ("COVERED", "s"), "shared": ("SHARED", "s")}.get(tag, ("MOVE", "s"))
+        n, c = m.get("lens_n", 0), m.get("lens_count", 0)
+        ah = m.get("lens_ahead_n", 0)
+        ahead_txt = ""
+        if ah:
+            ahead_txt = " \u00b7 none of the %d rivals ahead" % ah if m.get("lens_ahead_not") == ah else f" \u00b7 {ah - m.get('lens_ahead_not', 0)} of {ah} rivals ahead"
+        sub = f"{c} of {n} own him{ahead_txt}" if n else "no rival squads read"
+        cards.append(f'<div class="lg-card lg-act{" " + badge[1] if badge[1] else ""}"><span class="lg-badge{" " + badge[1] if badge[1] else ""}">{badge[0]}</span>'
+                     f'<div class="lg-t">{_esc(m.get("out", "?"))} \u2192 {_esc(m.get("in", "?"))}</div><div class="lg-lbl">{_esc(sub)}</div></div>')
+    if not cards:
+        cards.append('<div class="lg-card lg-act s"><span class="lg-badge s">MOVE</span><div class="lg-t">No transfer this week</div></div>')
+    if chip_card:
+        cards.append(f'<div class="lg-card lg-act s"><span class="lg-badge s">CHIP</span><div class="lg-t">{_esc(chip_card[0])}</div>'
+                     f'<div class="lg-lbl">{_esc(chip_card[1])}</div></div>')
+    return '<div class="lg-acts">' + "".join(cards) + "</div>"
