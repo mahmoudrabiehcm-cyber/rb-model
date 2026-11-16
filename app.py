@@ -44,7 +44,8 @@ _RT = {}
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R3 Patch 7 (2026-11-15, manager report with rb_snapshot_gw11_4: no Free Hit week and no indication): the existing chip rules (M32(1), M32(5), M29(2), M32(3)) now apply the same way for any chip and any squad. (1) The chip scan always reaches the last week of the soonest-closing open chip window, so the expiry rule sees its weeks in a normal run (was GW15 at GW11). (2) The Free Hit gain scales BOTH sides by the squad's own decay (the one-sided factor read exactly 0.0 for every week after the first; M32(7)). (3) The Free Hit HOLD line names the best expiry-window week, its raw and after-forfeit figure and whether it clears the 2.0 floor. (4) The transfer planner is told the same Free Hit week the final plan has: the early estimate uses the card's own bar and expiry rule, and the planner is solved once more if the final week differs (it used to receive the raw scheduler week, a phantom GW14/GW15). Not validated: run time of the wider scan on a live account; the squad's own decay stands in for the rebuild squad's; one match per gameweek. "
+PATCH_VERSION = ("R3 Patch 8 (2026-11-15, manager go): (1) NEW tab League (private classic leagues with at most 40 managers, chosen from the manager's own entry; nothing is fetched until Load my leagues is pressed; standings cached 15 minutes while a fixture is live and 6 hours otherwise, rivals' picks and chips cached per finished gameweek): standings with gap to you and chips left, your place and the projected gap (estimate, no transfers assumed), your squad against the league (covered / shared / differential, exposed), who to watch among the rivals ahead, the model's own transfers with their league effect, and a chip note. Information only: no other tab changes. (2) Style Fit season-rank chart redrawn (Forest palette, axis zoomed to the data, best and latest labelled, one dashed line at the next milestone tier). Not validated: load time and API throttling from the live host (measured seconds are printed in the tab), rivals' current-gameweek picks before the deadline (the last finished gameweek is used), the cover / differential shares (estimates). "
+                 "R3 Patch 7 (2026-11-15, manager report with rb_snapshot_gw11_4: no Free Hit week and no indication): the existing chip rules (M32(1), M32(5), M29(2), M32(3)) now apply the same way for any chip and any squad. (1) The chip scan always reaches the last week of the soonest-closing open chip window, so the expiry rule sees its weeks in a normal run (was GW15 at GW11). (2) The Free Hit gain scales BOTH sides by the squad's own decay (the one-sided factor read exactly 0.0 for every week after the first; M32(7)). (3) The Free Hit HOLD line names the best expiry-window week, its raw and after-forfeit figure and whether it clears the 2.0 floor. (4) The transfer planner is told the same Free Hit week the final plan has: the early estimate uses the card's own bar and expiry rule, and the planner is solved once more if the final week differs (it used to receive the raw scheduler week, a phantom GW14/GW15). Not validated: run time of the wider scan on a live account; the squad's own decay stands in for the rebuild squad's; one match per gameweek. "
                  "R3 Patch 6 (2026-11-15, manager go, model rulings M124 / M111 / M130-M132): the app now derives, by itself and for any "
                  "player, (1) the injury-onset exclusion (INJ_AUTO) with the M111 flagged-before matches, and (2) the return after two "
                  "missed matches (M131: 0.42 / 0.56 first match back, then 0.59 / 0.65 / 0.60, then his own M52, unconfirmed under M54), "
@@ -1318,94 +1319,77 @@ def _signal_card(name: str, badge_text: str, badge_cls: str, stat: str, sub: str
 
 
 def build_season_rank_chart(rank_df: pd.DataFrame) -> alt.Chart:
-    """Patch 78 — Season Rank chart, rebuilt per manager request + the
-    dataviz skill's method (log scale for order-of-magnitude data, mark
-    specs, app-consistent color tokens). See the call site's comment block
-    (render_dashboard(), "Season Rank" section) for the full root-cause/
-    design story. Pulled out as its own module-level, independently
-    testable function (rather than built inline) specifically so
-    test_patch78_season_rank_chart.py can call it directly against
-    synthetic data without needing to exec a slice of render_dashboard().
+    """R3 Patch 8 -- Season Rank chart redrawn (manager: the old one "isn't looking good because of the visuals and the line").
+    Root causes of the old chart (rendered and checked): hard-coded navy colours that never followed the Forest palette, an axis
+    that always ran from rank 1 to the tier above the worst rank (the line sat in the bottom tenth), and crowded tier labels.
+    Now: Forest colours, a reversed LOG axis zoomed to the data (log is still the honest scale for ranks), plain tick labels
+    (1.0M, 1.5M ...), the best and the latest rank labelled on the line, and the manager's tier ruler kept as ONE dashed gold line
+    at the next tier above the best rank (only when it is within reach). `rank_df` has "GW" (int) and "Overall rank" (int >= 1)."""
+    surf, rule, ink, mut, gold, acc = "#203129", "#3A5247", "#F4EEDD", "#B9C0DA", "#E0BE6A", "#5FD0A0"
+    d = rank_df.copy()
+    d["Overall rank"] = pd.to_numeric(d["Overall rank"], errors="coerce")
+    d = d.dropna(subset=["Overall rank"])
+    d = d[d["Overall rank"] >= 1]
+    if d.empty:
+        d = pd.DataFrame({"GW": [1], "Overall rank": [1]})
+    best, worst = float(d["Overall rank"].min()), float(d["Overall rank"].max())
+    tiers = [1, 1000, 10000, 50000, 100000, 500000, 1000000, 5000000, 10000000]
+    nxt = max((t for t in tiers if t < best), default=None)
+    near = nxt is not None and nxt > 1 and best / nxt <= 6.0
+    lo = float(nxt) if near else max(1.0, best / 1.5)
+    hi = max(worst * 1.25, lo * 1.5)
+    if hi <= lo:
+        hi = lo * 2
+    nice = [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000, 1000000, 1500000, 2000000, 3000000, 5000000, 10000000]
+    ticks = [t for t in nice if lo * 0.999 <= t <= hi]
+    while len(ticks) > 5:
+        ticks = ticks[::2]
+    if not ticks:
+        ticks = [int(lo), int(hi)]
+    sc = alt.Scale(type="log", domain=[lo, hi], reverse=True, nice=False)
 
-    `rank_df` must have exactly two columns, "GW" (int) and "Overall rank"
-    (int, >=1 — a log scale cannot include 0, and FPL overall rank is never
-    0 anyway). Returns a layered alt.Chart (area wash + line + points) with
-    a reversed log y-axis pinned to the manager's own named tiers."""
-    # Patch 80 (manager screenshot: "looking very bad, adjust and modify with
-    # a good standards" on this exact chart) -- root cause confirmed in code:
-    # domain_max used to be hardcoded to max(10_000_000, worst*1.05), i.e.
-    # ALWAYS pinned out to the 10M tier no matter how good the manager's rank
-    # actually is. For a manager sitting around 2.6M-3.2M (this account's
-    # real GW1-5 history), that meant ~90% of the chart's vertical space (the
-    # 1 -> 1,000,000 span) was dead space nobody's line ever visits, while
-    # the real trend line was squeezed into a thin sliver at the very bottom
-    # between the 1,000,000 and 10,000,000 gridlines -- which reads as "a
-    # nearly-empty chart with a flat line stuck to the floor," exactly what
-    # the screenshot showed. Fix: domain_max is now the SMALLEST named tier
-    # that's still above the worst rank actually seen (falling back to
-    # worst*1.05 only if the manager's rank is worse than every named tier),
-    # so the reference lines always bracket the real data tightly instead of
-    # a one-size-fits-all 10M ceiling. Added a 5,000,000 tier so a manager in
-    # the 1M-5M range (not yet top-1M, but nowhere near the full 10M+ player
-    # pool either) gets a sensibly-scaled chart too, not a 10x jump straight
-    # to 10M.
-    band_ticks = [1, 1000, 10000, 50000, 100000, 500000, 1000000, 5000000, 10000000]
-    worst = max(int(v) for v in rank_df["Overall rank"] if v is not None) if not rank_df.empty else 1
-    domain_max = next((t for t in band_ticks if t > worst), int(worst * 1.05))
-    tick_values = [t for t in band_ticks if t <= domain_max]
-    if tick_values[-1] != domain_max:
-        tick_values.append(domain_max)
+    def fmt(v):
+        v = float(v)
+        return ("%.2fM" % (v / 1e6)).replace("0M", "M") if v >= 1e6 else ("%dK" % round(v / 1e3) if v >= 1e3 else "%d" % v)
 
-    # Exact app CSS custom-property values (see the `:root{...}` block near
-    # the top of this file) -- not new colors, so the chart stays visually
-    # consistent with the rest of the app.
-    # Release 3 "Turf Green" retint (was the Release 2 teal values) -- kept
-    # as literal hex rather than reading st.markdown's injected CSS (Altair
-    # can't see page CSS custom properties; this function's own docstring
-    # already flagged these as "not new colors" pulled from :root, so they
-    # must be updated by hand here whenever :root's theme changes).
-    ink, ink_muted, rule = "#F4EEDD", "#B9C0DA", "#2E3862"
-    accent_strong, accent_tint, surface = "#5FD0A0", "#1E4A3C", "#1B2340"
-
-    log_scale = alt.Scale(type="log", domain=[1, domain_max], reverse=True, nice=False)
-
-    area = (
-        alt.Chart(rank_df)
-        .mark_area(
-            line=False, interpolate="monotone",
-            color=alt.Gradient(gradient="linear",
-                                stops=[alt.GradientStop(color=accent_tint, offset=0),
-                                       alt.GradientStop(color=surface, offset=1)],
-                                x1=1, x2=1, y1=1, y2=0),
-            opacity=0.55,
-        )
-        .encode(x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=log_scale))
-    )
-    line = (
-        alt.Chart(rank_df)
-        .mark_line(interpolate="monotone", strokeWidth=2, color=accent_strong)
-        .encode(
-            x=alt.X("GW:O", title="Gameweek",
-                     axis=alt.Axis(labelAngle=0, labelFontSize=13, titleFontSize=13, labelFontWeight=600,
-                                    labelColor=ink, titleColor=ink, domainColor=rule, tickColor=rule,
-                                    grid=False)),
-            y=alt.Y("Overall rank:Q", title="Overall rank", scale=log_scale,
-                     axis=alt.Axis(values=tick_values, format=",.0f", labelFontSize=12, titleFontSize=13,
-                                    labelColor=ink_muted, titleColor=ink, domainColor=rule, tickColor=rule,
-                                    grid=True, gridColor=rule, gridOpacity=0.9, gridDash=[1, 0])),
-        )
-    )
-    points = (
-        alt.Chart(rank_df)
-        .mark_point(filled=True, size=90, color=accent_strong, stroke=surface, strokeWidth=2)
-        .encode(
-            x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=log_scale),
-            tooltip=[alt.Tooltip("GW:O", title="GW"),
-                     alt.Tooltip("Overall rank:Q", title="Overall rank", format=",.0f")],
-        )
-    )
-    return ((area + line + points).properties(height=320, background=surface)
-             .configure_view(strokeWidth=0))
+    axis_y = alt.Axis(values=ticks, labelExpr="datum.value >= 1000000 ? format(datum.value/1000000, '.1f') + 'M' : "
+                      "(datum.value >= 1000 ? format(datum.value/1000, '.0f') + 'K' : datum.value)",
+                      labelColor=mut, titleColor=ink, domainColor=rule, tickColor=rule, grid=True, gridColor=rule,
+                      gridOpacity=0.6, labelFontSize=12, titleFontSize=12)
+    axis_x = alt.Axis(labelAngle=0, labelColor=ink, titleColor=ink, domainColor=rule, tickColor=rule, grid=False,
+                      labelFontSize=12, titleFontSize=12)
+    base = alt.Chart(d)
+    line = base.mark_line(strokeWidth=2.5, color=acc, interpolate="monotone").encode(
+        x=alt.X("GW:O", title="Gameweek", axis=axis_x),
+        y=alt.Y("Overall rank:Q", title="Overall rank (up is better)", scale=sc, axis=axis_y))
+    pts = base.mark_point(filled=True, size=55, color=acc, stroke=surf, strokeWidth=1.5).encode(
+        x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=sc),
+        tooltip=[alt.Tooltip("GW:O", title="GW"), alt.Tooltip("Overall rank:Q", title="Overall rank", format=",.0f")])
+    layers = []
+    if near:
+        layers.append(alt.Chart(pd.DataFrame({"y": [float(nxt)]})).mark_rule(color=gold, strokeDash=[4, 4], opacity=0.8)
+                      .encode(y=alt.Y("y:Q", scale=sc)))
+        layers.append(alt.Chart(pd.DataFrame({"y": [float(nxt)], "GW": [int(d["GW"].max())]}))
+                      .mark_text(align="right", dy=-8, dx=-4, color=gold, fontSize=11)
+                      .encode(x=alt.X("GW:O"), y=alt.Y("y:Q", scale=sc),
+                              text=alt.value("next milestone: top " + fmt(nxt).replace(".00", ""))))
+    bi = d["Overall rank"].idxmin()
+    li = d.index[-1]
+    brow, lrow = d.loc[[bi]], d.loc[[li]]
+    if bi == li:
+        layers.append(alt.Chart(brow).mark_text(dy=-12, color=gold, fontSize=12, fontWeight="bold")
+                      .encode(x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=sc),
+                              text=alt.value("best, now " + fmt(best))))
+    else:
+        layers.append(alt.Chart(brow).mark_text(dy=-12, color=gold, fontSize=12, fontWeight="bold")
+                      .encode(x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=sc), text=alt.value("best " + fmt(best))))
+        layers.append(alt.Chart(lrow).mark_text(dy=14, color=ink, fontSize=12)
+                      .encode(x=alt.X("GW:O"), y=alt.Y("Overall rank:Q", scale=sc),
+                              text=alt.value("now " + fmt(float(lrow["Overall rank"].iloc[0])))))
+    out = line + pts
+    for l in layers:
+        out = out + l
+    return out.properties(height=300, background=surf).configure_view(strokeWidth=0)
 
 
 def _flag_pill(text: str, tooltip: str = "") -> str:
@@ -1588,6 +1572,34 @@ def _fixture_baselines(season: str, current_gw: int, teams_df, cfg):
     match_xg, warn = fpl_data.fetch_team_match_xg(slug, finished_gws)
     baselines = data_pipeline.compute_team_fixture_baselines(cfg, match_xg, teams_df)
     return baselines, warn
+
+
+_LEAGUE_STATS = {"calls": 0}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _league_standings_live(league_id: int):
+    """R3 Patch 8: standings while a gameweek is live (15 minutes)."""
+    return fpl_data.fetch_league_standings(int(league_id))
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _league_standings_idle(league_id: int):
+    """R3 Patch 8: standings when no fixture is in play (6 hours)."""
+    return fpl_data.fetch_league_standings(int(league_id))
+
+
+def _league_standings(league_id: int, live: bool):
+    return (_league_standings_live if live else _league_standings_idle)(int(league_id))
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _league_rivals(entry_ids: tuple, gw: int):
+    """R3 Patch 8: rivals' picks of the last finished gameweek and their chip history. The key includes the gameweek, so a new
+    gameweek reads fresh data; finished-gameweek picks never change. The body runs only on a cache miss (counted)."""
+    r = fpl_data.fetch_rivals(entry_ids, int(gw))
+    _LEAGUE_STATS["calls"] += int(r.get("calls", 0))
+    return r
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -2322,7 +2334,7 @@ if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
     st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 7 · Model v6.13</span></div>'
+                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 8 · Model v6.13</span></div>'
                 f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
@@ -4253,9 +4265,9 @@ except Exception as _e_cc:
     cap_choice = {}
     print(f"[R2P6] captain picker skipped: {type(_e_cc).__name__}: {_e_cc}", file=sys.stderr)
 
-tab_pitch, tab_news, tab_transfers, tab_captain, tab_picks, tab_chips, tab_style = st.tabs(
+tab_pitch, tab_news, tab_transfers, tab_captain, tab_picks, tab_chips, tab_style, tab_league = st.tabs(
     ["⚽ Lineup", "🗞️ News", "🔄 Trades", "👑 Crown", "🏆 Top Picks",
-     "🎴 Power Cards", "🧠 Style Fit"])
+     "🎴 Power Cards", "🧠 Style Fit", "🏅 League"])
 
 with tab_captain:
     # Release 2's captaincy spotlight card, extracted out of the Pitch
@@ -7405,6 +7417,160 @@ with tab_picks:
     except Exception as _e_tp:
         st.caption("Top Picks unavailable this run.")
         print(f"[R3P4] top picks skipped: {type(_e_tp).__name__}: {_e_tp}", file=sys.stderr)
+
+# R3 Patch 8: League tab. Information only: it reads nothing from and changes nothing in the other tabs' recommendations. Nothing is
+# fetched until the "Load my leagues" button has been pressed (every tab's code runs on every rerun, so a fetch here would slow the app).
+with tab_league:
+    _lv = cfg.get("league_view") or {}
+    st.markdown('<div class="section-h">League</div>', unsafe_allow_html=True)
+    st.markdown('<div class="side-note">League view \u00b7 estimate. Nothing here changes the Lineup, Trades, Crown or Power Cards '
+                'recommendations.</div>', unsafe_allow_html=True)
+    try:
+        _lg = recommend.league_candidates(entry, int(_lv.get("max_members", 40)))
+    except Exception:
+        _lg = {"leagues": [], "excluded": []}
+    if not _lv.get("enabled", True):
+        st.markdown('<div class="side-note">League view is switched off in the config.</div>', unsafe_allow_html=True)
+    elif not _lg["leagues"]:
+        st.markdown('<div class="side-note">No private league with at most %d managers was found for this team.</div>'
+                    % int(_lv.get("max_members", 40)), unsafe_allow_html=True)
+    else:
+        _lg_opts = {f"{l['name']} \u00b7 {l['members'] if l['members'] is not None else '?'} managers": l for l in _lg["leagues"]}
+        _lg_sel = st.selectbox("Pick a league", list(_lg_opts), key="league_pick")
+        _lgi = _lg_opts[_lg_sel]
+        _b1, _b2 = st.columns(2)
+        if _b1.button("Load my leagues", key="league_load_btn"):
+            st.session_state["league_loaded"] = True
+        if _b2.button("Refresh now", key="league_refresh_btn"):
+            _league_standings_live.clear()
+            _league_standings_idle.clear()
+            _league_rivals.clear()
+            st.session_state["league_loaded"] = True
+        if _lg["excluded"]:
+            st.markdown('<div class="side-note">Not offered: ' + html.escape("; ".join(
+                f"{x['name']} ({x['reason']})" for x in _lg["excluded"])) + '</div>', unsafe_allow_html=True)
+        if not st.session_state.get("league_loaded"):
+            st.markdown('<div class="side-note">Press "Load my leagues" to read the standings and your rivals\' squads. '
+                        'Nothing is fetched before that.</div>', unsafe_allow_html=True)
+        else:
+            try:
+                _t_lg = time.perf_counter()
+                _calls0 = _LEAGUE_STATS["calls"]
+                _live = False
+                try:
+                    _fx = snap.fixtures
+                    _live = bool(((_fx.get("started") == True) & (_fx.get("finished") != True)).any())  # noqa: E712
+                except Exception:
+                    _live = False
+                _std = _league_standings(_lgi["id"], _live)
+                if not _std or not _std["results"]:
+                    st.markdown('<div class="side-note">The standings could not be read right now. Try Refresh now.</div>',
+                                unsafe_allow_html=True)
+                else:
+                    _res = _std["results"]
+                    _ents = tuple(sorted(int(r["entry"]) for r in _res))
+                    _riv = _league_rivals(_ents, int(snap.current_gw))
+                    _picks, _hist = _riv["picks"], _riv["history"]
+                    _hz = int(_lv.get("horizon_gws", 5))
+                    _gws5 = [g for g in range(int(planning_gw), int(planning_gw) + _hz) if f"xpts_gw{g}" in proj.columns]
+                    _chips_by = {e: recommend.chips_left((h or {}).get("chips"), planning_gw) for e, h in _hist.items()}
+                    _xp_by = {e: recommend.rival_xpts(pk, proj, _gws5) for e, pk in _picks.items()}
+                    _rows = recommend.league_standings_rows(_res, int(entry_id), _chips_by, _xp_by)
+                    _n_mem = _lgi["members"] or len(_res)
+                    _cov, _dif = float(_lv.get("cover_share", 0.5)), float(_lv.get("differential_share", 0.2))
+                    _fetched = _LEAGUE_STATS["calls"] - _calls0
+                    st.markdown('<div class="side-note">Standings as of ' + html.escape(str(_std.get("updated") or "?")) +
+                                f' \u00b7 rivals\' squads: GW{int(snap.current_gw)} \u00b7 {_fetched} calls this run '
+                                f'(cached ones are not counted) \u00b7 loaded in {time.perf_counter() - _t_lg:.1f} s</div>',
+                                unsafe_allow_html=True)
+                    _place = recommend.league_place_line(_rows, int(entry_id), _n_mem)
+                    st.markdown('<div class="section-h">Your place</div>', unsafe_allow_html=True)
+                    if _place:
+                        _me = next((r for r in _rows if r["You"]), None)
+                        _lead = next((r for r in _rows if not r["You"]), None)
+                        _proj_line = ""
+                        if _me and _lead and _me.get("Next xPts") is not None and _lead.get("Next xPts") is not None:
+                            _gap_now = _lead["Total"] - _me["Total"]
+                            _gap_then = _gap_now + (_lead["Next xPts"] - _me["Next xPts"])
+                            if _me["Rank"] == 1:
+                                _nx = sorted((r for r in _rows if not r["You"]), key=lambda r: r["Rank"])[0]
+                                _gap_now = _me["Total"] - _nx["Total"]
+                                _gap_then = _gap_now + (_me["Next xPts"] - (_nx["Next xPts"] or 0.0))
+                                _proj_line = (f"Lead over {html.escape(_nx['Manager'])} after the next {len(_gws5)} GWs: "
+                                              f"{_gap_now:+d} \u2192 {_gap_then:+.0f} (estimate)")
+                            else:
+                                _proj_line = (f"Gap to {html.escape(_lead['Manager'])} after the next {len(_gws5)} GWs, squads as "
+                                              f"they stand: {_gap_now} \u2192 {_gap_then:.0f} (estimate, no transfers assumed)")
+                        st.markdown("<div class='side-note'><b>" + html.escape(_place) + "</b>" +
+                                    (("<br>" + _proj_line) if _proj_line else "") + "</div>", unsafe_allow_html=True)
+                    st.markdown('<div class="section-h">Standings</div>', unsafe_allow_html=True)
+                    _sdf = pd.DataFrame([{k: v for k, v in r.items() if k not in ("You", "entry")} for r in _rows])
+                    _sdf.insert(1, "", ["\u25b6" if r["You"] else "" for r in _rows])
+                    _df(_sdf, hide_index=True, width="stretch")
+                    if _riv.get("failed"):
+                        st.markdown('<div class="side-note">Squads not readable for %d manager(s); they are left out of the '
+                                    'counts.</div>' % len(_riv["failed"]), unsafe_allow_html=True)
+                    # your squad against the league
+                    _cnt, _nr = recommend.rival_ownership(_picks, int(entry_id))
+                    _my_ids = set(int(i) for i in squad_df["id"]) if "id" in squad_df.columns else set()
+                    _name_by = dict(zip(proj["id"], proj["web_name"])) if {"id", "web_name"} <= set(proj.columns) else {}
+                    st.markdown('<div class="section-h">Your squad against this league</div>', unsafe_allow_html=True)
+                    _sq_rows = []
+                    for _i in sorted(_my_ids, key=lambda x: -_cnt.get(x, 0)):
+                        _sq_rows.append({"Player": _name_by.get(_i, str(_i)), "Owned by": f"{_cnt.get(_i, 0)} of {_nr}",
+                                         "Tag": recommend.ownership_tag(_cnt.get(_i, 0), _nr, _cov, _dif)})
+                    if _sq_rows:
+                        _df(pd.DataFrame(_sq_rows), hide_index=True, width="stretch")
+                    _exposed = [(_name_by.get(i, str(i)), c) for i, c in sorted(_cnt.items(), key=lambda t: -t[1])
+                                if i not in _my_ids and _nr and c / _nr >= _cov][:5]
+                    if _exposed:
+                        st.markdown('<div class="side-note">Exposed (rivals own them, you do not): ' + html.escape(
+                            ", ".join(f"{n} {c} of {_nr}" for n, c in _exposed)) + '</div>', unsafe_allow_html=True)
+                    # who to watch
+                    _ahead = [r for r in _rows if (r["Vs you"] or 0) > 0]
+                    _ahead = sorted(_ahead, key=lambda r: r["Total"])[:int(_lv.get("ahead_n", 5))]
+                    _w = recommend.who_to_watch(_picks, [r["entry"] for r in _ahead], _my_ids, proj, _gws5, int(_lv.get("watch_n", 3)))
+                    if _w:
+                        st.markdown('<div class="section-h">Who to watch (rivals ahead of you)</div>', unsafe_allow_html=True)
+                        for _r in _ahead:
+                            if _r["entry"] in _w and _w[_r["entry"]]:
+                                st.markdown("<div class='side-note'><b>" + html.escape(_r["Manager"]) + "</b>: " + html.escape(
+                                    ", ".join(f"{n} ({v:.1f} xPts)" for n, v in _w[_r["entry"]])) + " \u00b7 you own none of these</div>",
+                                            unsafe_allow_html=True)
+                    # league view of the model's own moves and chips
+                    st.markdown('<div class="section-h">League view \u00b7 estimate</div>', unsafe_allow_html=True)
+                    _moves = []
+                    try:
+                        if rec.get("is_weekly_schedule"):
+                            _w0 = [x for x in (rec.get("weekly_plan") or []) if x.get("gw") == planning_gw]
+                            _moves = list((_w0[0].get("moves") if _w0 else []) or [])
+                        else:
+                            _moves = list(rec.get("moves") or [])
+                    except Exception:
+                        _moves = []
+                    _id_by_code = dict(zip(proj["code"], proj["id"])) if {"code", "id"} <= set(proj.columns) else {}
+                    for _m in _moves:
+                        _m["id_in"] = _id_by_code.get(_m.get("in_code"))
+                    _ahead_picks = {r["entry"]: _picks.get(r["entry"]) for r in _ahead}
+                    _ahead_cnt, _na = recommend.rival_ownership({**_ahead_picks, int(entry_id): None}, int(entry_id))
+                    _lens = recommend.league_lens(_moves, _cnt, _nr, _ahead_cnt, _na, _cov, _dif)
+                    if _lens:
+                        st.markdown('<div class="side-note">The model\'s own transfers, in the model\'s order, with their effect in this '
+                                    'league:</div>', unsafe_allow_html=True)
+                        for _m in _lens:
+                            st.markdown("<div class='side-note'><b>" + html.escape(f"{_m.get('out', '?')} \u2192 {_m.get('in', '?')}") +
+                                        "</b> \u00b7 " + html.escape(_m["lens"]) + "</div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown('<div class="side-note">The model recommends no transfer this week, so there is nothing to compare.</div>',
+                                    unsafe_allow_html=True)
+                    _my_left = recommend.chips_left(chips_played, planning_gw)
+                    _ahead_chips = {r["entry"]: _chips_by.get(r["entry"]) for r in _ahead if r["entry"] in _chips_by}
+                    st.markdown('<div class="side-note">' + html.escape(recommend.league_chip_note(
+                        _my_left, _ahead_chips, (_final_chip_gw or {}).get("freehit"), globals().get("_fh_expiry"))) + '</div>', unsafe_allow_html=True)
+                _RT["league"] = time.perf_counter() - _t_lg
+            except Exception as _e_lg:
+                st.markdown('<div class="side-note">The league view could not be built this run.</div>', unsafe_allow_html=True)
+                print(f"[R3P8] league view skipped: {type(_e_lg).__name__}: {_e_lg}", file=sys.stderr)
 
 # R3 Patch 4: exclusion audit (diagnostics only; no decision reads it).
 try:

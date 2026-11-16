@@ -3434,3 +3434,14 @@ xm_rule70:
   share: 0.70
   start_minutes: 60
   long_minutes: 80
+
+
+# R3 Patch 8: League tab (information only; changes no recommendation). Thresholds are estimates, not model rulings.
+league_view:
+  enabled: true
+  max_members: 40          # private classic leagues with more managers are not offered (manager, 15 Nov 2026)
+  cover_share: 0.5         # a player owned by at least this share of rivals is "covered"
+  differential_share: 0.2  # owned by at most this share = "differential"
+  horizon_gws: 5           # next gameweeks used for the projected-gap and who-to-watch estimates
+  watch_n: 3               # players listed per rival ahead of you
+  ahead_n: 5               # nearest rivals ahead of you shown in "who to watch"

@@ -169,6 +169,49 @@ def fetch_entry_history_official(entry_id: int) -> Optional[dict]:
         return None
 
 
+def fetch_league_standings(league_id: int, page: int = 1) -> Optional[dict]:
+    """R3 Patch 8: one page of a classic league's standings (public, no auth). Returns {"name", "results", "has_next",
+    "page", "updated"} (updated = the API's own last_updated_data timestamp) or None when it cannot be read."""
+    r = _get(f"{FPL_API}/leagues-classic/{int(league_id)}/standings/?page_standings={int(page)}")
+    if r is None:
+        return None
+    try:
+        d = r.json()
+        st = d.get("standings") or {}
+        return {"name": (d.get("league") or {}).get("name", ""), "results": list(st.get("results") or []),
+                "has_next": bool(st.get("has_next")), "page": int(st.get("page") or page),
+                "updated": d.get("last_updated_data")}
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return None
+
+
+def fetch_rivals(entry_ids, gw: int, workers: int = 8) -> dict:
+    """R3 Patch 8: for each entry id, its picks for gameweek `gw` and its season history (chips), fetched side by side.
+    Returns {"picks": {id: payload}, "history": {id: payload}, "failed": [ids with no picks], "calls": int}. Never raises; an
+    entry whose picks cannot be read is listed in "failed" and is not counted as a rival by the callers."""
+    ids = [int(e) for e in entry_ids]
+    out = {"picks": {}, "history": {}, "failed": [], "calls": 0}
+
+    def one(e):
+        return e, fetch_entry_picks_official(e, gw), fetch_entry_history_official(e)
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, min(int(workers), len(ids) or 1))) as ex:
+            res = list(ex.map(one, ids))
+    except Exception:
+        res = [one(e) for e in ids]
+    out["calls"] = 2 * len(ids)
+    for e, pk, hs in res:
+        if pk is None:
+            out["failed"].append(e)
+            continue
+        out["picks"][e] = pk
+        if hs is not None:
+            out["history"][e] = hs
+    return out
+
+
 def fetch_event_live_official(gw: int) -> Optional[dict]:
     r = _get(f"{FPL_API}/event/{gw}/live/")
     if r is None:

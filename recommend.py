@@ -6063,3 +6063,181 @@ def align_planner_fh(chip_schedule: dict | None, final_fh_gw: int | None):
     if final_fh_gw is not None:
         cs["freehit_gw"] = int(final_fh_gw)
     return cs or None
+
+
+# ---------------------------------------------------------------------------
+# R3 Patch 8: League tab (pure helpers; no network, no model change). Everything here is display / information; it never feeds
+# xPts, transfers, chips or the captain pick.
+# ---------------------------------------------------------------------------
+def league_candidates(entry_payload: dict | None, max_members: int = 40) -> dict:
+    """Private classic leagues (type "x") from the entry payload, largest first (unknown size last), within `max_members`.
+    Returns {"leagues": [{id, name, members, rank}], "excluded": [{id, name, members, reason}]}. System leagues are not listed."""
+    cl = (((entry_payload or {}).get("leagues") or {}).get("classic")) or []
+    keep, drop = [], []
+    for l in cl:
+        if str(l.get("league_type", "")).lower() != "x":
+            continue
+        n = l.get("rank_count")
+        n = int(n) if n is not None else None
+        row = {"id": int(l["id"]), "name": str(l.get("name", "")), "members": n, "rank": l.get("entry_rank")}
+        if n is not None and n > int(max_members):
+            drop.append({**row, "reason": "%d managers (limit %d)" % (n, int(max_members))})
+        else:
+            keep.append(row)
+    keep.sort(key=lambda r: (-(r["members"] if r["members"] is not None else -1), r["name"]))
+    return {"leagues": keep, "excluded": drop}
+
+
+_CHIP_CODE = {"wildcard": "WC", "freehit": "FH", "bboost": "BB", "3xc": "TC"}
+
+
+def chips_left(chips_played, planning_gw: int, first_half_end: int = 19) -> list:
+    """Chips a manager still holds in the half that contains `planning_gw` (two sets per season: GW1-`first_half_end`, then the
+    rest). Order WC, FH, BB, TC."""
+    first = int(planning_gw) <= int(first_half_end)
+    used = set()
+    for c in (chips_played or []):
+        ev = c.get("event")
+        code = _CHIP_CODE.get(str(c.get("name", "")).lower())
+        if code is None or ev is None:
+            continue
+        if (int(ev) <= int(first_half_end)) == first:
+            used.add(code)
+    return [c for c in ("WC", "FH", "BB", "TC") if c not in used]
+
+
+def rival_ownership(picks_by_entry: dict, my_entry: int) -> tuple:
+    """({element id: number of rivals owning him}, number of rivals with readable picks). Rivals = every entry except mine."""
+    counts, n = {}, 0
+    for e, pk in (picks_by_entry or {}).items():
+        if int(e) == int(my_entry) or not pk:
+            continue
+        n += 1
+        for p in (pk.get("picks") or []):
+            counts[int(p["element"])] = counts.get(int(p["element"]), 0) + 1
+    return counts, n
+
+
+def ownership_tag(count: int, n_rivals: int, cover: float = 0.5, diff: float = 0.2) -> str:
+    """covered (at least `cover` of rivals own him), differential (at most `diff`), else shared. Thresholds are estimates."""
+    if not n_rivals:
+        return "n/a"
+    share = float(count) / float(n_rivals)
+    if share >= cover - 1e-9:
+        return "covered"
+    if share <= diff + 1e-9:
+        return "differential"
+    return "shared"
+
+
+def rival_xpts(picks: dict | None, proj: pd.DataFrame, gws) -> float | None:
+    """Model xPts of a rival's latest squad over `gws`, no transfers assumed: the first 11 pick positions play, the captain
+    multiplier applies. None when the picks are unreadable. An estimate: the rival's own future moves are unknown."""
+    if not picks or not picks.get("picks") or proj is None or "id" not in proj.columns:
+        return None
+    ps = sorted(picks["picks"], key=lambda p: int(p.get("position", 99)))[:11]
+    idx = proj.drop_duplicates("id").set_index("id")
+    tot = 0.0
+    for g in gws:
+        col = f"xpts_gw{g}"
+        if col not in idx.columns:
+            continue
+        for p in ps:
+            el = int(p["element"])
+            if el in idx.index and pd.notna(idx.at[el, col]):
+                tot += float(idx.at[el, col]) * max(1, int(p.get("multiplier", 1) or 1))
+    return tot
+
+
+def _ord(n: int) -> str:
+    n = int(n)
+    suf = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suf}"
+
+
+def league_standings_rows(results: list, my_entry: int, chips_by_entry: dict, xpts_by_entry: dict) -> list:
+    """Table rows from a standings page. "Vs you" = their total minus yours (positive = ahead of you)."""
+    mine = next((r for r in results if int(r.get("entry", -1)) == int(my_entry)), None)
+    my_total = int(mine["total"]) if mine else None
+    rows = []
+    for r in results:
+        e = int(r["entry"])
+        ch = (chips_by_entry or {}).get(e)
+        xp = (xpts_by_entry or {}).get(e)
+        rows.append({"Rank": int(r["rank"]), "Manager": str(r.get("player_name", "")), "Team": str(r.get("entry_name", "")),
+                     "GW pts": int(r.get("event_total", 0) or 0), "Total": int(r["total"]),
+                     "Vs you": (int(r["total"]) - my_total) if my_total is not None else None,
+                     "Chips left": ("?" if ch is None else (" ".join(ch) if ch else "none")),
+                     "Next xPts": (None if xp is None else round(float(xp), 1)),
+                     "You": e == int(my_entry), "entry": e})
+    return rows
+
+
+def league_place_line(rows: list, my_entry: int, n_members: int) -> str:
+    me = next((r for r in rows if r["entry"] == int(my_entry)), None)
+    if me is None:
+        return ""
+    base = f"{_ord(me['Rank'])} of {int(n_members)} \u00b7 {me['Total']} pts"
+    others = [r for r in rows if r["entry"] != int(my_entry)]
+    if not others:
+        return base
+    if me["Rank"] == 1:
+        nxt = sorted(others, key=lambda r: r["Rank"])[0]
+        return f"{base} \u00b7 {me['Total'] - nxt['Total']} ahead of {nxt['Manager']} ({nxt['Total']})"
+    lead = sorted(others, key=lambda r: r["Rank"])[0]
+    return f"{base} \u00b7 {lead['Total'] - me['Total']} behind {lead['Manager']} ({lead['Total']})"
+
+
+def who_to_watch(picks_by_entry: dict, ahead_entries, my_ids: set, proj: pd.DataFrame, gws, n: int = 3) -> dict:
+    """For each rival ahead of you: their top players by model xPts over `gws` that you do not own."""
+    idx = proj.drop_duplicates("id").set_index("id")
+    out = {}
+    for e in ahead_entries:
+        pk = (picks_by_entry or {}).get(e)
+        if not pk:
+            continue
+        sc = []
+        for p in (pk.get("picks") or []):
+            el = int(p["element"])
+            if el in my_ids or el not in idx.index:
+                continue
+            v = sum(float(idx.at[el, f"xpts_gw{g}"]) for g in gws if f"xpts_gw{g}" in idx.columns and pd.notna(idx.at[el, f"xpts_gw{g}"]))
+            sc.append((str(idx.at[el, "web_name"]) if "web_name" in idx.columns else str(el), round(v, 2)))
+        sc.sort(key=lambda t: -t[1])
+        out[e] = sc[:int(n)]
+    return out
+
+
+def league_lens(moves: list, counts: dict, n_rivals: int, ahead_counts: dict, n_ahead: int, cover: float = 0.5,
+                diff: float = 0.2) -> list:
+    """The model's own moves, in the model's order, each with a league-effect text. Inputs are copied, never changed."""
+    out = []
+    for m in (moves or []):
+        el = m.get("id_in")
+        c = int((counts or {}).get(el, 0)) if el is not None else 0
+        a = int((ahead_counts or {}).get(el, 0)) if el is not None else 0
+        tag = ownership_tag(c, n_rivals, cover, diff)
+        lens = (f"{c} of {n_rivals} rivals own {m.get('in', '?')}: {tag}; {max(0, n_ahead - a)} of the {n_ahead} rivals ahead "
+                f"do not own him") if n_rivals else "no rival squads read"
+        out.append({**m, "lens": lens})
+    return out
+
+
+def league_chip_note(my_left: list, ahead_chips: dict, fh_gw=None, fh_expiry=None) -> str:
+    names = {"WC": "Wildcard", "FH": "Free Hit", "BB": "Bench Boost", "TC": "Triple Captain"}
+    n = len(ahead_chips or {})
+    parts = []
+    if n:
+        cnt = {c: sum(1 for v in ahead_chips.values() if c in (v or [])) for c in names}
+        held = [f"{names[c]} {k} of {n}" for c, k in cnt.items() if k]
+        parts.append("Rivals ahead still hold: " + (", ".join(held) if held else "no chips") + ".")
+    if not my_left:
+        return "No chips left for you this half. " + " ".join(parts)
+    mine = "You hold: " + ", ".join(names[c] for c in my_left) + "."
+    if "FH" in my_left:
+        if fh_gw is not None:
+            mine += f" Your Free Hit is planned for GW{int(fh_gw)}."
+        elif fh_expiry:
+            mine += (f" Your Free Hit window is GW{int(fh_expiry[0])}-GW{int(fh_expiry[1])}; the Free Hit card decides the "
+                     f"week (M32).")
+    return " ".join([mine] + parts)
