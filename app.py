@@ -44,7 +44,7 @@ _RT = {}
 # live data): a permanent, visible version stamp so that question is
 # answerable at a glance, without another round of screenshots. Bump this
 # with every patch that ships to the manager.
-PATCH_VERSION = ("R3 Patch 9 (2026-11-16, manager go): League tab redrawn visuals first: three number cards, standings as bars with chips lit or struck, ownership strips for your squad (safe / in between / your edge), rival chips, short action cards, and a closed Data details box; a font stack that covers Arabic names and symbols. Layout and wording only, the numbers and recommendations are the Patch 8 ones. Earlier, R3 Patch 8 (2026-11-15, manager go): (1) NEW tab League (private classic leagues with at most 40 managers, chosen from the manager's own entry; nothing is fetched until Load my leagues is pressed; standings cached 15 minutes while a fixture is live and 6 hours otherwise, rivals' picks and chips cached per finished gameweek): standings with gap to you and chips left, your place and the projected gap (estimate, no transfers assumed), your squad against the league (covered / shared / differential, exposed), who to watch among the rivals ahead, the model's own transfers with their league effect, and a chip note. Information only: no other tab changes. (2) Style Fit season-rank chart redrawn (Forest palette, axis zoomed to the data, best and latest labelled, one dashed line at the next milestone tier). Not validated: load time and API throttling from the live host (measured seconds are printed in the tab), rivals' current-gameweek picks before the deadline (the last finished gameweek is used), the cover / differential shares (estimates). "
+PATCH_VERSION = ("R3 Patch 10 (2026-11-16, manager go): (1) A free move that earns under 0.5 xPts in its own gameweek is postponed (the plan no longer spends two banked transfers on players who do not start yet; the M119 limit of 2.0 xPts forgone still ends the postponing; not at the cap, not for hits, not for unavailable players; estimate tier). (2) League tab: chance to finish 1st / top 3 / top 10 as a range, display only and labelled estimate (player-level simulation, rivals keep their squads, no chips). Earlier, R3 Patch 9 (2026-11-16, manager go): League tab redrawn visuals first: three number cards, standings as bars with chips lit or struck, ownership strips for your squad (safe / in between / your edge), rival chips, short action cards, and a closed Data details box; a font stack that covers Arabic names and symbols. Layout and wording only, the numbers and recommendations are the Patch 8 ones. Earlier, R3 Patch 8 (2026-11-15, manager go): (1) NEW tab League (private classic leagues with at most 40 managers, chosen from the manager's own entry; nothing is fetched until Load my leagues is pressed; standings cached 15 minutes while a fixture is live and 6 hours otherwise, rivals' picks and chips cached per finished gameweek): standings with gap to you and chips left, your place and the projected gap (estimate, no transfers assumed), your squad against the league (covered / shared / differential, exposed), who to watch among the rivals ahead, the model's own transfers with their league effect, and a chip note. Information only: no other tab changes. (2) Style Fit season-rank chart redrawn (Forest palette, axis zoomed to the data, best and latest labelled, one dashed line at the next milestone tier). Not validated: load time and API throttling from the live host (measured seconds are printed in the tab), rivals' current-gameweek picks before the deadline (the last finished gameweek is used), the cover / differential shares (estimates). "
                  "R3 Patch 7 (2026-11-15, manager report with rb_snapshot_gw11_4: no Free Hit week and no indication): the existing chip rules (M32(1), M32(5), M29(2), M32(3)) now apply the same way for any chip and any squad. (1) The chip scan always reaches the last week of the soonest-closing open chip window, so the expiry rule sees its weeks in a normal run (was GW15 at GW11). (2) The Free Hit gain scales BOTH sides by the squad's own decay (the one-sided factor read exactly 0.0 for every week after the first; M32(7)). (3) The Free Hit HOLD line names the best expiry-window week, its raw and after-forfeit figure and whether it clears the 2.0 floor. (4) The transfer planner is told the same Free Hit week the final plan has: the early estimate uses the card's own bar and expiry rule, and the planner is solved once more if the final week differs (it used to receive the raw scheduler week, a phantom GW14/GW15). Not validated: run time of the wider scan on a live account; the squad's own decay stands in for the rebuild squad's; one match per gameweek. "
                  "R3 Patch 6 (2026-11-15, manager go, model rulings M124 / M111 / M130-M132): the app now derives, by itself and for any "
                  "player, (1) the injury-onset exclusion (INJ_AUTO) with the M111 flagged-before matches, and (2) the return after two "
@@ -919,6 +919,9 @@ html, body, [class*="css"]{ font-family:"IBM Plex Sans",sans-serif; color:var(--
 .lg-chip{ display:inline-block; background:#2a3d34; border:1px solid var(--rule); border-radius:12px; padding:2px 9px; font-size:12px; margin:2px 4px 2px 0; }
 .lg-act{ border-left:4px solid var(--gold); } .lg-act.s{ border-left-color:var(--accent); }
 .lg-badge{ font-size:11px; padding:2px 8px; border-radius:9px; background:var(--gold); color:#222; font-weight:600; } .lg-badge.s{ background:var(--accent); }
+.lg-od{ display:grid; grid-template-columns:96px 1fr 72px; gap:10px; align-items:center; margin:7px 0; font-family:"IBM Plex Sans","Noto Sans","Noto Sans Arabic",sans-serif; font-size:14px; }
+.lg-odbar{ position:relative; } .lg-odbar i{ position:absolute; left:0; top:0; background:var(--gold); } .lg-odbar u{ position:absolute; top:0; height:100%; background:rgba(224,190,106,.35); border-radius:7px; z-index:1; }
+.lg-odv{ text-align:right; font-weight:600; color:var(--gold); }
 .lg-t{ margin:8px 0 2px; font-size:16px; } .lg-note{ font-size:12px; color:var(--ink-faint); margin-top:6px; }
 @media (max-width:700px){ .lg-row{ grid-template-columns:24px 1fr 44px; } .lg-row .lg-bar,.lg-row .lg-rt{ grid-column:2 / 4; } .lg-w{ grid-template-columns:1fr; } }
 
@@ -2357,7 +2360,7 @@ if not st.session_state.unlocked:
     st.markdown('<div style="max-width:420px; margin:14vh auto 0; text-align:center;">', unsafe_allow_html=True)
     st.markdown(f'<div class="brand-row" style="justify-content:center;">{_CREST_SVG}'
                 f'<div class="brand-mark">RB <span class="b2">Model</span></div></div>'
-                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 9 · Model v6.13</span></div>'
+                f'<div style="text-align:center;"><span class="rel-badge">R3 · Edition 10 · Model v6.13</span></div>'
                 f'<p style="margin:22px 0 14px; color:var(--ink-muted);">Enter your FPL team ID to begin.</p>',
                 unsafe_allow_html=True)
     entry_input = st.text_input("Team ID", placeholder="e.g. 26073", label_visibility="collapsed")
@@ -7505,16 +7508,6 @@ with tab_league:
                     _fetched = _LEAGUE_STATS["calls"] - _calls0
                     _ahead = [r for r in _rows if (r["Vs you"] or 0) > 0]
                     _ahead = sorted(_ahead, key=lambda r: r["Total"])[:int(_lv.get("ahead_n", 5))]
-                    # 1) the answer in three cards
-                    st.markdown(recommend.lg_verdict_html(recommend.league_verdict(_rows, int(entry_id), _n_mem, len(_gws5)),
-                                                          _lgi["name"]), unsafe_allow_html=True)
-                    # 2) standings as bars
-                    st.markdown('<div class="section-h">Standings</div>', unsafe_allow_html=True)
-                    st.markdown(recommend.lg_standings_html(_rows, int(entry_id), top_n=10), unsafe_allow_html=True)
-                    # 3) your squad against the league
-                    _cnt, _nr = recommend.rival_ownership(_picks, int(entry_id))
-                    _my_ids = set(int(i) for i in squad_df["id"]) if "id" in squad_df.columns else set()
-                    _name_by = dict(zip(proj["id"], proj["web_name"])) if {"id", "web_name"} <= set(proj.columns) else {}
                     # the model's own moves seen through the league (needed for the edge box and the action cards)
                     _moves = []
                     try:
@@ -7528,6 +7521,28 @@ with tab_league:
                     _id_by_code = dict(zip(proj["code"], proj["id"])) if {"code", "id"} <= set(proj.columns) else {}
                     for _m in _moves:
                         _m["id_in"] = _id_by_code.get(_m.get("in_code"))
+                    # 1) the answer in three cards
+                    st.markdown(recommend.lg_verdict_html(recommend.league_verdict(_rows, int(entry_id), _n_mem, len(_gws5)),
+                                                          _lgi["name"]), unsafe_allow_html=True)
+                    # R3 Patch 10: chance to finish 1st / top 3 / top 10 (display only, estimate; nothing else reads it)
+                    try:
+                        _sw = [(_id_by_code.get(m.get("out_code")), m.get("id_in")) for m in _moves]
+                        _sw = [(int(o), int(i)) for o, i in _sw if o is not None and i is not None]
+                        _odds = recommend.league_win_odds({int(r["entry"]): int(r["Total"]) for r in _rows}, _picks, int(entry_id), proj,
+                                                          int(planning_gw), cfg, swaps=_sw or None)
+                        _odds_html = recommend.lg_odds_html(_odds, ", ".join(f"{m.get('out', '?')} \u2192 {m.get('in', '?')}" for m in _moves))
+                        if _odds_html:
+                            st.markdown('<div class="section-h">Your chances</div>', unsafe_allow_html=True)
+                            st.markdown(_odds_html, unsafe_allow_html=True)
+                    except Exception as _e_od:
+                        print(f"[R3P10] odds skipped: {type(_e_od).__name__}: {_e_od}", file=sys.stderr)
+                    # 2) standings as bars
+                    st.markdown('<div class="section-h">Standings</div>', unsafe_allow_html=True)
+                    st.markdown(recommend.lg_standings_html(_rows, int(entry_id), top_n=10), unsafe_allow_html=True)
+                    # 3) your squad against the league
+                    _cnt, _nr = recommend.rival_ownership(_picks, int(entry_id))
+                    _my_ids = set(int(i) for i in squad_df["id"]) if "id" in squad_df.columns else set()
+                    _name_by = dict(zip(proj["id"], proj["web_name"])) if {"id", "web_name"} <= set(proj.columns) else {}
                     _ahead_picks = {r["entry"]: _picks.get(r["entry"]) for r in _ahead}
                     _ahead_cnt, _na = recommend.rival_ownership({**_ahead_picks, int(entry_id): None}, int(entry_id))
                     _lens = recommend.league_lens(_moves, _cnt, _nr, _ahead_cnt, _na, _cov, _dif)

@@ -2750,6 +2750,8 @@ transfer:
   # Team Rating %) — those are whole-squad ongoing-quality assessments, not a
   # specific transfer's marginal net gain, and keep full bench weight.
   bench_weight_non_bb_gw: 0.08
+  postpone_zero_gain_free_moves: true   # R3 Patch 10 (manager): a free move that earns under the bar in its own gameweek waits (estimate tier; M119 limit 2.0 applies)
+  postpone_gain_now_bar: 0.5            # xPts in the move's own gameweek below which it is postponed (estimate)
   # R2 Patch 33 (model ruling M128/M129, 12 Nov 2026): the net-gain baseline counts the OUTGOING player's OWN projection in full at
   # every xM tier (his xPts already contain xM; zeroing one side biased every swap toward selling). false = M128 (default).
   # true restores Patch 36 exactly (a rotation / bench-risk OUT candidate is zeroed). The zeroed figure is still computed and
@@ -3440,6 +3442,7 @@ xm_rule70:
 league_view:
   enabled: true
   max_members: 40          # private classic leagues with more managers are not offered (manager, 15 Nov 2026)
+  win_prob: {enabled: true, sims: 5000, var_per_xpt: 2.7, spread_band: 0.25, seed: 20261116, extrapolate_last_n: 5, last_gw: 38}   # R3 Patch 10: display only, estimate tier; var_per_xpt (player-points variance per xPt) and spread_band are NOT backtested
   cover_share: 0.5         # a player owned by at least this share of rivals is "covered"
   differential_share: 0.2  # owned by at most this share = "differential"
   horizon_gws: 5           # next gameweeks used for the projected-gap and who-to-watch estimates

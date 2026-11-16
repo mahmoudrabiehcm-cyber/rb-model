@@ -2233,6 +2233,25 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 week_bench_only.append(k)
         viable = [k for k in viable if k == 0 or k not in week_bench_only]
         chosen_k = min(viable) if viable else 0
+        # R3 Patch 10 (manager: "why consume 2 free transfers early ... risk one of my players gets injured"): a free move that
+        # earns (almost) nothing in THIS gameweek is postponed. Waiting costs nothing now and keeps the banked transfer for injury
+        # news; the xPts forgone are counted in forgone_cum and the M119 limit (2.0) ends the postponing. Not at the cap, not for a
+        # hit, not when every outgoing player is barely available (M119 exemption). Estimate tier; config transfer.postpone_*.
+        _deferred = None
+        try:
+            _tcfg = (cfg.get("transfer", {}) if cfg else {})
+            if (bool(_tcfg.get("postpone_zero_gain_free_moves", True)) and chosen_k > 0 and not cap_forced
+                    and candidates[chosen_k]["hit_cost"] == 0 and ft_bank < transfers.MAX_BANK
+                    and not _m119_out_exempt(sim_squad, candidates[chosen_k]["squad"], list(range(gw, gw + 3)))):
+                _g1p = remaining_gws[:1]
+                _now = (opt.realized_horizon_value(candidates[chosen_k]["squad"], _g1p, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+                        - opt.realized_horizon_value(sim_squad, _g1p, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw))
+                if _now < float(_tcfg.get("postpone_gain_now_bar", 0.5)) and forgone_cum + max(0.0, _now) <= M119_FORGONE_LIMIT:
+                    _deferred = {"k": chosen_k, "now": round(float(_now), 2), "net": candidates[chosen_k]["net_gain"],
+                                 "pairs": _pair_moves(sim_squad, candidates[chosen_k]["squad"], this_gw_col)}
+                    viable, chosen_k = [0], 0
+        except Exception:
+            _deferred = None
         chosen = candidates[chosen_k]
 
         # Patch 41 — same position tie-break as the single-decision path
@@ -2290,7 +2309,12 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                        - opt.realized_horizon_value(sim_squad, _g1, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw))
                 except Exception:
                     pass
-            plan.append(f"GW{gw}: Roll — " + roll_reason_text(_bfn, meaningful_bar, False, forgone_cum))
+            if _deferred:
+                _mv = ", ".join(f"{p['out']} \u2192 {p['in']}" for p in _deferred["pairs"])
+                plan.append(f"GW{gw}: Roll — {_mv} nets {_deferred['net']:+.1f} over the horizon but earns {_deferred['now']:+.1f} in GW{gw} itself; "
+                            f"waiting costs nothing and keeps the transfer for injury news (cumulative xPts forgone: {forgone_cum:.1f}, limit {M119_FORGONE_LIMIT:.1f}).")
+            else:
+                plan.append(f"GW{gw}: Roll — " + roll_reason_text(_bfn, meaningful_bar, False, forgone_cum))
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
             # R2 Patch 23 (M103-M109): the same style tie-break the single-decision paths use, applied to the chosen week's
@@ -6424,3 +6448,129 @@ def lg_actions_html(lens: list, chip_card: tuple) -> str:
         cards.append(f'<div class="lg-card lg-act s"><span class="lg-badge s">CHIP</span><div class="lg-t">{_esc(chip_card[0])}</div>'
                      f'<div class="lg-lbl">{_esc(chip_card[1])}</div></div>')
     return '<div class="lg-acts">' + "".join(cards) + "</div>"
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# R3 Patch 10: chance to finish 1st / top 3 / top 10 in the League tab. DISPLAY ONLY, estimate tier: nothing reads it.
+# ---------------------------------------------------------------------------------------------------------------------------
+def apply_swaps_to_picks(picks: dict, swaps) -> dict:
+    """Copy of a picks payload with each (out element, in element) swapped in place (position and multiplier kept)."""
+    sw = {int(o): int(i) for o, i in (swaps or [])}
+    out = {**(picks or {}), "picks": [dict(p) for p in ((picks or {}).get("picks") or [])]}
+    for p in out["picks"]:
+        if int(p["element"]) in sw:
+            p["element"] = sw[int(p["element"])]
+    return out
+
+
+def league_win_odds(totals: dict, picks_by_entry: dict, my_entry: int, proj: pd.DataFrame, first_gw: int, cfg: dict,
+                    swaps=None):
+    """Chance to finish 1st / top 3 / top 10 among the entries in `totals`, from now to the season end.
+    Rival squads as they stand (first 11 pick positions, captain multiplier), no transfers and no chips (a disclosed simplification).
+    Each player's points over the remaining gameweeks are drawn once and shared by every manager who owns him; their mean is the model's
+    xPts (gameweeks past the last projected one use the mean of the last N projected) and their variance is var_per_xpt x mean. Weeks are
+    treated as independent, so the sum over the season is drawn directly. The range runs the spread at (1 -/+ spread_band).
+    `swaps` [(out element, in element)] adds a second run with those swaps made in YOUR squad (same random draws) -> "move" deltas.
+    Returns None when disabled, when your squad is unreadable, or when there is nothing to rank."""
+    wc = ((cfg or {}).get("league_view") or {}).get("win_prob") or {}
+    if not wc.get("enabled", True) or proj is None or "id" not in proj.columns:
+        return None
+    entries = [int(e) for e in (totals or {}) if (picks_by_entry or {}).get(e) and (picks_by_entry[e] or {}).get("picks")]
+    if int(my_entry) not in entries or len(entries) < 2:
+        return None
+    last_gw = int(wc.get("last_gw", 38))
+    gws = list(range(int(first_gw), last_gw + 1))
+    idx = proj.drop_duplicates("id").set_index("id")
+    known = [g for g in gws if f"xpts_gw{g}" in idx.columns]
+    if not known:
+        return None
+    n_last = max(1, int(wc.get("extrapolate_last_n", 5)))
+    tail_gws = known[-n_last:]
+    n_future = len(gws) - len(known)
+
+    def squad_of(e, sw=None):
+        pk = apply_swaps_to_picks(picks_by_entry[e], sw) if sw else picks_by_entry[e]
+        ps = sorted(pk["picks"], key=lambda p: int(p.get("position", 99)))[:11]
+        return [(int(p["element"]), max(1, int(p.get("multiplier", 1) or 1))) for p in ps]
+
+    base = {e: squad_of(e) for e in entries}
+    alt = squad_of(int(my_entry), swaps) if swaps else None
+    ids = sorted({i for s in base.values() for i, _ in s} | ({i for i, _ in alt} if alt else set()))
+    pos = {i: k for k, i in enumerate(ids)}
+    mu = np.zeros(len(ids))
+    for i in ids:
+        if i not in idx.index:
+            continue
+        kn = pd.to_numeric(idx.loc[i, [f"xpts_gw{g}" for g in known]], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        tl = pd.to_numeric(idx.loc[i, [f"xpts_gw{g}" for g in tail_gws]], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        mu[pos[i]] = kn.sum() + n_future * (tl.mean() if len(tl) else 0.0)
+    vpx = max(0.0, float(wc.get("var_per_xpt", 2.7)))
+    band = float(wc.get("spread_band", 0.25))
+    sims = int(wc.get("sims", 5000))
+    rng = np.random.default_rng(int(wc.get("seed", 20261116)))
+    z = rng.standard_normal((len(ids), sims))
+    noise = rng.random((len(entries), sims)) * 1e-6               # splits exact ties at random
+    my_row = entries.index(int(my_entry))
+
+    def weights(squads):
+        w = np.zeros((len(squads), len(ids)))
+        for r, s in enumerate(squads):
+            for i, m in s:
+                w[r, pos[i]] += m
+        return w
+
+    w_base = weights([base[e] for e in entries])
+    t0 = np.array([float(totals[e]) for e in entries])
+    w_alt = None
+    if alt:
+        w_alt = w_base.copy()
+        w_alt[my_row] = weights([alt])[0]
+
+    def probs(w, scale):
+        s = mu[:, None] + np.sqrt(vpx * np.maximum(mu, 0.0) * scale * scale)[:, None] * z
+        final = t0[:, None] + w @ s + noise
+        rank = 1 + (final > final[my_row][None, :]).sum(axis=0)
+        return {"first": float((rank <= 1).mean()), "top3": float((rank <= 3).mean()), "top10": float((rank <= 10).mean())}
+
+    lo_hi = [probs(w_base, 1.0 - band), probs(w_base, 1.0 + band)]
+    mid = probs(w_base, 1.0)
+    out = {k: (min(p[k] for p in lo_hi + [mid]), max(p[k] for p in lo_hi + [mid])) for k in ("first", "top3", "top10")}
+    out.update({"mid": mid, "move": None, "gws": len(gws), "known_to": max(known), "n": len(entries)})
+    if w_alt is not None:
+        m2 = probs(w_alt, 1.0)
+        out["move"] = {k: m2[k] - mid[k] for k in ("first", "top3", "top10")}
+    return out
+
+
+def _pct_txt(x: float) -> str:
+    if x >= 0.9995:
+        return "100%"
+    if x < 0.005:
+        return "<1%"
+    return f"{round(x * 100)}%"
+
+
+def _pct_range(lo: float, hi: float) -> str:
+    a, b = _pct_txt(lo), _pct_txt(hi)
+    return a if a == b else (f"{a[:-1]}–{b}" if a != "<1%" and a != "100%" else f"{a}–{b}")
+
+
+def lg_odds_html(odds, move_label: str = "") -> str:
+    if not odds:
+        return ""
+    rows = []
+    for key, lab in (("first", "1st"), ("top3", "top 3"), ("top10", "top 10")):
+        lo, hi = odds[key]
+        mid = odds["mid"][key]
+        rows.append(f'<div class="lg-od"><span class="lg-odl">Finish {lab}</span><div class="lg-bar lg-odbar">'
+                    f'<u style="left:{lo * 100:.1f}%;width:{max(0.8, (hi - lo) * 100):.1f}%"></u>'
+                    f'<i style="width:{max(0.4, mid * 100):.1f}%"></i></div><span class="lg-odv">{_pct_range(lo, hi)}</span></div>')
+    mv = odds.get("move")
+    line = ""
+    if mv is not None:
+        d = mv["first"] * 100
+        txt = "no visible change" if abs(d) < 0.5 else f"{d:+.0f} points to the 1st-place chance"
+        line = f'<div class="lg-note">Model move this week ({_esc(move_label)}): {txt}</div>'
+    note = (f'<div class="lg-note">Estimate · rivals keep their squads, no chips · {odds["gws"]} GWs to go, projected to GW{odds["known_to"]} '
+            f'then the recent average · range = spread ±25%</div>')
+    return '<div class="lg-odds">' + "".join(rows) + line + note + "</div>"
