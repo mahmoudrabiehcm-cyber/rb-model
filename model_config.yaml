@@ -3448,3 +3448,16 @@ league_view:
   horizon_gws: 5           # next gameweeks used for the projected-gap and who-to-watch estimates
   watch_n: 3               # players listed per rival ahead of you
   ahead_n: 5               # nearest rivals ahead of you shown in "who to watch"
+
+# R3 Patch 12 (M134, M137): weekly sheet age. The date comes from the sheet's sheet_asof column, then asof_fallback (a date typed here), never the file date.
+sheet:
+  stale_days: 14           # M25 / M134: clean-sheet cells and the sheet are old after 14 days (in days, not gameweeks)
+  asof_fallback: null      # e.g. "2026-11-17"; leave null once the sheet carries sheet_asof
+
+# R3 Patch 12 (M138-M140): goals-based clean-sheet formula for gameweeks the sheet has no value for. Constants are estimate tier.
+cs_formula:
+  enabled: true
+  k_prior: 10
+  k_cur: 1
+  clip_lo: 0.01
+  clip_hi: 0.95

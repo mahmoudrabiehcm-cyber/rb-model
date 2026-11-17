@@ -1419,3 +1419,217 @@ def wildcard_trigger_check(squad_df: pd.DataFrame, reachable_squads_by_gw: dict,
                   f"gap {cumulative_gap:.1f} xPts, for context only)")
     return {"active": active, "avg_rating_pct": avg_rating, "avg_gap_pct": avg_gap_pct,
             "cumulative_gap": cumulative_gap, "by_gw": by_gw, "reason": reason}
+
+
+# ---------------------------------------------------------------------------
+# R3 Patch 12 -- clean-sheet formula (M138-M140), sheet state and disclosure (M133-M137)
+# ---------------------------------------------------------------------------
+_CS_COLS = ["home_code", "away_code", "hg", "ag"]
+
+
+def cs_matches_from_fixtures(fixtures, teams) -> pd.DataFrame:
+    """Finished matches as (home_code, away_code, hg, ag), keyed on the stable team `code` (M138)."""
+    if fixtures is None or len(fixtures) == 0 or teams is None or "code" not in teams.columns:
+        return pd.DataFrame(columns=_CS_COLS)
+    f = fixtures.copy()
+    if "finished" in f.columns:
+        f = f[f["finished"] == True]                                                    # noqa: E712
+    f = f.dropna(subset=["team_h_score", "team_a_score"])
+    idx = dict(zip(teams["id"], teams["code"])) if "id" in teams.columns else dict(zip(teams.index, teams["code"]))
+    out = pd.DataFrame({"home_code": f["team_h"].map(idx), "away_code": f["team_a"].map(idx),
+                        "hg": pd.to_numeric(f["team_h_score"]), "ag": pd.to_numeric(f["team_a_score"])})
+    return out.dropna().reset_index(drop=True)
+
+
+def cs_promoted_prior(seasons) -> dict | None:
+    """M139: goals for / against per match of clubs promoted in each season (clubs absent from the season before),
+    relative to that season's league mean, averaged over team-seasons. `seasons` = [(label, matches_df), ...] ascending."""
+    gf, ga = [], []
+    for i in range(1, len(seasons)):
+        prev, cur = seasons[i - 1][1], seasons[i][1]
+        if prev is None or cur is None or len(prev) == 0 or len(cur) == 0:
+            continue
+        before = set(prev["home_code"]) | set(prev["away_code"])
+        lg = (cur["hg"].sum() + cur["ag"].sum()) / (2 * len(cur))
+        for c in (set(cur["home_code"]) | set(cur["away_code"])) - before:
+            h, a = cur[cur["home_code"] == c], cur[cur["away_code"] == c]
+            n = len(h) + len(a)
+            if n:
+                gf.append((h["hg"].sum() + a["ag"].sum()) / n / lg)
+                ga.append((h["ag"].sum() + a["hg"].sum()) / n / lg)
+    if not gf:
+        return None
+    return {"gf_rel": float(np.mean(gf)), "ga_rel": float(np.mean(ga)), "n": len(gf)}
+
+
+def cs_build_ratings(prior: pd.DataFrame, cur: pd.DataFrame, promoted: dict | None = None,
+                      k_prior: float = 10.0, k_cur: float = 1.0) -> dict:
+    """M138-M139: goals-based ratings per club code. rate = (k_prior * prior rate + k_cur * current goals) /
+    (k_prior + k_cur * matches played), for goals for and against. League mean, home advantage (sqrt of the prior
+    season's home/away goal ratio) and the prior-season clean-sheet rate (the rescale target) come from the prior season."""
+    prior = prior if prior is not None else pd.DataFrame(columns=_CS_COLS)
+    cur = cur if cur is not None else pd.DataFrame(columns=_CS_COLS)
+    lg = (prior["hg"].sum() + prior["ag"].sum()) / (2 * len(prior)) if len(prior) else 1.35
+    hadv = (prior["hg"].sum() / prior["ag"].sum()) ** 0.5 if len(prior) and prior["ag"].sum() > 0 else 1.0
+    target = (((prior["ag"] == 0).sum() + (prior["hg"] == 0).sum()) / (2 * len(prior))) if len(prior) else 0.255
+    prom = ((promoted["gf_rel"] * lg, promoted["ga_rel"] * lg) if promoted else (lg, lg))
+
+    def side(df):
+        d = {}
+        for c, f_, a_ in list(zip(df["home_code"], df["hg"], df["ag"])) + list(zip(df["away_code"], df["ag"], df["hg"])):
+            s = d.setdefault(int(c), [0.0, 0.0, 0])
+            s[0] += float(f_); s[1] += float(a_); s[2] += 1
+        return d
+    pr, cu = side(prior), side(cur)
+    rate = {}
+    for c in set(pr) | set(cu):
+        pf, pa = ((pr[c][0] / pr[c][2], pr[c][1] / pr[c][2]) if c in pr else prom)
+        gf, ga, n = cu.get(c, (0.0, 0.0, 0))
+        den = k_prior + k_cur * n
+        rate[c] = ((k_prior * pf + k_cur * gf) / den, (k_prior * pa + k_cur * ga) / den)
+    return {"lg": float(lg), "hadv": float(hadv), "target": float(target), "rate": rate,
+            "rate_promoted": prom, "k_prior": k_prior, "k_cur": k_cur}
+
+
+def cs_formula_vec(ratings: dict, team_code, opp_code, is_home) -> np.ndarray:
+    """Raw clean-sheet probability exp(-opponent expected goals): the opponent's attack times the club's defence,
+    with the venue factor (M16, M139). A club with no row takes the promoted-club prior."""
+    lg, hadv, rate, prom = ratings["lg"], ratings["hadv"], ratings["rate"], ratings["rate_promoted"]
+    t = np.asarray(team_code); o = np.asarray(opp_code); h = np.asarray(is_home).astype(bool)
+    out = np.full(len(t), np.nan)
+    for i in range(len(t)):
+        try:
+            tc, oc = int(t[i]), int(o[i])
+        except (TypeError, ValueError):
+            continue
+        fO = rate.get(oc, prom)[0]
+        aT = rate.get(tc, prom)[1]
+        lam = fO * aT / lg * ((1.0 / hadv) if h[i] else hadv)
+        out[i] = float(np.exp(-lam))
+    return out
+
+
+def cs_rescale(raw, target: float, lo: float = 0.01, hi: float = 0.95) -> np.ndarray:
+    raw = np.asarray(raw, dtype=float)
+    m = np.nanmean(raw) if raw.size else np.nan
+    if not np.isfinite(m) or m <= 0:
+        return raw
+    return np.clip(raw * (target / m), lo, hi)
+
+
+def cs_live_acceptance(formula: dict, market: dict, tol: float = 0.10) -> dict:
+    """M138 live criterion: Spearman >= 0.6, at least 2 of the market's top 3 in the formula's top 3, no club more than
+    `tol` apart (formula rescaled to the market mean). Thresholds are estimates."""
+    ks = [k for k in formula if k in market]
+    if len(ks) < 3:
+        return {"spearman": float("nan"), "top3_overlap": 0, "max_gap": float("nan"), "passes": False, "n": len(ks)}
+    f = pd.Series({k: float(formula[k]) for k in ks}); m = pd.Series({k: float(market[k]) for k in ks})
+    fr = f * (m.mean() / f.mean())
+    sp = float(f.rank().corr(m.rank()))
+    ov = len(set(f.sort_values(ascending=False).index[:3]) & set(m.sort_values(ascending=False).index[:3]))
+    gap = float((fr - m).abs().max())
+    return {"spearman": sp, "top3_overlap": ov, "max_gap": gap, "n": len(ks),
+            "passes": bool(sp >= 0.6 and ov >= 2 and gap <= tol)}
+
+
+def _utc(x):
+    try:
+        t = pd.Timestamp(x)
+        if pd.isna(t):
+            return None
+        return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    except (ValueError, TypeError):
+        return None
+
+
+def _first_date(df, col):
+    if df is None or len(df) == 0 or col not in df.columns:
+        return None
+    for v in df[col].dropna().tolist():
+        t = _utc(v)
+        if t is not None:
+            return t
+    return None
+
+
+def cs_sheet_state(overrides, now, cfg) -> dict:
+    """M134 / M137: how old the weekly sheet is. The date comes from the `sheet_asof` column, then the model_config.yaml
+    date, never the file date; neither -> 'unknown' and it counts as old. `cs_asof` ages the clean-sheet cells."""
+    sc = (cfg or {}).get("sheet", {}) or {}
+    stale = float(sc.get("stale_days", 14))
+    now = _utc(now) or pd.Timestamp.now(tz="UTC")
+    missing = overrides is None or len(overrides) == 0
+    asof, source = (None, None)
+    if not missing:
+        asof = _first_date(overrides, "sheet_asof")
+        source = "sheet_asof" if asof is not None else None
+        if asof is None and sc.get("asof_fallback"):
+            asof, source = _utc(sc.get("asof_fallback")), "config"
+    cs_asof = _first_date(overrides, "cs_asof") if not missing else None
+    cs_age = None if cs_asof is None else (now - cs_asof) / pd.Timedelta(days=1)
+    cs_expired = (cs_asof is None) or (cs_age > stale)
+    if missing:
+        return {"state": "missing", "is_old": True, "asof": None, "age_days": None, "source": None,
+                "cs_asof": None, "cs_age_days": None, "cs_expired": True, "stale_days": stale}
+    if asof is None:
+        return {"state": "unknown", "is_old": True, "asof": None, "age_days": None, "source": None,
+                "cs_asof": cs_asof, "cs_age_days": cs_age, "cs_expired": bool(cs_expired), "stale_days": stale}
+    age = int(np.floor((now - asof) / pd.Timedelta(days=1)))
+    old = ((now - asof) / pd.Timedelta(days=1)) > stale
+    return {"state": "old" if old else "current", "is_old": bool(old), "asof": asof, "age_days": age, "source": source,
+            "cs_asof": cs_asof, "cs_age_days": cs_age, "cs_expired": bool(cs_expired), "stale_days": stale}
+
+
+def cs_sheet_disclosure(overrides, players, planning_gw, now, cfg) -> dict:
+    """M136: the one line for the top of the Lineup tab plus the counts behind it."""
+    st = cs_sheet_state(overrides, now, cfg)
+    has_ov = overrides is not None and len(overrides) > 0
+    expired_cells = 0
+    if has_ov and st["cs_expired"] and players is not None and "code" in players.columns and "team" in players.columns:
+        team_of = dict(zip(players["code"], players["team"]))
+        cells = set()
+        for c in [c for c in overrides.columns if str(c).startswith("cs_pct_gw") and str(c)[9:].isdigit()]:
+            g = int(str(c)[9:])
+            if g >= planning_gw:
+                for code in overrides.loc[pd.to_numeric(overrides[c], errors="coerce").notna(), "player_code"]:
+                    if code in team_of:
+                        cells.add((team_of[code], g))
+        if "cs_pct_override" in overrides.columns:
+            gwc = pd.to_numeric(overrides["cs_gw"], errors="coerce") if "cs_gw" in overrides.columns \
+                else pd.Series(float(planning_gw), index=overrides.index)
+            ok = pd.to_numeric(overrides["cs_pct_override"], errors="coerce").notna() & (gwc >= planning_gw)
+            for code, g in zip(overrides.loc[ok, "player_code"], gwc[ok]):
+                if code in team_of:
+                    cells.add((team_of[code], int(g)))
+        expired_cells = len(cells)
+    absent = 0
+    if players is not None and "sample_tag" in players.columns and "code" in players.columns:
+        tagged = set(players.loc[players["sample_tag"].fillna("").astype(str).str.contains("no qualifying history"), "code"])
+        have = set()
+        if has_ov:
+            rc = [c for c in ("npxg90_rescue", "xa90_rescue", "dc90_rescue") if c in overrides.columns]
+            if rc:
+                have = set(overrides.loc[overrides[rc].apply(pd.to_numeric, errors="coerce").notna().any(axis=1), "player_code"])
+        absent = len(tagged - have)
+    unread = 0
+    if players is not None and "red_cards" in players.columns and "code" in players.columns:
+        red = set(players.loc[pd.to_numeric(players["red_cards"], errors="coerce").fillna(0) > 0, "code"])
+        listed = set()
+        if has_ov and not st["is_old"] and "xm_dismissal_gw" in overrides.columns:
+            listed = set(overrides.loc[pd.to_numeric(overrides["xm_dismissal_gw"], errors="coerce").notna(), "player_code"])
+        unread = len(red - listed)
+    stale_flags = 0
+    if has_ov and st["is_old"]:
+        cols = [c for c in ("xm_override", "tenure_discount", "npxg90_rescue", "xa90_rescue", "dc90_rescue") if c in overrides.columns]
+        if cols:
+            stale_flags = int(overrides[cols].apply(pd.to_numeric, errors="coerce").notna().any(axis=1).sum())
+    if st["state"] == "missing":
+        line = "Weekly sheet: missing, automatic values in use"
+    elif st["state"] == "unknown":
+        line = "Weekly sheet: date unknown (counts as old), automatic values in use"
+    else:
+        n = st["age_days"]
+        txt = f"Weekly sheet: {st['state']}, last updated {st['asof']:%d %b %H:%M} UTC ({n} day{'' if n == 1 else 's'} old)"
+        line = txt + (", automatic values in use" if st["is_old"] else "")
+    return {**st, "line": line, "expired_cells": int(expired_cells), "absent_rescue": int(absent),
+            "dismissals_unread": int(unread), "stale_flags": int(stale_flags)}

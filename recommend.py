@@ -3482,12 +3482,35 @@ def scan_alternative_line(rows: list, decision_gw) -> str | None:
 
 
 def cs_carry_label(n_cs_override_players: int) -> str:
-    """Patch 117k: disclosure for manual clean-sheet entries. GW6-GW10 use the sheet's per-gameweek value
-    (cs_pct_gw6..cs_pct_gw10, estimate tier); from GW11 the GW6 value is carried (a blank cell also uses it)."""
+    """R3 Patch 12 (M133, M138-M140): disclosure for manual clean-sheet entries. A sheet value belongs to its stated
+    gameweek only (per-gameweek columns drive their own gameweek); every other gameweek uses the goals-based formula
+    (estimate tier), or the flat fallback when the run has no ratings. Nothing is carried forward."""
     if not n_cs_override_players:
         return ""
-    return (f" Clean sheet per gameweek GW6-GW10 from the sheet; carried at the GW6 sheet value from GW11 "
-            f"for {int(n_cs_override_players)} player(s) with a cs_pct_override.")
+    return (f" Clean sheet: the sheet value applies to its stated gameweek only and per-gameweek columns drive their "
+            f"own gameweek ({int(n_cs_override_players)} player(s) with a cs_pct_override); other gameweeks use the "
+            f"goals-based formula (estimate), not a carried value.")
+
+
+def sheet_line_html(d: dict) -> str:
+    """R3 Patch 12 (M136): the weekly-sheet disclosure for the top of the Lineup tab: one line plus short chips."""
+    import html
+    kind = {"current": "ok", "old": "warn", "missing": "bad", "unknown": "warn"}.get(d.get("state"), "info")
+    chips = [ui_chip(str(d.get("state", "")).upper(), kind, tip=d.get("line", ""))]
+    if d.get("expired_cells"):
+        chips.append(ui_chip(f"{int(d['expired_cells'])} expired CS cells", "warn",
+                             tip="Clean-sheet cells older than 14 days (M134): kept and labelled expired, never carried forward."))
+    if d.get("absent_rescue"):
+        chips.append(ui_chip(f"{int(d['absent_rescue'])} rescue values absent", "info",
+                             tip="No qualifying history and no rescue value: the current rate takes the full weight (EST, M33)."))
+    if d.get("dismissals_unread"):
+        chips.append(ui_chip(f"{int(d['dismissals_unread'])} dismissals unread", "warn",
+                             tip="Red cards this season that the sheet does not list; some may be older than its six-match window."))
+    if d.get("stale_flags"):
+        chips.append(ui_chip(f"{int(d['stale_flags'])} stale sheet values", "warn",
+                             tip="Sheet values for these players are older than 14 days (EST)."))
+    return (f'<div style="margin:2px 0 8px 0;font-size:13px;">{html.escape(str(d.get("line", "")))}'
+            f' &nbsp; {" ".join(chips)}</div>')
 
 
 def apply_budget_override(bank: float, squad_market_price: float, override) -> tuple:
@@ -4649,10 +4672,14 @@ def m54_in_unconfirmed(new_squad, old_squad) -> bool:
     """R2 Patch 15 (M54): True when the candidate brings in a player whose xM is an estimate (pool column xm_unconf).
     A -4 hit may not rest on one (the whole hit candidate is refused: disclosed simplification)."""
     try:
-        if new_squad is None or old_squad is None or "xm_unconf" not in new_squad.columns:
+        if new_squad is None or old_squad is None or ("xm_unconf" not in new_squad.columns and "sample_tag" not in new_squad.columns):
             return False
+        if "xm_unconf" not in new_squad.columns:
+            new_squad = new_squad.assign(xm_unconf=False)
         newc = set(new_squad["code"]) - set(old_squad["code"])
         sub = new_squad[new_squad["code"].isin(newc)]
+        if "sample_tag" in sub.columns and sub["sample_tag"].fillna("").astype(str).str.contains("no qualifying history").any():
+            return True            # R3 Patch 12 (M135): no -4 hit may rest on a rate tagged "no qualifying history"
         return bool(sub["xm_unconf"].fillna(False).astype(bool).any())
     except (KeyError, TypeError, AttributeError):
         return False

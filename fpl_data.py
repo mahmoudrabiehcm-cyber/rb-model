@@ -58,6 +58,7 @@ class FplSnapshot:
                           # gameweek to plan transfers/captaincy/chips
                           # for -- see planning_gw below.
     stale_warning: Optional[str] = None
+    cs_ratings: Optional[dict] = None     # R3 Patch 12 (M138): goals-based clean-sheet ratings, set by the app after load
     raw_boot: Optional[dict] = None   # full bootstrap-static payload when source=="official_api" (carries .chips)
     current_gw_finished: bool = False      # Patch 11 -- bootstrap events[current_gw].finished. False means
                                             # some fixture in that gameweek genuinely hasn't been played yet.
@@ -670,3 +671,33 @@ if __name__ == "__main__":
     if snap.stale_warning:
         print("WARNING:", snap.stale_warning)
     print(snap.players.head(3).to_string())
+
+
+# ---------------------------------------------------------------------------
+# R3 Patch 12 (M138-M140): history for the goals-based clean-sheet formula. Finished matches per past season from the
+# vaastav mirror (fixtures.csv + teams.csv, a few KB each), keyed on the stable team `code`. Never raises.
+# ---------------------------------------------------------------------------
+def _season_label_back(season: str, n: int) -> str:
+    y = int(season[:4]) - n
+    return f"{y}-{str(y + 1)[-2:]}"
+
+
+def fetch_cs_history(prev_season: str, back: int = 4) -> tuple[dict, Optional[str]]:
+    """Returns ({"prior": matches of prev_season, "promoted": {gf_rel, ga_rel, n} or None}, warning or None)."""
+    from concurrent.futures import ThreadPoolExecutor
+    import fpl_engine as _eng
+    seasons = [_season_label_back(prev_season, k) for k in range(back, -1, -1)]
+    try:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            fx = list(ex.map(lambda sn: fetch_csv_mirror(sn, "fixtures.csv"), seasons))
+            tm = list(ex.map(lambda sn: fetch_csv_mirror(sn, "teams.csv"), seasons))
+    except Exception as e:                      # noqa: BLE001 -- degrade to the flat fallback, never crash the page
+        return {"prior": None, "promoted": None}, f"clean-sheet history not fetched ({type(e).__name__})"
+    frames = []
+    for sn, f, t in zip(seasons, fx, tm):
+        frames.append((sn, _eng.cs_matches_from_fixtures(f, t) if (f is not None and t is not None) else None))
+    prior = frames[-1][1]
+    if prior is None or len(prior) == 0:
+        return {"prior": None, "promoted": None}, f"no finished matches for {prev_season} on the mirror: flat clean-sheet fallback"
+    prom = _eng.cs_promoted_prior([(sn, m) for sn, m in frames if m is not None])
+    return {"prior": prior, "promoted": prom}, None

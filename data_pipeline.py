@@ -1055,7 +1055,7 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
                    "_goal_pts", "_assist_pts", "_cs_pts", "_defcon_applies",
                    "_own_att_home", "_own_att_away", "_own_def_home", "_own_def_away",
                    "npxg90_hist", "npxg90_cur", "xa90_hist", "xa90_cur",
-                   "dc90_hist", "dc90_cur", "dc90_cur_shr", "bonus90_eff", "starts", "cs_pct_override",
+                   "dc90_hist", "dc90_cur", "dc90_cur_shr", "bonus90_eff", "starts", "cs_pct_override", "cs_gw",
                    *sorted(c for c in pl.columns if re.fullmatch(r"cs_pct_gw\d+", str(c))),   # Patch 117k: per-GW sheet values
                    "penalties_order", "corners_and_indirect_freekicks_order",
                    "direct_freekicks_order"]
@@ -1093,9 +1093,39 @@ def compute_all(cfg: dict, snap: fpl_data.FplSnapshot, players: pd.DataFrame,
     opp_def = np.where(is_home_true, exploded["_opp_def_away"], exploded["_opp_def_home"])
     cs_pct_calc = eng.cs_pct_poisson_vec(pd.Series(own_att, index=exploded.index),
                                           pd.Series(opp_def, index=exploded.index))
+    # R3 Patch 12 (M138-M140): where the run carries goals-based ratings (snap.cs_ratings), gameweeks with no sheet value
+    # use the formula, rescaled so that gameweek's league-wide mean equals the prior-season clean-sheet rate; else flat.
+    _cs_r = getattr(snap, "cs_ratings", None)
+    _cs_cfg = cfg.get("cs_formula", {}) or {}
+    if _cs_r and _cs_cfg.get("enabled", True) and "code" in teams_raw.columns and len(exploded):
+        _code_of = dict(zip(teams_raw["id"], teams_raw["code"]))
+        _lo, _hi = float(_cs_cfg.get("clip_lo", 0.01)), float(_cs_cfg.get("clip_hi", 0.95))
+        _fl = fixtures_long.dropna(subset=["opp"]) if len(fixtures_long) else fixtures_long
+        _fac = {}
+        if len(_fl):
+            _raw_l = eng.cs_formula_vec(_cs_r, _fl["team"].map(_code_of).to_numpy(), _fl["opp"].map(_code_of).to_numpy(),
+                                        _fl["is_home"].to_numpy())
+            _tmp = pd.DataFrame({"event": _fl["event"].to_numpy(), "raw": _raw_l}).dropna()
+            for _ev, _g in _tmp.groupby("event"):
+                _m = float(_g["raw"].mean())
+                _fac[int(_ev)] = (float(_cs_r["target"]) / _m) if _m > 0 else 1.0
+        _raw_e = eng.cs_formula_vec(_cs_r, exploded["team"].map(_code_of).to_numpy(),
+                                    exploded["opp"].map(_code_of).to_numpy(), is_home_true.to_numpy())
+        _f_e = exploded["event"].map(lambda g: _fac.get(int(g), 1.0)).to_numpy(dtype=float)
+        _form = pd.Series(np.clip(_raw_e * _f_e, _lo, _hi), index=exploded.index)
+        cs_pct_calc = _form.where(_form.notna() & ~is_blank, cs_pct_calc)
     cs_override = pd.to_numeric(exploded["cs_pct_override"], errors="coerce")
-    # Patch 117k (manager-directed): the sheet's per-gameweek clean-sheet columns cs_pct_gw6..cs_pct_gw10 drive THEIR gameweek;
-    # a blank cell, a gameweek without a column (GW11+) or an older sheet without the columns uses cs_pct_override as before.
+    # R3 Patch 12 (M133): the sheet's single clean-sheet value belongs to its stated gameweek (cs_gw) only; with no
+    # cs_gw it belongs to the planning gameweek (the first gameweek of this run). It is never carried to later weeks.
+    if "cs_gw" in exploded.columns:
+        _csgw = pd.to_numeric(exploded["cs_gw"], errors="coerce")
+    else:
+        _csgw = pd.Series(np.nan, index=exploded.index)
+    _first_gw = int(gw_list[0]) if gw_list else None
+    _csgw = _csgw.where(_csgw.notna(), float(_first_gw) if _first_gw is not None else np.nan)
+    cs_override = cs_override.where(exploded["event"].astype(float) == _csgw)
+    # Patch 117k (manager-directed): the sheet's per-gameweek clean-sheet columns cs_pct_gw6..cs_pct_gwN drive THEIR gameweek;
+    # a blank cell falls to the formula (R3 Patch 12), not to a carried value.
     for _c in [c for c in exploded.columns if re.fullmatch(r"cs_pct_gw\d+", str(c))]:
         _g = int(str(_c)[9:])
         _v = pd.to_numeric(exploded[_c], errors="coerce")
