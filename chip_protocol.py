@@ -1357,3 +1357,21 @@ def chip_strategy_summary(wc_flag: str | None, shape_test: dict | None,
     # (call sites unchanged) but is intentionally unused now.
 
     return lines
+
+
+def wildcard_window_state(chip_rows: list, planning_gw: int, detect_gws: list, trigger_n: int = 4, prefix: str = "Wildcard") -> dict:
+    """R3 Patch 11: whether a chip can be played NOW, and over which weeks it is evaluated.
+    `chip_rows` = chip_status() rows (chip, window (start, stop), status, event). A chip is available now only when the planning
+    gameweek itself lies inside one of its open windows (before this, "any week of the detection window is open" switched the Wildcard on
+    at GW11 when the extended 10-week window merely reached the second window's first week, GW20). The weeks it is evaluated over are
+    the first `trigger_n` OPEN weeks of the detection window, never a week outside an open window.
+    Returns {"clipped": open weeks of detect_gws, "last_used": latest played event or None, "next_open": earliest open window start or
+    None, "available_now": bool, "trigger_gws": list}."""
+    rows = [r for r in (chip_rows or []) if str(r.get("chip", "")).startswith(prefix)]
+    avail = [r["window"] for r in rows if r.get("status") == "available" and r.get("window")]
+    used = [r["event"] for r in rows if r.get("status") == "used" and r.get("event") is not None]
+    clipped = [g for g in (detect_gws or []) if any(s is not None and e is not None and s <= g <= e for s, e in avail)]
+    nxt = min((w[0] for w in avail if w[0] is not None), default=None)
+    now = int(planning_gw) in clipped
+    return {"clipped": clipped, "last_used": (max(used) if used else None), "next_open": nxt, "available_now": now,
+            "trigger_gws": (clipped[:int(trigger_n)] if now else [])}
