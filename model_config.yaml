@@ -2690,6 +2690,8 @@ xm_heuristic:
 transfer:
   # R3 Patch 13 (M4 / Rule #54): the k-transfer candidates are chosen with the weekly-XI value they are scored with ("weekly_xi"), not the plain 15-man sum ("sum", the old behaviour). Pool = owned + locked + top N per position by xPts + top N_value per million (estimate tier; same optimum as the full pool in 32 of 32 test solves).
   candidate_objective: weekly_xi
+  # R3 Patch 14: the draft tries the runner-up first move over the whole chain and keeps the better chain (skipped when the runner-up's first move is more than `gap` xPts behind).
+  first_week_lookahead: {enabled: true, gap: 1.0}
   candidate_pool_top_n: 18
   candidate_pool_top_n_value: 8
   horizon_gameweeks: 4          # Horizon N = 3-4 GWs per Step 7a (RB Model's UI defaults its

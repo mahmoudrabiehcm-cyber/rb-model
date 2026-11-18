@@ -27,6 +27,16 @@ import style_profiles
 import transfers
 
 
+_PM_FIELDS = ("code", "web_name", "team", "price", "position", "xpts_horizon_sum", "xm", "nailed_rule", "xm_src", "xm_unconf",
+              "selected_by_percent", "setpiece_flag")
+
+
+def _pm_cols(df: pd.DataFrame, this_gw_col: str) -> list:
+    """R3 Patch 14 (performance, lossless): the only columns _pair_moves reads. to_dict('records') on the whole 110-column frame
+    (string columns are Arrow-backed) cost ~0.1 s per call; a column that is absent was already read as the default."""
+    return [c for c in (*_PM_FIELDS, this_gw_col) if c in df.columns]
+
+
 def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: str) -> list[dict]:
     """Turns an OUT-code-set/IN-code-set (the diff between two 15-man squads
     from the joint solver) into a readable move-by-move list, paired by
@@ -49,8 +59,8 @@ def _pair_moves(old_squad: pd.DataFrame, new_squad: pd.DataFrame, this_gw_col: s
 
     pairs = []
     for pos in ["GK", "DEF", "MID", "FWD"]:
-        outs = out_df[out_df["position"] == pos].sort_values("price", ascending=False).to_dict("records")
-        ins = in_df[in_df["position"] == pos].sort_values("price", ascending=False).to_dict("records")
+        outs = out_df[out_df["position"] == pos].sort_values("price", ascending=False)[_pm_cols(out_df, this_gw_col)].to_dict("records")
+        ins = in_df[in_df["position"] == pos].sort_values("price", ascending=False)[_pm_cols(in_df, this_gw_col)].to_dict("records")
         for o, i in zip(outs, ins):
             o_gw = o.get(this_gw_col, 0) or 0
             i_gw = i.get(this_gw_col, 0) or 0
@@ -1862,21 +1872,27 @@ def prune_pool_for_xi(full_pool, cols, current_codes, locks=(), excludes=(), top
     """Candidate pool for the weekly-XI solve: every owned player and every Locked player, plus per position the `top_n`
     available players by window xPts and the `top_n_value` best xPts per million. Excluded players are removed. Measured
     on four GW11 pools (5 and 9-11 week windows, k = 1, 2, 3, 5): the same optimum as the full pool in 32 of 32 solves, with
-    about 75 rows instead of 672 (estimate tier: a heuristic, not a proof)."""
-    df = full_pool.copy()
-    cols = [c for c in cols if c in df.columns]
-    df["_v"] = df[cols].sum(axis=1, skipna=True)
-    keep = set(current_codes) | set(locks)
-    ok = df[df["status"] == "a"] if "status" in df.columns else df
-    ok = ok[~ok["code"].isin(set(excludes) - set(locks))]
-    for _pos, g in ok.groupby("position"):
-        keep |= set(g.nlargest(int(top_n), "_v")["code"])
-        per_m = g["_v"] / g["price"].clip(lower=3.9)
-        keep |= set(g.loc[per_m.nlargest(int(top_n_value)).index, "code"])
-    out = df[df["code"].isin(keep)]
-    if excludes:
-        out = out[~out["code"].isin(set(excludes) - set(locks) - set(current_codes))]
-    return out.drop(columns="_v")
+    about 75 rows instead of 672 (estimate tier: a heuristic, not a proof). R3 Patch 14 (performance): the choice is made on
+    plain arrays and the wide frame is indexed once (it was filtered four times, each copying every column)."""
+    cols = [c for c in cols if c in full_pool.columns]
+    code = full_pool["code"].to_numpy()
+    pos = full_pool["position"].to_numpy()
+    price = pd.to_numeric(full_pool["price"], errors="coerce").to_numpy(dtype=float)
+    v = full_pool[cols].apply(pd.to_numeric, errors="coerce").sum(axis=1, skipna=True).to_numpy(dtype=float)
+    avail = (full_pool["status"].to_numpy() == "a") if "status" in full_pool.columns else np.ones(len(full_pool), dtype=bool)
+    locks_s, excl_s = set(locks), set(excludes)
+    keep = np.isin(code, list(set(current_codes) | locks_s))
+    ok = avail & ~np.isin(code, list(excl_s - locks_s))
+    per_m = v / np.clip(price, 3.9, None)
+    for p_ in np.unique(pos):
+        idx = np.where(ok & (pos == p_))[0]
+        if idx.size == 0:
+            continue
+        keep[idx[np.argsort(-v[idx], kind="stable")[:int(top_n)]]] = True
+        keep[idx[np.argsort(-per_m[idx], kind="stable")[:int(top_n_value)]]] = True
+    if excl_s:
+        keep &= ~np.isin(code, list(excl_s - locks_s - set(current_codes)))
+    return full_pool.iloc[np.where(keep)[0]]
 
 
 def _solve_retain_xi(full_pool, cfg, budget, current_codes, min_retain, window_gws, bench_w, bb_play_gw=None,
@@ -1892,8 +1908,8 @@ def _solve_retain_xi(full_pool, cfg, budget, current_codes, min_retain, window_g
                                     must_include_codes=list(locks), exclude_codes=list(excludes), objective_col="xpts_horizon_sum")
     if str(t_cfg.get("candidate_objective", "weekly_xi")) != "weekly_xi" or not cols or any(c not in full_pool.columns for c in cols):
         return plain()
-    own = full_pool[full_pool["code"].isin(set(current_codes))]
-    if own[cols + ["price"]].isna().any().any():
+    _own_mask = full_pool["code"].isin(set(current_codes)).to_numpy()
+    if full_pool.loc[_own_mask, cols + ["price"]].isna().any().any():
         return plain()
     fp = pool_fp if pool_fp is not None else _frame_fingerprint(full_pool)
     key = ("xi", fp, tuple(cols), tuple(sorted(int(c) for c in current_codes)), int(min_retain), round(float(budget), 3),
@@ -1905,7 +1921,10 @@ def _solve_retain_xi(full_pool, cfg, budget, current_codes, min_retain, window_g
         pr = prune_pool_for_xi(full_pool, cols, current_codes, locks, excludes, int(t_cfg.get("candidate_pool_top_n", 18)),
                                int(t_cfg.get("candidate_pool_top_n_value", 8)))
         bb_col = f"xpts_gw{int(bb_play_gw)}" if (bb_play_gw is not None and f"xpts_gw{int(bb_play_gw)}" in cols) else None
-        res = opt.solve_squad_xi_weighted(pr, cfg, float(budget), cols, bench_weight=float(bench_w), bb_col=bb_col,
+        # R3 Patch 14 (performance): the call goes to the function under Streamlit's cache (it content-hashes the whole 110-column
+        # frame on every call, ~50 ms each); this module's own memo above already keys the same inputs.
+        _xi_solve = getattr(opt.solve_squad_xi_weighted, "__wrapped__", opt.solve_squad_xi_weighted)
+        res = _xi_solve(pr, cfg, float(budget), cols, bench_weight=float(bench_w), bb_col=bb_col,
                                           retain_pool_codes=list(current_codes), min_retain=int(min_retain),
                                           must_include_codes=list(locks), exclude_codes=list(excludes))
         if res is None:
@@ -1996,7 +2015,7 @@ def _m119_out_exempt(sim_squad: pd.DataFrame, new_squad: pd.DataFrame, gws: list
     return bool((tot.sum(axis=1) < 1.0).all())
 
 
-def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
+def _plan_transfer_schedule_core(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                             profile_name: str, free_transfers: int, bank: float,
                             current_gw: int, gw_list: list[int],
                             meaningful_bar: float | None = None,
@@ -2008,8 +2027,10 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                             use_tie_break: bool = True,
                             cap_use_bar: float | None = None,
                             value_tail: list | None = None,
-                            tc_target: dict | None = None) -> dict:
-    """Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Power Cards picked. When
+                            tc_target: dict | None = None,
+                            first_week_exclude: tuple = ()) -> dict:
+    """R3 Patch 14: `first_week_exclude` = player codes the FIRST planned week may not buy (used only by the first-move look-ahead;
+    later weeks may buy them). Patch 114: `tc_target` = {"code": int, "gw": int} -- the Triple Captain player and week the Power Cards picked. When
     given (and the week is inside the planned/valued weeks), the squad's top XI scorer in that week counts one extra time
     (the tripled captain's extra x1), and the target's horizon sum gets the same bonus so the planner can BUY him with a
     free transfer when that beats rolling. None (default) = unchanged behaviour. DEVIATION from Standing Rule #31 (same
@@ -2169,7 +2190,16 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
 
     full_pool_fp = _frame_fingerprint(full_pool)  # Patch 112: one cheap content hash per plan, reused by every solve
     cfg_fp = repr(sorted((cfg.get("squad_rules") or {}).items())) if isinstance(cfg.get("squad_rules"), dict) else ""
+    _fp_base, _fp_base_fp = full_pool, full_pool_fp
+    _fp_w1, _fp_w1_fp = None, None
+    if first_week_exclude:
+        _fp_w1 = full_pool.copy()
+        _fp_w1["_excluded"] = _fp_w1["_excluded"].fillna(False).astype(bool) if "_excluded" in _fp_w1.columns else False
+        _fp_w1.loc[_fp_w1["code"].isin(set(first_week_exclude)), "_excluded"] = True
+        _fp_w1_fp = _frame_fingerprint(_fp_w1)
     for wi, gw in enumerate(gw_list):
+        if _fp_w1 is not None:
+            full_pool, full_pool_fp = (_fp_w1, _fp_w1_fp) if wi == 0 else (_fp_base, _fp_base_fp)
         # Patch 112: `value_tail` = extra GWs AFTER the planned span that are used only to VALUE a move (so late
         # weeks are not judged on 1-2 remaining GWs); they are never planned or displayed.
         remaining_gws = list(gw_list[wi:]) + value_tail
@@ -2588,6 +2618,95 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
     }
 
 
+def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict, profile_name: str, free_transfers: int,
+                           bank: float, current_gw: int, gw_list: list[int], meaningful_bar: float | None = None,
+                           chip_advisory: str | None = None, bb_play_gw: int | None = None, disrupted_codes: set | None = None,
+                           hit_stance: str = "No hits", chip_schedule: dict | None = None, use_tie_break: bool = True,
+                           cap_use_bar: float | None = None, value_tail: list | None = None, tc_target: dict | None = None,
+                           lookahead: bool = False) -> dict:
+    """The chained weekly planner (see _plan_transfer_schedule_core). R3 Patch 14 (manager 18 Nov 2026: a Van Hecke scenario beat
+    the Proposed team on the model's own value): the planner is greedy, it takes this week's best move and then plans the rest.
+    With `lookahead=True` (the draft and the scenario's default plan; config transfer.first_week_lookahead) a single free first
+    move is also tried with the runner-up first move (the best squad that does not buy the same player this week; later weeks may
+    still buy him) over the WHOLE chain, and the chain with the higher path value (realised xPts per week minus hits) is kept.
+    Skipped, with the reason in res["lookahead"], when: switched off, fewer than 3 weeks, a chip schedule is set, the first week is
+    not one free single move, the runner-up's first move is more than `gap` xPts behind, or no runner-up exists."""
+    kw = dict(meaningful_bar=meaningful_bar, chip_advisory=chip_advisory, bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes,
+              hit_stance=hit_stance, chip_schedule=chip_schedule, use_tie_break=use_tie_break, cap_use_bar=cap_use_bar,
+              value_tail=value_tail, tc_target=tc_target)
+    res = _plan_transfer_schedule_core(squad_df, pool_df, cfg, profile_name, free_transfers, bank, current_gw, gw_list, **kw)
+    if not lookahead:
+        return res
+    info = {"used": False, "picked": "first", "first_total": None, "alt_total": None, "gap_checked": None, "reason": None}
+    res["lookahead"] = info
+    la = ((cfg or {}).get("transfer", {}) or {}).get("first_week_lookahead", {}) or {}
+    try:
+        if not la.get("enabled", True):
+            info["reason"] = "switched off"
+            return res
+        wp = res.get("weekly_plan") or []
+        if len(gw_list) < 3 or chip_schedule or not wp:
+            info["reason"] = "fewer than 3 weeks or a chip schedule is set"
+            return res
+        w0 = wp[0]
+        mv = w0.get("moves") or []
+        if int(w0.get("gw", -1)) != int(gw_list[0]) or w0.get("chip_played") or len(mv) != 1 or int(w0.get("ft_used") or 0) != 1 \
+                or float(mv[0].get("hit_cost", 0) or 0) > 0 or mv[0].get("in_code") is None:
+            info["reason"] = "first week is not one free move"
+            return res
+        in_code = int(mv[0]["in_code"])
+        full_pool = pd.concat([squad_df, pool_df], ignore_index=True, sort=False).drop_duplicates(subset=["code"], keep="first")
+        bank_f = 0.0 if bank is None or pd.isna(bank) else float(bank)
+        team_value = bank_f + float(squad_df["price"].sum(skipna=True) or 0.0)
+        bench_w = ((cfg.get("transfer", {}) or {}).get("bench_weight_non_bb_gw", 0.08))
+        cur_codes = list(squad_df["code"])
+        excl = sorted(set(exclude_codes_of(full_pool)) | {in_code})
+        r1 = _solve_retain_xi(full_pool, cfg, team_value, cur_codes, 14, list(gw_list), bench_w, bb_play_gw,
+                              lock_codes_of(squad_df), excl)
+        if r1 is None or r1.get("squad") is None:
+            info["reason"] = "no runner-up first move"
+            return res
+        alt_sq = r1["squad"]
+        if set(alt_sq["code"]) == set(squad_df["code"]):
+            info["reason"] = "no runner-up first move"
+            return res
+        base_v = opt.realized_horizon_value(squad_df, list(gw_list), cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+        alt_v = opt.realized_horizon_value(alt_sq, list(gw_list), cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw)
+        gap_now = float(w0.get("net_gain") or 0.0) - (alt_v - base_v)
+        info["gap_checked"] = round(gap_now, 2)
+        if gap_now > float(la.get("gap", 1.0)):
+            info["reason"] = "runner-up first move is too far behind"
+            return res
+        res_b = _plan_transfer_schedule_core(squad_df, pool_df, cfg, profile_name, free_transfers, bank, current_gw, gw_list,
+                                             first_week_exclude=(in_code,), **kw)
+        gws = [int(g) for g in gw_list]
+
+        def _val(r):
+            sq = build_squad_after_by_gw(squad_df, r["weekly_plan"], full_pool)
+            last = squad_df
+            for g in gws:
+                last = sq.get(g, last)
+                sq[g] = last
+            return _path_value(sq, r["weekly_plan"], gws, cfg, bb_play_gw)
+        va, vb = _val(res), _val(res_b)
+        info.update({"used": True, "first_total": va, "alt_total": vb})
+        if vb > va + 0.05:
+            info["picked"] = "runner_up"
+            res_b["lookahead"] = info
+            try:
+                _a_mv = ", ".join(f"{m['out']} \u2192 {m['in']}" for m in mv)
+                _b_mv = ", ".join(f"{m['out']} \u2192 {m['in']}" for m in (res_b["weekly_plan"][0].get("moves") or []))
+                res_b["plan"] = [f"GW{gw_list[0]}: First move chosen over the whole chain: {_b_mv} ({vb:.1f} xPts over {len(gws)} GW) "
+                                 f"beats {_a_mv} ({va:.1f}), the best move taken alone."] + list(res_b.get("plan") or [])
+            except Exception:
+                pass
+            return res_b
+        return res
+    except Exception as _e_la:
+        info["reason"] = f"look-ahead skipped: {type(_e_la).__name__}"
+        return res
+
+
 def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
                        profile_name: str, hit_stance: str, free_transfers: int,
                        bank: float, current_gw: int, gw_list: list[int],
@@ -2712,7 +2831,7 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         return plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank,
                                        current_gw, gw_list, meaningful_bar, chip_advisory,
                                        bb_play_gw=bb_play_gw, disrupted_codes=disrupted_codes,
-                                       hit_stance=hit_stance, chip_schedule=chip_schedule)
+                                       hit_stance=hit_stance, chip_schedule=chip_schedule, lookahead=True)
 
     # Defensive numeric coercion — a None (rather than NaN) price/xPts value
     # anywhere in these columns turns a pandas comparison into a TypeError
@@ -3951,7 +4070,8 @@ def plan_scenario_path(squad_df, pool_df, cfg, profile_name, hit_stance, free_tr
 
     if default_plan is None:
         default_plan = plan_transfer_schedule(squad_df, pool_df, cfg, profile_name, free_transfers, bank, P, gws,
-                                              meaningful_bar, None, bb_play_gw, disrupted_codes, hit_stance)["weekly_plan"]
+                                              meaningful_bar, None, bb_play_gw, disrupted_codes, hit_stance,
+                                              lookahead=True)["weekly_plan"]
     default_plan = [w for w in (default_plan or []) if w.get("gw") in gws]
     d_squads = build_squad_after_by_gw(squad_df, default_plan, full_pool)
     last = squad_df

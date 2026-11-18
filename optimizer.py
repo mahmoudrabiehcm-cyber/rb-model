@@ -1003,6 +1003,7 @@ def _bench_autosub_total(squad: pd.DataFrame, xi: pd.DataFrame, gw_col: str, xm_
 
 
 BB_FULL_CREDIT = True   # SCRATCH switch
+_SLIM_RGV = True      # R3 Patch 14: score from the 3 columns the value reads (False = the old full-frame path)
 _RGV_MEMO: dict = {}
 _RGV_MEMO_MAX = 200_000
 _NAN_KEY = -1.0e18
@@ -1031,6 +1032,10 @@ def realized_gw_value(squad: pd.DataFrame, gw_col: str, cfg: dict, xm_col: str =
     Patch 108 implementation, including tied values, NaNs and duplicate index labels)."""
     if squad is None or squad.empty or gw_col not in squad.columns:
         return {"xi_total": 0.0, "bench_total": 0.0, "total_realized": 0.0}
+    if _SLIM_RGV and "position" in squad.columns:
+        # R3 Patch 14 (performance, lossless): the value reads only position, the week's points and xm; the 100+ column frame was
+        # being copied row by row (best_starting_xi takes the XI from the whole frame). Index labels are kept. Parity-tested.
+        squad = squad[[c for c in ("position", gw_col, xm_col) if c in squad.columns]]
     try:
         key = _rgv_key(squad, gw_col, cfg, xm_col, bench_weight_scale, bb_full)
     except Exception:
