@@ -574,6 +574,45 @@ def apply_style_to_wildcard_squad(current_squad: pd.DataFrame, rebuild_squad: pd
     return adjusted
 
 
+_TB_SHAPES = [(3, 4, 3), (3, 5, 2), (4, 4, 2), (4, 3, 3), (4, 5, 1), (5, 4, 1), (5, 3, 2), (5, 2, 3)]
+
+
+def _fast_week_value(pos, v, xm, gk_prob, curve, bench_w_gw, bb_full):
+    """R3 Patch 13 (latency): numpy screen of optimizer.realized_gw_value for a 15-man squad (best legal XI + Rule #12 bench credit).
+    Used ONLY to rank the Position Tie-break's alternatives; every alternative that could matter is re-scored with the real
+    function, so a small screening difference cannot change a decision."""
+    vv = np.where(np.isnan(v), -np.inf, v)
+    idx = {p_: np.where(pos == p_)[0] for p_ in ("GK", "DEF", "MID", "FWD")}
+    srt = {p_: idx[p_][np.argsort(-vv[idx[p_]], kind="stable")] for p_ in idx}
+    best = None
+    for d, m, f in _TB_SHAPES:
+        if len(srt["DEF"]) < d or len(srt["MID"]) < m or len(srt["FWD"]) < f or len(srt["GK"]) < 1:
+            continue
+        sel = np.concatenate([srt["GK"][:1], srt["DEF"][:d], srt["MID"][:m], srt["FWD"][:f]])
+        t = float(np.nansum(v[sel]))
+        if best is None or t > best[0]:
+            best = (t, sel)
+    if best is None:
+        return 0.0, 0.0
+    xi_total, sel = best
+    if bb_full:
+        mask = np.ones(len(v), dtype=bool); mask[sel] = False
+        return xi_total, float(np.nansum(v[mask]))
+    xmv = xm[sel]; xmv = xmv[~np.isnan(xmv)]
+    avg_xm = float(xmv.mean()) if xmv.size else 0.8
+    exposure = max(0.03, min(0.6, 1.0 - avg_xm))
+    inxi = np.zeros(len(v), dtype=bool); inxi[sel] = True
+    bench_total = 0.0
+    for p_ in ("GK", "DEF", "MID", "FWD"):
+        b = srt[p_][~inxi[srt[p_]]]
+        for rank, i in enumerate(b):
+            pts = 0.0 if np.isnan(v[i]) else float(v[i])
+            prob = gk_prob if p_ == "GK" else round(exposure * curve[min(rank, len(curve) - 1)], 3)
+            bench_total += prob * pts
+    return xi_total, bench_total * bench_w_gw
+
+
+
 def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.DataFrame,
                          gw_list: list[int], cfg: dict, bench_w: float, bb_play_gw: int | None,
                          moe: float, team_value: float, current_gw: int) -> tuple[dict, list[str] | None]:
@@ -654,6 +693,40 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
                                "web_name": chosen["squad"][chosen["squad"]["code"] == in_code]["web_name"]
                                .iloc[0] if in_code in set(chosen["squad"]["code"]) else in_code,
                                "xi_total": chosen.get("new_xi"), "bench_total": chosen.get("new_bench")}}
+    def _score_alt(alt_code, alt_row):
+        alt_squad = pd.concat([squad_df[squad_df["code"] != out_code], pd.DataFrame([alt_row])],
+                               ignore_index=True, sort=False)
+        if "code" in alt_squad.columns:
+            alt_squad = alt_squad.drop_duplicates(subset=["code"], keep="first")
+        alt_bd = opt.realized_horizon_breakdown(alt_squad, gw_list, cfg, bench_weight_scale=bench_w,
+                                                 bb_play_gw=bb_play_gw)
+        alt_net = round(alt_bd["total"] - baseline_total - hit_cost, 2)
+        scored[alt_code] = {"net_gain": alt_net, "squad": alt_squad, "total": alt_bd["total"],
+                             "web_name": alt_row.get("web_name", alt_code),
+                             "xi_total": alt_bd["xi_total"], "bench_total": alt_bd["bench_total"]}
+
+    _screen, _screen_rows = None, []
+    _base = squad_df[squad_df["code"] != out_code]
+    _gcs = [f"xpts_gw{g}" for g in gw_list]
+    if _TB_FAST and len(_base) == 14 and all(c in _base.columns and c in same_pos_pool.columns for c in _gcs):
+        _tc = (cfg or {}).get("transfer", {}) or {}
+        _gkp = float(_tc.get("bench_gk_autosub_prob", 0.05))
+        _cur = list(_tc.get("bench_order_decay", [1.0, 0.55, 0.30, 0.15]))
+        _bpos = _base["position"].to_numpy()
+        _bv = {c: pd.to_numeric(_base[c], errors="coerce").to_numpy(dtype=float) for c in _gcs}
+        _bxm = pd.to_numeric(_base["xm"], errors="coerce").to_numpy(dtype=float) if "xm" in _base.columns else np.full(14, np.nan)
+        _has_xm = "xm" in same_pos_pool.columns
+
+        def _screen(alt_row):
+            pos = np.append(_bpos, alt_row["position"])
+            xm = np.append(_bxm, float(alt_row["xm"]) if _has_xm and not pd.isna(alt_row["xm"]) else np.nan)
+            tot = 0.0
+            for g, c in zip(gw_list, _gcs):
+                v = np.append(_bv[c], float(alt_row[c]) if not pd.isna(alt_row[c]) else np.nan)
+                sc = 1.0 if (bb_play_gw is not None and g == bb_play_gw) else bench_w
+                a, b = _fast_week_value(pos, v, xm, _gkp, _cur, sc, bool(opt.BB_FULL_CREDIT and bb_play_gw is not None and g == bb_play_gw))
+                tot += a + b
+            return tot
     for _, alt_row in same_pos_pool.iterrows():
         alt_code = alt_row.get("code")
         if alt_code == in_code or alt_code == out_code:
@@ -666,16 +739,19 @@ def _position_tie_break(chosen: dict, squad_df: pd.DataFrame, full_pool: pd.Data
         alt_team = alt_row.get("team")
         if int(other_team_counts.get(alt_team, 0)) + 1 > max_per_club:
             continue  # would breach the per-club cap
-        alt_squad = pd.concat([squad_df[squad_df["code"] != out_code], pd.DataFrame([alt_row])],
-                               ignore_index=True, sort=False)
-        if "code" in alt_squad.columns:
-            alt_squad = alt_squad.drop_duplicates(subset=["code"], keep="first")
-        alt_bd = opt.realized_horizon_breakdown(alt_squad, gw_list, cfg, bench_weight_scale=bench_w,
-                                                 bb_play_gw=bb_play_gw)
-        alt_net = round(alt_bd["total"] - baseline_total - hit_cost, 2)
-        scored[alt_code] = {"net_gain": alt_net, "squad": alt_squad, "total": alt_bd["total"],
-                             "web_name": alt_row.get("web_name", alt_code),
-                             "xi_total": alt_bd["xi_total"], "bench_total": alt_bd["bench_total"]}
+        if _screen is not None:
+            _ft = _screen(alt_row)
+            if _ft is not None:
+                _screen_rows.append((alt_code, alt_row, _ft))
+                continue
+        _score_alt(alt_code, alt_row)
+
+    if _screen_rows:      # R3 Patch 13: re-score only the alternatives whose screened net is within the tie margin + 0.3
+        _best_fast = max(ft - baseline_total - hit_cost for _c, _r, ft in _screen_rows)
+        _best_fast = max(_best_fast, chosen["net_gain"])
+        for _c, _r, ft in _screen_rows:
+            if (ft - baseline_total - hit_cost) >= _best_fast - moe - 0.3:
+                _score_alt(_c, _r)
 
     best_net_here = max(v["net_gain"] for v in scored.values())
     tied_codes = [code for code, v in scored.items() if (best_net_here - v["net_gain"]) < moe]
@@ -1731,6 +1807,7 @@ def resolve_bb_play_gw(isolated_bb_play_gw: int | None, harmonized_bb_gw: int | 
     return harmonized_bb_gw if harmonized_bb_gw is not None else isolated_bb_play_gw
 
 
+_TB_FAST = True        # R3 Patch 13: numpy screen in the Position Tie-break (parity-tested); False = score every alternative with the real function
 _PLAN_SOLVE_MEMO: dict = {}
 _PLAN_SOLVE_MEMO_MAX = 600
 
@@ -1763,6 +1840,76 @@ def _solve_retain_memo(full_pool, pool_fp, cfg, cfg_fp, team_value, current_code
         res = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
                               min_retain=min_retain, must_include_codes=list(locks), exclude_codes=list(excludes),
                               objective_col="xpts_horizon_sum")
+        if len(_PLAN_SOLVE_MEMO) >= _PLAN_SOLVE_MEMO_MAX:
+            _PLAN_SOLVE_MEMO.clear()
+        _PLAN_SOLVE_MEMO[key] = res
+    if res is None:
+        return None
+    out = dict(res)
+    if isinstance(out.get("squad"), pd.DataFrame):
+        out["squad"] = out["squad"].copy()
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# R3 Patch 13 (M4 / Rule #54, manager 17 Nov 2026: GW11 said Roll although Davis / Hall -> Van Hecke and Calafiori -> Gabriel
+# each net more than the 2.0 bar). The planners built their k-transfer candidates with opt.solve_squad (the plain sum of all
+# 15 players, so a bench upgrade looks as good as a starter upgrade) and then SCORED them with the weekly-XI value. The
+# candidates now come from the weekly-XI solver (bench at the planner's own bench weight, a legal XI for every week of the
+# window), on a pruned pool so the extra cost stays small. Switch: transfer.candidate_objective ("weekly_xi" | "sum").
+# ---------------------------------------------------------------------------------------------------------------------
+def prune_pool_for_xi(full_pool, cols, current_codes, locks=(), excludes=(), top_n: int = 18, top_n_value: int = 8):
+    """Candidate pool for the weekly-XI solve: every owned player and every Locked player, plus per position the `top_n`
+    available players by window xPts and the `top_n_value` best xPts per million. Excluded players are removed. Measured
+    on four GW11 pools (5 and 9-11 week windows, k = 1, 2, 3, 5): the same optimum as the full pool in 32 of 32 solves, with
+    about 75 rows instead of 672 (estimate tier: a heuristic, not a proof)."""
+    df = full_pool.copy()
+    cols = [c for c in cols if c in df.columns]
+    df["_v"] = df[cols].sum(axis=1, skipna=True)
+    keep = set(current_codes) | set(locks)
+    ok = df[df["status"] == "a"] if "status" in df.columns else df
+    ok = ok[~ok["code"].isin(set(excludes) - set(locks))]
+    for _pos, g in ok.groupby("position"):
+        keep |= set(g.nlargest(int(top_n), "_v")["code"])
+        per_m = g["_v"] / g["price"].clip(lower=3.9)
+        keep |= set(g.loc[per_m.nlargest(int(top_n_value)).index, "code"])
+    out = df[df["code"].isin(keep)]
+    if excludes:
+        out = out[~out["code"].isin(set(excludes) - set(locks) - set(current_codes))]
+    return out.drop(columns="_v")
+
+
+def _solve_retain_xi(full_pool, cfg, budget, current_codes, min_retain, window_gws, bench_w, bb_play_gw=None,
+                     locks=(), excludes=(), pool_fp=None):
+    """R3 Patch 13: the best squad that keeps at least `min_retain` of `current_codes`, chosen with the SAME value the
+    candidates are scored with (weekly XI per week of `window_gws`, bench at `bench_w`, Bench Boost week at 1.0). Memoised.
+    Falls back to the plain 15-man-sum solve when the switch is off, a window column is missing, an owned player has no
+    projection (the plain solver protects data gaps), or the weekly solve returns nothing."""
+    t_cfg = (cfg or {}).get("transfer", {}) or {}
+    cols = [f"xpts_gw{int(g)}" for g in window_gws]
+    locks, excludes = tuple(sorted(int(c) for c in locks)), tuple(sorted(int(c) for c in excludes))
+    plain = lambda: opt.solve_squad(full_pool, cfg, budget=budget, retain_pool_codes=list(current_codes), min_retain=min_retain,
+                                    must_include_codes=list(locks), exclude_codes=list(excludes), objective_col="xpts_horizon_sum")
+    if str(t_cfg.get("candidate_objective", "weekly_xi")) != "weekly_xi" or not cols or any(c not in full_pool.columns for c in cols):
+        return plain()
+    own = full_pool[full_pool["code"].isin(set(current_codes))]
+    if own[cols + ["price"]].isna().any().any():
+        return plain()
+    fp = pool_fp if pool_fp is not None else _frame_fingerprint(full_pool)
+    key = ("xi", fp, tuple(cols), tuple(sorted(int(c) for c in current_codes)), int(min_retain), round(float(budget), 3),
+           round(float(bench_w), 4), bb_play_gw if (bb_play_gw is not None and int(bb_play_gw) in set(map(int, window_gws))) else None,
+           locks, excludes, int(t_cfg.get("candidate_pool_top_n", 18)), int(t_cfg.get("candidate_pool_top_n_value", 8)))
+    if key in _PLAN_SOLVE_MEMO:
+        res = _PLAN_SOLVE_MEMO[key]
+    else:
+        pr = prune_pool_for_xi(full_pool, cols, current_codes, locks, excludes, int(t_cfg.get("candidate_pool_top_n", 18)),
+                               int(t_cfg.get("candidate_pool_top_n_value", 8)))
+        bb_col = f"xpts_gw{int(bb_play_gw)}" if (bb_play_gw is not None and f"xpts_gw{int(bb_play_gw)}" in cols) else None
+        res = opt.solve_squad_xi_weighted(pr, cfg, float(budget), cols, bench_weight=float(bench_w), bb_col=bb_col,
+                                          retain_pool_codes=list(current_codes), min_retain=int(min_retain),
+                                          must_include_codes=list(locks), exclude_codes=list(excludes))
+        if res is None:
+            res = plain()
         if len(_PLAN_SOLVE_MEMO) >= _PLAN_SOLVE_MEMO_MAX:
             _PLAN_SOLVE_MEMO.clear()
         _PLAN_SOLVE_MEMO[key] = res
@@ -1826,11 +1973,11 @@ def m119_tie_protects(forgone_cum: float, cfg: dict | None = None) -> bool:
     return float(forgone_cum or 0.0) <= M119_FORGONE_LIMIT
 
 
-def roll_reason_text(best_free_net: float, bar: float, cap: bool, forgone: float) -> str:
+def roll_reason_text(best_free_net: float, bar: float, cap: bool, forgone: float, move: str | None = None) -> str:
     """R2 Patch 28: why the week rolls. Names the best free move's gain when there was one (the old text said 'no move clears
     the bar' even when a +3 move lost a tie)."""
     if best_free_net is not None and best_free_net > 0:
-        t = f"best free move nets {best_free_net:+.1f}, below the {bar:.1f} bar - saving the transfer"
+        t = (f"best free move ({move}) " if move else "best free move ") + f"nets {best_free_net:+.1f}, below the {bar:.1f} bar - saving the transfer"
         if forgone and forgone > 0:
             t += f" (cumulative xPts forgone by waiting: {forgone:.1f})"
         return t
@@ -2133,15 +2280,15 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                 from concurrent.futures import ThreadPoolExecutor
                 _locks_w, _excl_w = lock_codes_of(sim_squad), exclude_codes_of(full_pool)
                 with ThreadPoolExecutor(max_workers=parallel_workers(k_upper)) as _exw:
-                    list(_exw.map(lambda kk: _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value,
-                                                                current_codes, max(0, 15 - kk), locks=_locks_w,
-                                                                excludes=_excl_w), range(1, k_upper + 1)))
+                    list(_exw.map(lambda kk: _solve_retain_xi(full_pool, cfg, team_value, current_codes, max(0, 15 - kk),
+                                                              remaining_gws, bench_w, bb_play_gw, _locks_w, _excl_w,
+                                                              pool_fp=full_pool_fp), range(1, k_upper + 1)))
             except Exception:
                 pass
         for k in range(1, k_upper + 1):
             min_retain = max(0, 15 - k)
-            result = _solve_retain_memo(full_pool, full_pool_fp, cfg, cfg_fp, team_value, current_codes, min_retain,
-                                        locks=lock_codes_of(sim_squad), excludes=exclude_codes_of(full_pool))
+            result = _solve_retain_xi(full_pool, cfg, team_value, current_codes, min_retain, remaining_gws, bench_w,
+                                      bb_play_gw, lock_codes_of(sim_squad), exclude_codes_of(full_pool), pool_fp=full_pool_fp)
             if result is None:
                 continue
             new_squad = result["squad"]
@@ -2253,6 +2400,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
         except Exception:
             _deferred = None
         chosen = candidates[chosen_k]
+        _below_bar = None
 
         # Patch 41 — same position tie-break as the single-decision path
         # (see _position_tie_break()'s docstring): the same "one MILP pick
@@ -2297,6 +2445,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                         f"value only (no XI impact) — saving the transfer is stronger.")
         elif chosen["actual_k"] == 0:
             week_moves = []
+            _below_bar = None
             week_summary = f"GW{gw}: Roll — {ft_bank} FT banked → {ft_after} for GW{gw + 1}."
             _bf = [c["net_gain"] for k, c in candidates.items() if k != 0 and c["hit_cost"] == 0]
             _bfn = max(_bf) if _bf else 0.0
@@ -2309,12 +2458,19 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
                                        - opt.realized_horizon_value(sim_squad, _g1, cfg, bench_weight_scale=bench_w, bb_play_gw=bb_play_gw))
                 except Exception:
                     pass
+                try:    # R3 Patch 13: name the best free move that fell below the bar (shown on the Roll card)
+                    _pb = _pair_moves(sim_squad, candidates[_bk]["squad"], this_gw_col)
+                    _below_bar = {"move": ", ".join(f"{q['out']} \u2192 {q['in']}" for q in _pb), "net": round(float(_bfn), 2),
+                                  "bar": float(meaningful_bar)}
+                except Exception:
+                    _below_bar = None
             if _deferred:
                 _mv = ", ".join(f"{p['out']} \u2192 {p['in']}" for p in _deferred["pairs"])
                 plan.append(f"GW{gw}: Roll — {_mv} nets {_deferred['net']:+.1f} over the horizon but earns {_deferred['now']:+.1f} in GW{gw} itself; "
                             f"waiting costs nothing and keeps the transfer for injury news (cumulative xPts forgone: {forgone_cum:.1f}, limit {M119_FORGONE_LIMIT:.1f}).")
             else:
-                plan.append(f"GW{gw}: Roll — " + roll_reason_text(_bfn, meaningful_bar, False, forgone_cum))
+                plan.append(f"GW{gw}: Roll — " + roll_reason_text(_bfn, meaningful_bar, False, forgone_cum,
+                                                                             move=(_below_bar or {}).get("move")))
         else:
             pairs = _pair_moves(sim_squad, chosen["squad"], this_gw_col)
             # R2 Patch 23 (M103-M109): the same style tie-break the single-decision paths use, applied to the chosen week's
@@ -2401,6 +2557,7 @@ def plan_transfer_schedule(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: d
             "summary": week_summary, "data_gap_note": data_gap_note,
             "cap_forced": bool(cap_forced and chosen["actual_k"] > 0),
             "style_cost": (_style_sum if chosen["actual_k"] > 0 else None),
+            "below_bar": (_below_bar if chosen["actual_k"] == 0 and not week_bench_only else None),
         })
         summary.append(week_summary)
         plan.append(f"GW{gw}: {chosen['actual_k']} transfer(s) this week (chained pacing plan) — "
@@ -2603,9 +2760,8 @@ def suggest_transfers(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg: dict,
         if k <= 0:
             continue
         min_retain = max(0, 15 - k)
-        result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                  min_retain=min_retain, must_include_codes=lock_codes_of(squad_df),
-                                  exclude_codes=exclude_codes_of(full_pool), objective_col="xpts_horizon_sum")
+        result = _solve_retain_xi(full_pool, cfg, team_value, current_codes, min_retain, gw_list, bench_w, bb_play_gw,
+                                  lock_codes_of(squad_df), exclude_codes_of(full_pool))
         if result is None:
             continue
         new_squad = result["squad"]
@@ -3135,10 +3291,8 @@ def evaluate_target_transfer(squad_df: pd.DataFrame, pool_df: pd.DataFrame, cfg:
     candidates = {}
     for k in range(1, 6):
         min_retain = max(0, 15 - k)
-        result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                  min_retain=min_retain, must_include_codes=[target_code] + lock_codes_of(squad_df),
-                                  exclude_codes=exclude_codes_of(full_pool, exempt=[target_code]),
-                                  objective_col="xpts_horizon_sum")
+        result = _solve_retain_xi(full_pool, cfg, team_value, current_codes, min_retain, gw_list, bench_w, bb_play_gw,
+                                  [target_code] + lock_codes_of(squad_df), exclude_codes_of(full_pool, exempt=[target_code]))
         if result is None:
             continue
         new_squad = result["squad"]
@@ -3703,9 +3857,8 @@ def evaluate_required_buys(squad_df, pool_df, cfg, profile_name, hit_stance, fre
     for k in range(1, 6):
         if k < len(targets):
             continue                                            # fewer transfers than players to buy cannot work
-        result = opt.solve_squad(full_pool, cfg, budget=team_value, retain_pool_codes=current_codes,
-                                  min_retain=max(0, 15 - k), must_include_codes=must, exclude_codes=excl,
-                                  objective_col="xpts_horizon_sum")
+        result = _solve_retain_xi(full_pool, cfg, team_value, current_codes, max(0, 15 - k), gw_list, bench_w, bb_play_gw,
+                                  must, excl)
         if result is None:
             continue
         new_squad = result["squad"]
@@ -4852,7 +5005,7 @@ def chain_strip_html(weekly_plan: list | None, first_week: tuple | None, chips_b
 
 def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | None = None, chip_value=None,
                            photo_fn=None, note: str | None = None, max_cards: int = 6, upcoming: list | None = None,
-                           empty_text: str | None = None) -> str:
+                           empty_text: str | None = None, roll_note: dict | None = None) -> str:
     """R2 Patch 5: the moves panel that sits beside the pitch (same look as the pitch cards). Header = GW, chip badge
     (with its value) and banked free-transfer dots; body = OUT -> IN photo cards with net xPts and FREE / -4, or a Roll
     card. More than `max_cards` changes (a Wildcard / Free Hit scenario) -> the first ones plus "N changes"."""
@@ -4887,6 +5040,10 @@ def pitch_moves_panel_html(gw: int, moves: list | None, ft=None, chip: str | Non
         cards.append(f'<div class="mv-more">{len(moves)} changes in total</div>')
     if not moves and empty_text:          # R2 Patch 26: a view that does not apply the plan says where to see it (not a Roll)
         cards.append('<div class="mv-card roll"><div class="mv-sub">' + _h.escape(str(empty_text)) + '</div></div>')
+    elif not moves and roll_note and roll_note.get("move"):      # R3 Patch 13: the best move that fell below the bar
+        cards.append('<div class="mv-card roll"><div class="mv-roll">Roll</div>'
+                     f'<div class="mv-sub">best move {_h.escape(str(roll_note["move"]))} {float(roll_note["net"]):+.1f}, '
+                     f'below the {float(roll_note["bar"]):.1f} bar</div></div>')
     elif not moves:
         cards.append('<div class="mv-card roll"><div class="mv-roll">Roll</div>'
                      '<div class="mv-sub">no move clears the bar</div></div>')
